@@ -16,7 +16,17 @@
     </button>
 
     <div class="sidebar">
-      <div class="sidebar-header">Sermo</div>
+      <div class="sidebar-header">
+        <span>Sermo</span>
+        <button
+          class="add-chat-main-button"
+          type="button"
+          onclick="openAddFriendsMenu()"
+        >
+          +
+        </button>
+      </div>
+
       <div class="list-container">
         <div class="section-title">Gruppen</div>
         <div id="gruppen-liste"></div>
@@ -44,6 +54,37 @@
           <input type="text" placeholder="Nachricht schreiben..." />
         </div>
         <button class="action-button" type="button">Senden</button>
+      </div>
+    </div>
+
+    <div class="modal-overlay modal-hidden" id="add-chat-modal">
+      <div class="modal-box">
+        <h3>Neuen Chat starten</h3>
+        <p>
+          Gib einen Namen für eine DM ein, oder mehrere Namen mit Komma getrennt
+          für eine Gruppe.
+        </p>
+        <input
+          type="text"
+          id="friends-username-input"
+          placeholder="Name(n) eingeben..."
+        />
+        <div class="modal-buttons">
+          <button
+            class="modal-btn cancel-btn"
+            type="button"
+            onclick="closeAddFriendsMenu()"
+          >
+            Abbrechen
+          </button>
+          <button
+            class="modal-btn confirm-btn"
+            type="button"
+            onclick="confirmAddFriends()"
+          >
+            Erstellen
+          </button>
+        </div>
       </div>
     </div>
 

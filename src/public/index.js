@@ -1,4 +1,4 @@
-const debug = false;
+const debug = true;
 
 let chats = null;
 let chats_count = null;
@@ -78,6 +78,40 @@ function onload() {
     });
 }
 
+function openAddFriendsMenu() {
+  if (debug) {
+    console.log("DEBUG: opening addFriensMenu: ");
+  }
+  document.getElementById("add-chat-modal").classList.remove("modal-hidden");
+}
+
+function closeAddFriendsMenu() {
+  if (debug) {
+    console.log("DEBUG: closing addFriensMenu: ");
+  }
+  document.getElementById("add-chat-modal").classList.add("modal-hidden");
+}
+
+function confirmAddFriends() {
+  if (debug) {
+    console.log("DEBUG: adding Friend(s): ");
+  }
+  let friendsusernameinput = document.getElementById(
+    "friends-username-input",
+  ).value;
+  fetch("/api/add_friends", {
+    method: "POST",
+    headers: { "Content-Type": "application.json" },
+    body: JSON.stringify({ cookies }),
+    credentials: "include",
+  })
+    .then((response) => response.json())
+    .then(() => onload())
+    .catch((error) => {
+      alert("user do not exists");
+    });
+}
+
 function changeChat(name) {
   if (debug) {
     console.log("DEBUG: Chat changed: " + name);
@@ -127,5 +161,12 @@ function showAlert(message) {
 function closeAlert() {
   document.getElementById("alert").style.display = "none";
 }
+
+window.addEventListener("click", function (event) {
+  const modal = document.getElementById("add-chat-modal");
+  if (event.target === modal) {
+    closeAddFriendsMenu();
+  }
+});
 
 checkLoginStatus();
