@@ -6,7 +6,7 @@
     <title>Chatty</title>
     <link rel="stylesheet" href="style.css" />
   </head>
-  <body onload="onload()">
+  <body>
     <button
       class="logout-button"
       type="button"
@@ -39,7 +39,7 @@
       </div>
     </div>
 
-    <div id="alert" class="alert-box">
+    <div id="alert" class="alert-box" onclick="closeAlert()">
       <span id="alert-text"
         >Server not reachable. Please try it later Again.</span
       >
