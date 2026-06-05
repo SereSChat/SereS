@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chatty</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body onload="onload()">
+    <div id=""></div>
+    <div class="login">
+        <div id="landr" class="landr">Login</div>
+        <div class="login-f">
+            <div class="input">
+                <input type="text" id="username" placeholder="username">
+                <input type="text" id="email" placeholder="Email">
+                <input type="password" id="password" placeholder="Passwort">
+            </div>
+            <p style="color:red" id="warning"></p>
+            <button onclick="login()" id="login">Login</button>
+            <button onclick="register_redirect()" id="register_redirect">Register</button>
+            <a id="ahaa"></a>
+        </div>
+      </div>
+    </div>
+    
+    <script src="login.js"></script>
+</body>
+</html>
