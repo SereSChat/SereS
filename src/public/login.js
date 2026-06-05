@@ -1,49 +1,20 @@
-const debug = false;
-
 const username_input = document.getElementById("username");
 username_input.style.display = "none";
 
-function onload() {
-  if (debug) {
-    console.log("DEBUG: onload loaded");
-  }
-  let cookies = document.cookie;
-
-  fetch("/api/auth_cookies", {
-    method: "POST",
-    headers: { "Content-Type": "application.json" },
-    body: JSON.stringify({ cookies }),
-    credentials: "include",
-  })
-    .then((response) => response.json())
-    .then((data) => {
-      if (debug) {
-        console.log("DEBUG: respone get auth-cookies");
-      }
-      if (data.success) {
-        window.location.href = "index.html";
-      }
-    });
-}
-
 function login() {
-  if (debug) {
-    console.log("DEBUG: function login loaded");
-  }
   var email = document.getElementById("email").value;
   var password = document.getElementById("password").value;
 
   fetch("/api/login", {
     method: "POST",
-    headers: { "Content-Type": "application.json" },
-    body: JSON.stringify({ email: email, passwd: password }),
-    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ nameomail: email, passwd: password }),
   })
     .then((response) => response.json())
     .then((data) => {
-      if (debug) {
-        console.log("DEBUG: respone get login");
-      }
       if (data.success) {
         window.location.href = "index.html";
       } else {
@@ -52,18 +23,12 @@ function login() {
       }
     })
     .catch((error) => {
-      if (debug) {
-        console.log("DEBUG: login api error");
-      }
       document.getElementById("warning").innerHTML =
         "<h4>Server not reachable. Please try again later.</h4>";
     });
 }
 
 function register_redirect() {
-  if (debug) {
-    console.log("DEBUG: function register redirect loaded");
-  }
   const login_button = document.getElementById("login");
   const main_button = document.getElementById("register_redirect");
 
@@ -81,16 +46,13 @@ function register_redirect() {
 }
 
 function register() {
-  if (debug) {
-    console.log("DEBUG: function register loaded");
-  }
   var username = document.getElementById("username").value;
   var email = document.getElementById("email").value;
   var password = document.getElementById("password").value;
 
   fetch("/api/register", {
     method: "POST",
-    headers: { "Content-Type": "application.json" },
+    headers: { "Content-Type": "application/json", accept: "application/json" },
     body: JSON.stringify({
       username: username,
       email: email,
@@ -98,6 +60,12 @@ function register() {
     }),
   })
     .then((response) => response.json())
+    .then((data) => {
+      if (data.success) {
+        alert("Account Created");
+        window.location.reload();
+      }
+    })
     .catch((error) => {
       document.getElementById("warning").innerHTML =
         "<h4>Server not reachable. Please try again later.</h4>";
