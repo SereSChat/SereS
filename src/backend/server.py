@@ -102,12 +102,15 @@ def login():
             try:
                 if ph.verify(passwd[0], json["passwd"]):
                     username, tid = get_username_and_id(cursor, nameomail)
-                    return {
-                        "message": "Login succesfull!",
-                        "success": True,
-                        "username": username,
-                        "cookie": generate_session_cookie(tid),
-                    }, 200
+                    response = flask.make_response(
+                        {
+                            "message": "Login succesfull!",
+                            "success": True,
+                        }
+                    )
+                    response.set_cookie("sessioncookie", generate_session_cookie(tid))
+                    response.set_cookie("username", username)
+                    return response, 200
                 else:
                     return {"message": "Login not succesfull"}, 400
             except VerifyMismatchError:
@@ -155,10 +158,12 @@ def generate_session_cookie(user_id):
 def auth_session_cookie():
     conn = get_db()
     cursor = conn.cursor()
-    data = flask.request.get_json()
+    sessioncookie = flask.request.cookies.get("sessioncookie")
     cursor.execute(
-        "SELECT expires_at FROM sessions WHERE cookie = ?", (data["cookies"],)
+        "SELECT expires_at FROM sessions WHERE cookie = ?",
+        (sessioncookie,),
     )
+    print("got cookie: ", sessioncookie)
     try:
         expire_date = cursor.fetchone()["expires_at"]
         print(expire_date)
