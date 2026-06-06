@@ -487,6 +487,13 @@ body {
   gap: 8px;
 }
 
+.dropdown-item img {
+  width: 18px !important;
+  height: 18px !important;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
 .dropdown-item:hover {
   background-color: #2a3942;
 }
@@ -497,4 +504,18 @@ body {
 
 .logout-item:hover {
   background-color: rgba(234, 0, 56, 0.1);
+}
+
+.avatar {
+  position: relative;
+  overflow: hidden;
+}
+
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  position: absolute;
+  top: 0;
+  left: 0;
 }

@@ -10,7 +10,8 @@ from argon2.exceptions import VerifyMismatchError
 
 # TODO: add /api/load_chats
 # TODO: add /api/add_friends
-# TODO: add /api/load_usernames with cookie
+# TODO: add /api/get_avatar
+# TODO: add /api/upload_avatar
 
 app = flask.Flask(__name__, static_folder="../public", static_url_path="/")
 DB = os.path.join(os.path.dirname(__file__), "users.db")

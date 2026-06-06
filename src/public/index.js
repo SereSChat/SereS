@@ -2,11 +2,64 @@ const debug = true;
 
 let chats = null;
 let chats_count = null;
+let userImagePath = "";
 
 function onload() {
   if (debug) {
     console.log("DEBUG: onload loaded");
   }
+  load_chats();
+  auth_cookie();
+  load_avatar();
+  load_username();
+}
+
+function load_avatar() {
+  const avatarText = document.getElementById("user-avatar-text");
+  const avatarImg = document.getElementById("user-avatar-img");
+  const username = getCookie("username");
+
+  if (avatarText && avatarImg) {
+    fetch("/api/get_avatar", {
+      method: "GET",
+      credentials: "include",
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("No avatar found");
+        }
+        return response.blob();
+      })
+      .then((imageBlob) => {
+        userImagePath = URL.createObjectURL(imageBlob);
+        avatarImg.src = userImagePath;
+        avatarImg.style.display = "block";
+        avatarText.style.display = "none";
+      })
+      .catch((error) => {
+        if (username) {
+          avatarText.innerText = username.charAt(0).toUpperCase();
+        } else {
+          avatarText.innerText = "?";
+        }
+        avatarText.style.display = "block";
+        avatarImg.style.display = "none";
+      });
+  } else {
+    console.log(
+      "WARNING: 'user-avatar-text' or 'user-avatar-img' was not found in the HTML!",
+    );
+  }
+}
+
+function load_username() {
+  const username = getCookie("username");
+  document.getElementById("my-username-display").innerText = username;
+  document.getElementById("current-chat-name").innerText =
+    "Welcome " + username;
+}
+
+function auth_cookie() {
   fetch("/api/auth_cookie", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -25,34 +78,18 @@ function onload() {
       if (debug) {
         console.log("DEBUG: error onload");
       }
-      showAlert("Server nicht erreichbar. Versuche es später erneut.");
+      showAlert("Server unreachable. Please try again later.");
       console.log(
         "Server not reachable. Please try again later. (cookie failed)",
       ); // only development
       // window.location.href = "login.html";
     })
     .catch((error) => {
-      showAlert("Server nicht erreichbar. Versuche es später erneut.");
+      showAlert("Server unreachable. Please try again later.");
     });
-  fetch("/api/load_usernames", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-  })
-    .then((response) => response.json())
-    .then((data) => {
-      if (data.username) {
-        document.getElementById("my-username-display").innerText =
-          data.username;
-        document.getElementById("dropdown-username-text").innerText =
-          data.username;
-        document.getElementById("user-avatar").innerText = data.username
-          .charAt(0)
-          .toUpperCase();
-        document.getElementById("current-chat-name").innerText =
-          "Wilkommen " + data.username;
-      }
-    });
+}
+
+function load_chats() {
   fetch("/api/load_chats", {
     method: "POST",
     headers: { "Content-Type": "application.json" },
@@ -112,8 +149,89 @@ window.addEventListener("click", function (event) {
   }
 });
 
+function getCookie(name) {
+  const value = `; ${document.cookie}`;
+  const parts = value.split(`; ${name}=`);
+  if (parts.length === 2) {
+    return parts.pop().split(";").shift();
+  }
+  return undefined;
+}
+
 function openSettings() {
-  alert("Einstellungen sind noch nicht verfügbar.");
+  if (debug) {
+    console.log("DEBUG: opening settingsMenu");
+  }
+  document.getElementById("settings-modal").classList.remove("modal-hidden");
+}
+
+function saveSettings() {
+  if (debug) {
+    console.log("DEBUG: saving settings and uploading avatar");
+  }
+
+  const fileInput = document.getElementById("avatar-upload-input");
+  const warningText = document.getElementById("settings-warning");
+
+  if (warningText) warningText.innerText = "";
+
+  if (fileInput.files.length === 0) {
+    closeSettingsMenu();
+    return;
+  }
+
+  const file = fileInput.files[0];
+  const maxSizeBytes = 1 * 1024 * 1024;
+
+  if (file.size > maxSizeBytes) {
+    if (warningText) {
+      warningText.innerText = "File is too large! Maximum size is 1MB.";
+    }
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("avatar", file);
+
+  fetch("/api/upload_avatar", {
+    method: "POST",
+    body: formData,
+    credentials: "include",
+  })
+    .then((response) => response.json())
+    .then((data) => {
+      if (data.success) {
+        alert("Avatar updated successfully!");
+        closeSettingsMenu();
+        onload();
+      } else {
+        if (warningText)
+          warningText.innerText = "Upload failed: " + data.message;
+      }
+    })
+    .catch((error) => {
+      if (debug) console.log("DEBUG: Error uploading avatar", error);
+      if (warningText)
+        warningText.innerText = "Server error. Please try again later.";
+    });
+}
+
+function closeSettingsMenu() {
+  if (debug) {
+    console.log("DEBUG: closing settingsMenu");
+  }
+
+  document.getElementById("avatar-upload-input").value = "";
+  const warningText = document.getElementById("settings-warning");
+  if (warningText) warningText.innerText = "";
+
+  document.getElementById("settings-modal").classList.add("modal-hidden");
+}
+
+function logout() {
+  document.cookie = "username=; max-age=1; path=/;";
+  document.cookie = "sessioncookie=; max-age=1; path=/;";
+  window.location.href = "login.html";
 }
 
 function openAddFriendsMenu() {
@@ -146,7 +264,7 @@ function confirmAddFriends() {
     .then(() => onload())
     .catch((error) => {
       document.getElementById("warning").innerHTML =
-        "<h4>Dieser username existiert nicht oder ist bereits in deinen Freunden.</h4>";
+        "<h4>This username does not exist or is already in your friends list.</h4>";
     });
 }
 
@@ -213,5 +331,29 @@ window.addEventListener("click", function (event) {
 
   if (event.target === modal) {
     closeAddFriendsMenu();
+  }
+});
+
+window.addEventListener("click", function (event) {
+  const trigger = document.querySelector(".user-menu-trigger");
+  const dropdown = document.getElementById("user-dropdown-menu");
+  const modalAddFriend = document.getElementById("add-chat-modal");
+  const modalSettings = document.getElementById("settings-modal");
+
+  if (
+    trigger &&
+    !trigger.contains(event.target) &&
+    dropdown &&
+    !dropdown.contains(event.target)
+  ) {
+    dropdown.classList.add("modal-hidden");
+  }
+
+  if (event.target === modalAddFriend) {
+    closeAddFriendsMenu();
+  }
+
+  if (event.target === modalSettings) {
+    closeSettingsMenu();
   }
 });
