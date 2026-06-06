@@ -2,12 +2,12 @@ const debug = true;
 
 let chats = null;
 let chats_count = null;
+let cookies = document.cookie;
 
 function onload() {
   if (debug) {
     console.log("DEBUG: onload loaded");
   }
-  let cookies = document.cookie;
 
   fetch("/api/auth_cookies", {
     method: "POST",
@@ -28,14 +28,34 @@ function onload() {
       if (debug) {
         console.log("DEBUG: error onload");
       }
-      showAlert("Server not reachable. Please try again later.");
+      showAlert("Server nicht erreichbar. Versuche es später erneut.");
       console.log(
         "Server not reachable. Please try again later. (cookie failed)",
       ); // only development
       // window.location.href = "login.html";
     })
     .catch((error) => {
-      showAlert("Server not reachable. Please try again later.");
+      showAlert("Server nicht erreichbar. Versuche es später erneut.");
+    });
+  fetch("/api/load_usernames", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cookies }),
+    credentials: "include",
+  })
+    .then((response) => response.json())
+    .then((data) => {
+      if (data.username) {
+        document.getElementById("my-username-display").innerText =
+          data.username;
+        document.getElementById("dropdown-username-text").innerText =
+          data.username;
+        document.getElementById("user-avatar").innerText = data.username
+          .charAt(0)
+          .toUpperCase();
+        document.getElementById("current-chat-name").innerText =
+          "Wilkommen " + data.username;
+      }
     });
   fetch("/api/load_chats", {
     method: "POST",
@@ -78,6 +98,29 @@ function onload() {
     });
 }
 
+function toggleUserMenu() {
+  const dropdown = document.getElementById("user-dropdown-menu");
+  dropdown.classList.toggle("modal-hidden");
+}
+
+window.addEventListener("click", function (event) {
+  const trigger = document.querySelector(".user-menu-trigger");
+  const dropdown = document.getElementById("user-dropdown-menu");
+
+  if (
+    trigger &&
+    !trigger.contains(event.target) &&
+    dropdown &&
+    !dropdown.contains(event.target)
+  ) {
+    dropdown.classList.add("modal-hidden");
+  }
+});
+
+function openSettings() {
+  alert("Einstellungen sind noch nicht verfügbar.");
+}
+
 function openAddFriendsMenu() {
   if (debug) {
     console.log("DEBUG: opening addFriensMenu: ");
@@ -108,7 +151,8 @@ function confirmAddFriends() {
     .then((response) => response.json())
     .then(() => onload())
     .catch((error) => {
-      alert("user do not exists");
+      document.getElementById("warning").innerHTML =
+        "<h4>Dieser username existiert nicht oder ist bereits in deinen Freunden.</h4>";
     });
 }
 
@@ -117,6 +161,11 @@ function changeChat(name) {
     console.log("DEBUG: Chat changed: " + name);
   }
   document.getElementById("current-chat-name").innerText = name;
+
+  let inputArea = document.getElementById("chat-input-area");
+  if (inputArea) {
+    inputArea.classList.remove("modal-hidden");
+  }
 
   let groupItem = document.getElementById("group-item");
   if (groupItem) {
@@ -147,7 +196,7 @@ function checkLoginStatus() {
       }
     })
     .catch((error) => {
-      showAlert("Server not reachable. Please try again later.");
+      showAlert("Server nicht erreichbar. Versuche es später erneut.");
     });
 }
 
@@ -170,3 +219,22 @@ window.addEventListener("click", function (event) {
 });
 
 checkLoginStatus();
+
+window.addEventListener("click", function (event) {
+  const trigger = document.querySelector(".user-menu-trigger");
+  const dropdown = document.getElementById("user-dropdown-menu");
+  const modal = document.getElementById("add-chat-modal");
+
+  if (
+    trigger &&
+    !trigger.contains(event.target) &&
+    dropdown &&
+    !dropdown.contains(event.target)
+  ) {
+    dropdown.classList.add("modal-hidden");
+  }
+
+  if (event.target === modal) {
+    closeAddFriendsMenu();
+  }
+});

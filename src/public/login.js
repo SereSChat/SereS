@@ -19,12 +19,12 @@ function login() {
         window.location.href = "index.html";
       } else {
         document.getElementById("warning").innerHTML =
-          "<h4>Login failed, check for typos.</h4>";
+          "<h4>Login fehlgeschlagen, überprüfe deine Eingabe.</h4>";
       }
     })
     .catch((error) => {
       document.getElementById("warning").innerHTML =
-        "<h4>Server not reachable. Please try again later.</h4>";
+        "<h4>Server nicht erreichbar. Versuche es später erneut.</h4>";
     });
 }
 
@@ -33,7 +33,7 @@ function register_redirect() {
   const main_button = document.getElementById("register_redirect");
 
   document.getElementById("ahaa").innerHTML =
-    '<a onclick="gotologin()">Already have an account?</a>';
+    '<a onclick="gotologin()">Hast du schon ein Konto?</a>';
 
   main_button.textContent = "Register";
   main_button.setAttribute("onclick", "register()");
@@ -68,7 +68,7 @@ function register() {
     })
     .catch((error) => {
       document.getElementById("warning").innerHTML =
-        "<h4>Server not reachable. Please try again later.</h4>";
+        "<h4>Server nicht erreichbar. Versuche es später erneut.</h4>";
     });
 }
 

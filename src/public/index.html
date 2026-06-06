@@ -7,14 +7,6 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <button
-      class="logout-button"
-      type="button"
-      onclick="window.location.href = 'login.html'"
-    >
-      Logout
-    </button>
-
     <div class="sidebar">
       <div class="sidebar-header">
         <span>Sermo</span>
@@ -34,22 +26,51 @@
         <div class="section-title">Direktnachrichten</div>
         <div id="dm-list"></div>
       </div>
+
+      <div class="user-menu-container">
+        <div class="user-menu-trigger" onclick="toggleUserMenu()">
+          <div
+            class="avatar"
+            style="background-color: #5865f2"
+            id="user-avatar"
+          >
+            ?
+          </div>
+          <span class="item-name" id="my-username-display">Lädt...</span>
+        </div>
+
+        <div class="user-dropdown modal-hidden" id="user-dropdown-menu">
+          <div class="dropdown-username" id="dropdown-username-text">
+            Lädt ...
+          </div>
+          <hr class="dropdown-divider" />
+          <a href="#" class="dropdown-item" onclick="openSettings()"
+            >⚙️ Einstellungen</a
+          >
+          <a
+            href="#"
+            class="dropdown-item logout-item"
+            onclick="window.location.href = 'login.html'"
+            >Ausloggen</a
+          >
+        </div>
+      </div>
     </div>
 
     <div id="alert" class="alert-box" onclick="closeAlert()">
       <span id="alert-text"
-        >Server not reachable. Please try it later Again.</span
+        >Server nicht erreichbar. Versuche es später erneut.</span
       >
     </div>
 
     <div class="main-chat">
       <div class="chat-header">
-        <span id="current-chat-name">Testgruppe</span>
+        <span id="current-chat-name">Wilkommen Lädt...</span>
       </div>
 
       <div class="messages-container"></div>
 
-      <div class="input-container">
+      <div class="input-container modal-hidden" id="chat-input-area">
         <div class="input-box">
           <input type="text" placeholder="Nachricht schreiben..." />
         </div>
@@ -69,6 +90,7 @@
           id="friends-username-input"
           placeholder="Name(n) eingeben..."
         />
+        <h4 style="color: red" id="warning"></h4>
         <div class="modal-buttons">
           <button
             class="modal-btn cancel-btn"

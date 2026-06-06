@@ -1,6 +1,7 @@
 # TODO: add /api/auth_cookies
 # TODO: add /api/load_chats
 # TODO: add /api/add_friends
+# TODO: add /api/load_usernames with cookie
 import flask
 import sqlite3
 import os
