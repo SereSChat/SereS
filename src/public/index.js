@@ -2,17 +2,14 @@ const debug = true;
 
 let chats = null;
 let chats_count = null;
-let cookies = document.cookie;
 
 function onload() {
   if (debug) {
     console.log("DEBUG: onload loaded");
   }
-
-  fetch("/api/auth_cookies", {
+  fetch("/api/auth_cookie", {
     method: "POST",
-    headers: { "Content-Type": "application.json" },
-    body: JSON.stringify({ cookies }),
+    headers: { "Content-Type": "application/json" },
     credentials: "include",
   })
     .then((response) => response.json())
@@ -40,7 +37,6 @@ function onload() {
   fetch("/api/load_usernames", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cookies }),
     credentials: "include",
   })
     .then((response) => response.json())
@@ -60,7 +56,6 @@ function onload() {
   fetch("/api/load_chats", {
     method: "POST",
     headers: { "Content-Type": "application.json" },
-    body: JSON.stringify({ cookies }),
     credentials: "include",
   })
     .then((response) => response.json())
@@ -145,7 +140,6 @@ function confirmAddFriends() {
   fetch("/api/add_friends", {
     method: "POST",
     headers: { "Content-Type": "application.json" },
-    body: JSON.stringify({ cookies }),
     credentials: "include",
   })
     .then((response) => response.json())
@@ -185,21 +179,6 @@ function switchToGroup() {
   document.getElementById("group-item").classList.add("active");
 }
 
-function checkLoginStatus() {
-  fetch("/api/check-auth")
-    .then((response) => response.json())
-    .then((data) => {
-      if (data.loggedIn) {
-        console.log("");
-      } else {
-        showAlert("You are not logged in.");
-      }
-    })
-    .catch((error) => {
-      showAlert("Server nicht erreichbar. Versuche es später erneut.");
-    });
-}
-
 function showAlert(message) {
   const alertBox = document.getElementById("alert");
   const alertText = document.getElementById("alert-text");
@@ -217,8 +196,6 @@ window.addEventListener("click", function (event) {
     closeAddFriendsMenu();
   }
 });
-
-checkLoginStatus();
 
 window.addEventListener("click", function (event) {
   const trigger = document.querySelector(".user-menu-trigger");
