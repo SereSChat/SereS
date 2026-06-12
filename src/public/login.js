@@ -19,12 +19,12 @@ function login() {
         window.location.href = "index.html";
       } else {
         document.getElementById("warning").innerHTML =
-          "<h4>Login failed, check for typos.</h4>";
+          "<h4>Login failed, check your credentials.</h4>";
       }
     })
     .catch((error) => {
       document.getElementById("warning").innerHTML =
-        "<h4>Server not reachable. Please try again later.</h4>";
+        "<h4>Server unreachable. Please try again later.</h4>";
     });
 }
 
@@ -68,7 +68,7 @@ function register() {
     })
     .catch((error) => {
       document.getElementById("warning").innerHTML =
-        "<h4>Server not reachable. Please try again later.</h4>";
+        "<h4>Server unreachable. Please try again later.</h4>";
     });
 }
 

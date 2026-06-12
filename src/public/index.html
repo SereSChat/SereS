@@ -1,20 +1,13 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Chatty</title>
+    <title>Sermo</title>
+    <link rel="icon" type="image/png" href="assets/favicon.png" />
     <link rel="stylesheet" href="style.css" />
   </head>
-  <body>
-    <button
-      class="logout-button"
-      type="button"
-      onclick="window.location.href = 'login.html'"
-    >
-      Logout
-    </button>
-
+  <body onload="onload()">
     <div class="sidebar">
       <div class="sidebar-header">
         <span>Sermo</span>
@@ -28,61 +21,132 @@
       </div>
 
       <div class="list-container">
-        <div class="section-title">Gruppen</div>
+        <div class="section-title">Groups</div>
         <div id="gruppen-liste"></div>
 
-        <div class="section-title">Direktnachrichten</div>
+        <div class="section-title">Direct Messages</div>
         <div id="dm-list"></div>
+      </div>
+
+      <div class="user-menu-container">
+        <div class="user-menu-trigger" onclick="toggleUserMenu()">
+          <div
+            class="avatar"
+            style="background-color: #5865f2"
+            id="user-avatar"
+          >
+            <span id="user-avatar-text">Loading</span>
+            <img
+              id="user-avatar-img"
+              src=""
+              alt="Avatar"
+              style="display: none"
+            />
+          </div>
+          <span class="item-name" id="my-username-display">Loading...</span>
+        </div>
+
+        <div class="user-dropdown modal-hidden" id="user-dropdown-menu">
+          <hr class="dropdown-divider" />
+
+          <a href="#" class="dropdown-item" onclick="openSettings()">
+            ⚙️ Settings
+          </a>
+
+          <hr class="dropdown-divider" />
+
+          <a
+            href="https://discord.gg/h45c6kzCRd"
+            class="dropdown-item"
+            target="_blank"
+          >
+            <img src="assets/discord.png" alt="Discord Logo" />
+            <span>Visit us on Discord</span>
+          </a>
+
+          <hr class="dropdown-divider" />
+
+          <a href="#" class="dropdown-item logout-item" onclick="logout()">
+            Logout
+          </a>
+        </div>
+        <div class="modal-overlay modal-hidden" id="settings-modal">
+          <div class="modal-box">
+            <h3>⚙️ Settings</h3>
+
+            <p>Upload a new profile picture (Max 1MB):</p>
+
+            <input type="file" id="avatar-upload-input" accept="image/*" />
+
+            <h4 style="color: red" id="settings-warning"></h4>
+
+            <div class="modal-buttons">
+              <button
+                class="modal-btn cancel-btn"
+                type="button"
+                onclick="closeSettingsMenu()"
+              >
+                Cancel
+              </button>
+              <button
+                class="modal-btn confirm-btn"
+                type="button"
+                onclick="saveSettings()"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
     <div id="alert" class="alert-box" onclick="closeAlert()">
-      <span id="alert-text"
-        >Server not reachable. Please try it later Again.</span
-      >
+      <span id="alert-text">Server unreachable. Please try again later.</span>
     </div>
 
     <div class="main-chat">
       <div class="chat-header">
-        <span id="current-chat-name">Testgruppe</span>
+        <span id="current-chat-name">Welcome Loading...</span>
       </div>
 
       <div class="messages-container"></div>
 
-      <div class="input-container">
+      <div class="input-container modal-hidden" id="chat-input-area">
         <div class="input-box">
-          <input type="text" placeholder="Nachricht schreiben..." />
+          <input type="text" placeholder="Type a message..." />
         </div>
-        <button class="action-button" type="button">Senden</button>
+        <button class="action-button" type="button">Send</button>
       </div>
     </div>
 
     <div class="modal-overlay modal-hidden" id="add-chat-modal">
       <div class="modal-box">
-        <h3>Neuen Chat starten</h3>
+        <h3>Start New Chat</h3>
         <p>
-          Gib einen Namen für eine DM ein, oder mehrere Namen mit Komma getrennt
-          für eine Gruppe.
+          Enter a name for a DM, or multiple names separated by commas for a
+          group.
         </p>
         <input
           type="text"
           id="friends-username-input"
-          placeholder="Name(n) eingeben..."
+          placeholder="Enter name(s)..."
         />
+        <h4 style="color: red" id="warning"></h4>
         <div class="modal-buttons">
           <button
             class="modal-btn cancel-btn"
             type="button"
             onclick="closeAddFriendsMenu()"
           >
-            Abbrechen
+            Cancel
           </button>
           <button
             class="modal-btn confirm-btn"
             type="button"
             onclick="confirmAddFriends()"
           >
-            Erstellen
+            Create
           </button>
         </div>
       </div>
