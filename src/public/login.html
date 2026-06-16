@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Sermo</title>
+    <title>SereS</title>
     <link rel="icon" type="image/png" href="assets/favicon.png" />
     <link rel="stylesheet" href="style.css">
 </head>
@@ -16,6 +16,17 @@
                 <input type="text" id="username" placeholder="Username">
                 <input type="text" id="email" placeholder="Email or Username">
                 <input type="password" id="password" placeholder="Password">
+            </div>
+            <div class="tos-container" id="tos-container" style="display: none;">
+                <input type="checkbox" id="tos-checkbox" onchange="toggleRegisterButton()">
+                <label for="tos-checkbox">I have read and agree to the <a href="#" onclick="openToS(); return false;">Terms of Service</a></label>
+            </div>
+            <div id="tos-modal" class="modal">
+                <div class="modal-content">
+                    <span class="close-btn" onclick="closeToS()">&times;</span>
+                    <h2>Terms of Service</h2>
+                    <embed src="assets/tos.pdf" type="application/pdf" />
+                </div>
             </div>
             <p style="color:red" id="warning"></p>
             <button onclick="login()" id="login">Login</button>

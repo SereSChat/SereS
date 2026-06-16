@@ -43,6 +43,9 @@ function register_redirect() {
 
   login_button.style.display = "none";
   username_input.style.display = "block";
+
+  document.getElementById("tos-container").style.display = "flex";
+  main_button.disabled = !document.getElementById("tos-checkbox").checked;
 }
 
 function register() {
@@ -86,4 +89,28 @@ function gotologin() {
 
   login_button.style.display = "block";
   username_input.style.display = "none";
+
+  document.getElementById("tos-container").style.display = "none";
+  main_button.disabled = false;
 }
+
+function toggleRegisterButton() {
+  const checkbox = document.getElementById("tos-checkbox");
+  const registerBtn = document.getElementById("register_redirect");
+  registerBtn.disabled = !checkbox.checked;
+}
+
+function openToS() {
+  document.getElementById("tos-modal").style.display = "flex";
+}
+
+function closeToS() {
+  document.getElementById("tos-modal").style.display = "none";
+}
+
+window.onclick = function (event) {
+  const modal = document.getElementById("tos-modal");
+  if (event.target === modal) {
+    modal.style.display = "none";
+  }
+};
