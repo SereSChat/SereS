@@ -13,6 +13,11 @@ body {
   overflow: hidden;
 }
 
+body.bright-body {
+  background-color: #f0f2f5;
+  color: #111b21;
+}
+
 .login {
   display: flex;
   flex-direction: column;
@@ -26,6 +31,12 @@ body {
   margin: auto;
 }
 
+.login.bright-login {
+  background-color: #ffffff;
+  border: 1px solid #e1e9eb;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
 .sidebar {
   width: 300px;
   background-color: #202c33;
@@ -33,6 +44,11 @@ body {
   flex-direction: column;
   flex-shrink: 0;
   border-right: 1px solid #2f3b43;
+}
+
+.sidebar.bright-sidebar {
+  background-color: #ffffff;
+  border-right: 1px solid #e1e9eb;
 }
 
 .sidebar-header {
@@ -46,12 +62,20 @@ body {
   position: relative;
 }
 
+.sidebar-header.bright-sidebar-header {
+  border-bottom: 1px solid #e1e9eb;
+}
+
 .section-title {
   font-size: 0.75rem;
   text-transform: uppercase;
   color: #8696a0;
   padding: 16px 16px 8px 16px;
   letter-spacing: 0.5px;
+}
+
+.section-title.bright-section-title {
+  color: #667781;
 }
 
 .list-container {
@@ -73,6 +97,11 @@ body {
   background-color: #2a3942;
 }
 
+.list-item.bright-list-item:hover,
+.list-item.bright-list-item.bright-active {
+  background-color: #f0f2f5;
+}
+
 .avatar {
   width: 38px;
   height: 38px;
@@ -85,6 +114,13 @@ body {
   color: #ffffff;
   font-size: 0.9rem;
   flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.avatar.bright-avatar {
+  background-color: #53bdeb;
+  color: #ffffff;
 }
 
 .item-info {
@@ -98,9 +134,17 @@ body {
   font-size: 0.95rem;
 }
 
+.item-name.bright-item-name {
+  color: #111b21;
+}
+
 .item-status {
   font-size: 0.8rem;
   color: #8696a0;
+}
+
+.item-status.bright-item-status {
+  color: #667781;
 }
 
 .landr {
@@ -112,6 +156,11 @@ body {
   font-weight: bold;
   font-size: 1.2rem;
   border-bottom: 1px solid #2f3b43;
+}
+
+.landr.bright-landr {
+  background-color: #f0f2f5;
+  border-bottom: 1px solid #e1e9eb;
 }
 
 .messages-container {
@@ -131,12 +180,20 @@ body {
   gap: 12px;
 }
 
+.input-container.bright-input-container {
+  background-color: #f0f2f5;
+}
+
 .input-box {
   background-color: #2a3942;
   border-radius: 8px;
   padding: 9px 12px;
   display: flex;
   flex-grow: 1;
+}
+
+.input-box.bright-input-box {
+  background-color: #ffffff;
 }
 
 .input-box input {
@@ -148,8 +205,16 @@ body {
   outline: none;
 }
 
+.input-box.bright-input-box input {
+  color: #111b21;
+}
+
 .input-box input::placeholder {
   color: #8696a0;
+}
+
+.input-box.bright-input-box input::placeholder {
+  color: #667781;
 }
 
 .action-button {
@@ -166,6 +231,15 @@ body {
 }
 
 .action-button:hover {
+  background-color: #008f72;
+}
+
+.action-button.bright-action-button {
+  background-color: #00a884;
+  color: #ffffff;
+}
+
+.action-button.bright-action-button:hover {
   background-color: #008f72;
 }
 
@@ -189,6 +263,15 @@ body {
   background-color: #c2002f;
 }
 
+.logout-button.bright-logout-button {
+  background-color: #ea0038;
+  color: #ffffff;
+}
+
+.logout-button.bright-logout-button:hover {
+  background-color: #c2002f;
+}
+
 .main-chat {
   flex-grow: 1;
   display: flex;
@@ -196,6 +279,11 @@ body {
   background-color: #0b141a;
   background-image: radial-gradient(rgba(32, 44, 51, 0.4) 1px, transparent 0);
   background-size: 24px 24px;
+}
+
+.main-chat.bright-main-chat {
+  background-color: #efeae2;
+  background-image: radial-gradient(rgba(0, 0, 0, 0.08) 1px, transparent 0);
 }
 
 .chat-header {
@@ -206,6 +294,11 @@ body {
   padding: 0 16px;
   font-weight: bold;
   border-bottom: 1px solid #2f3b43;
+}
+
+.chat-header.bright-chat-header {
+  background-color: #f0f2f5;
+  border-bottom: 1px solid #e1e9eb;
 }
 
 .alert-box {
@@ -222,6 +315,11 @@ body {
   z-index: 1000;
   cursor: pointer;
   animation: moveUpDown 4s linear forwards;
+}
+
+.alert-box.bright-alert-box {
+  background-color: #ea0038;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
 }
 
 @keyframes moveUpDown {
@@ -244,6 +342,14 @@ body {
 
 #ahaa a:hover {
   color: #0b7dda;
+}
+
+#ahaa.bright-ahaa a {
+  color: #0066cc;
+}
+
+#ahaa.bright-ahaa a:hover {
+  color: #004499;
 }
 
 .login-f {
@@ -271,12 +377,22 @@ body {
   transition: border-color 0.2s;
 }
 
+.login-f.bright-login-f input {
+  background-color: #f0f2f5;
+  border: 1px solid #e1e9eb;
+  color: #111b21;
+}
+
 .login-f input:focus {
   border-color: #00a884;
 }
 
 .login-f input::placeholder {
   color: #8696a0;
+}
+
+.login-f.bright-login-f input::placeholder {
+  color: #667781;
 }
 
 .login-f button {
@@ -301,6 +417,11 @@ body {
   background-color: transparent;
   color: #00a884;
   border: 1px solid #2f3b43;
+}
+
+.login-f.bright-login-f button:last-of-type {
+  border: 1px solid #e1e9eb;
+  color: #00a884;
 }
 
 .login-f button:hover {
@@ -350,6 +471,11 @@ body {
   background-color: #008f72 !important;
 }
 
+.add-chat-main-button.bright-add-chat-main-button {
+  background-color: #00a884 !important;
+  color: #ffffff !important;
+}
+
 .modal-overlay {
   position: fixed !important;
   top: 0;
@@ -361,6 +487,10 @@ body {
   display: flex;
   justify-content: center;
   align-items: center;
+}
+
+.modal-overlay.bright-modal-overlay {
+  background-color: rgba(255, 255, 255, 0.85);
 }
 
 .modal-hidden {
@@ -378,10 +508,19 @@ body {
   gap: 16px;
 }
 
+.modal-box.bright-modal-box {
+  background-color: #ffffff !important;
+  box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+}
+
 .modal-box h3 {
   color: #e9edef !important;
   font-size: 1.2rem;
   margin: 0;
+}
+
+.modal-box.bright-modal-box h3 {
+  color: #111b21 !important;
 }
 
 .modal-box p {
@@ -389,6 +528,10 @@ body {
   font-size: 0.85rem;
   line-height: 1.4;
   margin: 0;
+}
+
+.modal-box.bright-modal-box p {
+  color: #667781 !important;
 }
 
 .modal-box input {
@@ -399,6 +542,12 @@ body {
   border-radius: 8px;
   font-size: 0.95rem;
   outline: none;
+}
+
+.modal-box.bright-modal-box input {
+  background-color: #f0f2f5 !important;
+  border: 1px solid #e1e9eb !important;
+  color: #111b21 !important;
 }
 
 .modal-box input:focus {
@@ -426,6 +575,11 @@ body {
   color: #ea0038 !important;
 }
 
+.cancel-btn.bright-cancel-btn {
+  background-color: #f0f2f5 !important;
+  color: #ea0038 !important;
+}
+
 .confirm-btn {
   background-color: #00a884 !important;
   color: #ffffff !important;
@@ -437,6 +591,11 @@ body {
   background-color: #2a3942;
   border-top: 1px solid #2f3b43;
   margin-top: auto;
+}
+
+.user-menu-container.bright-user-menu-container {
+  background-color: #f0f2f5;
+  border-top: 1px solid #e1e9eb;
 }
 
 .user-menu-trigger {
@@ -462,6 +621,12 @@ body {
   overflow: hidden;
 }
 
+.user-dropdown.bright-user-dropdown {
+  background-color: #ffffff;
+  border: 1px solid #e1e9eb;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
+}
+
 .dropdown-username {
   padding: 12px 16px;
   font-weight: bold;
@@ -470,10 +635,19 @@ body {
   background-color: #182229;
 }
 
+.dropdown-username.bright-dropdown-username {
+  color: #111b21;
+  background-color: #f0f2f5;
+}
+
 .dropdown-divider {
   border: none;
   border-top: 1px solid #2f3b43;
   margin: 0;
+}
+
+.dropdown-divider.bright-dropdown-divider {
+  border-top: 1px solid #e1e9eb;
 }
 
 .dropdown-item {
@@ -487,6 +661,10 @@ body {
   gap: 8px;
 }
 
+.dropdown-item.bright-dropdown-item {
+  color: #111b21;
+}
+
 .dropdown-item img {
   width: 18px !important;
   height: 18px !important;
@@ -498,17 +676,16 @@ body {
   background-color: #2a3942;
 }
 
+.dropdown-item.bright-dropdown-item:hover {
+  background-color: #f0f2f5;
+}
+
 .logout-item {
   color: #ea0038;
 }
 
 .logout-item:hover {
   background-color: rgba(234, 0, 56, 0.1);
-}
-
-.avatar {
-  position: relative;
-  overflow: hidden;
 }
 
 .avatar img {
@@ -529,6 +706,10 @@ body {
   font-family: sans-serif;
   font-size: 14px;
   color: #fff;
+}
+
+.tos-container.bright-tos-container {
+  color: #111b21;
 }
 
 .tos-container input[type="checkbox"] {
@@ -588,6 +769,10 @@ button:disabled {
   align-items: center;
 }
 
+.modal.bright-modal {
+  background-color: rgba(255, 255, 255, 0.6);
+}
+
 .modal-content {
   background-color: #ffffff;
   width: 100vw;
@@ -599,6 +784,11 @@ button:disabled {
   color: #333333;
   display: flex;
   flex-direction: column;
+}
+
+.modal-content.bright-modal-content {
+  background-color: #ffffff;
+  color: #333333;
 }
 
 .modal-content h2 {
