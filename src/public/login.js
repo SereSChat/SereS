@@ -114,3 +114,64 @@ window.onclick = function (event) {
     modal.style.display = "none";
   }
 };
+
+function getCookie(name) {
+  let matches = document.cookie.match(
+    new RegExp(
+      "(?:^|; )" +
+        name.replace(/([\.$?*|{}\(\)\[\]\\\/\+^])/g, "\\$1") +
+        "=([^;]*)",
+    ),
+  );
+  return matches ? decodeURIComponent(matches[1]) : undefined;
+}
+
+function applyTheme() {
+  const isBright = getCookie("theme") === "bright";
+
+  document.body.classList.toggle("bright-body", isBright);
+
+  const loginBox = document.querySelector(".login");
+  if (loginBox) loginBox.classList.toggle("bright-login", isBright);
+
+  const landr = document.querySelector(".landr");
+  if (landr) landr.classList.toggle("bright-landr", isBright);
+
+  const loginF = document.querySelector(".login-f");
+  if (loginF) loginF.classList.toggle("bright-login-f", isBright);
+
+  const ahaa = document.querySelector("#ahaa");
+  if (ahaa) ahaa.classList.toggle("bright-ahaa", isBright);
+
+  const tosContainer = document.querySelector(".tos-container");
+  if (tosContainer)
+    tosContainer.classList.toggle("bright-tos-container", isBright);
+}
+
+function toggleTheme() {
+  const currentTheme = getCookie("theme");
+  const newTheme = currentTheme === "bright" ? "dark" : "bright";
+  document.cookie = "theme=" + newTheme + "; path=/; max-age=31536000";
+  applyTheme();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const toggleBtn = document.createElement("button");
+  toggleBtn.innerText = "🌓 Mode";
+  toggleBtn.style.position = "absolute";
+  toggleBtn.style.top = "10px";
+  toggleBtn.style.right = "16px";
+  toggleBtn.style.zIndex = "1000";
+  toggleBtn.style.padding = "8px 14px";
+  toggleBtn.style.borderRadius = "6px";
+  toggleBtn.style.cursor = "pointer";
+  toggleBtn.style.fontWeight = "600";
+  toggleBtn.style.border = "1px solid #2f3b43";
+  toggleBtn.style.backgroundColor = "#2a3942";
+  toggleBtn.style.color = "#ffffff";
+
+  toggleBtn.onclick = toggleTheme;
+  document.body.appendChild(toggleBtn);
+
+  applyTheme();
+});

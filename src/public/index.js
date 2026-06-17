@@ -357,3 +357,135 @@ window.addEventListener("click", function (event) {
     closeSettingsMenu();
   }
 });
+
+function getCookie(name) {
+  let matches = document.cookie.match(
+    new RegExp(
+      "(?:^|; )" +
+        name.replace(/([\.$?*|{}\(\)\[\]\\\/\+^])/g, "\\$1") +
+        "=([^;]*)",
+    ),
+  );
+  return matches ? decodeURIComponent(matches[1]) : undefined;
+}
+
+function applyTheme() {
+  const isBright = getCookie("theme") === "bright";
+
+  document.body.classList.toggle("bright-body", isBright);
+
+  const sidebar = document.querySelector(".sidebar");
+  if (sidebar) sidebar.classList.toggle("bright-sidebar", isBright);
+
+  const sidebarHeader = document.querySelector(".sidebar-header");
+  if (sidebarHeader)
+    sidebarHeader.classList.toggle("bright-sidebar-header", isBright);
+
+  const mainChat = document.querySelector(".main-chat");
+  if (mainChat) mainChat.classList.toggle("bright-main-chat", isBright);
+
+  const chatHeader = document.querySelector(".chat-header");
+  if (chatHeader) chatHeader.classList.toggle("bright-chat-header", isBright);
+
+  const inputContainer = document.querySelector(".input-container");
+  if (inputContainer)
+    inputContainer.classList.toggle("bright-input-container", isBright);
+
+  const inputBox = document.querySelector(".input-box");
+  if (inputBox) inputBox.classList.toggle("bright-input-box", isBright);
+
+  const userMenuContainer = document.querySelector(".user-menu-container");
+  if (userMenuContainer)
+    userMenuContainer.classList.toggle("bright-user-menu-container", isBright);
+
+  const userDropdown = document.querySelector(".user-dropdown");
+  if (userDropdown)
+    userDropdown.classList.toggle("bright-user-dropdown", isBright);
+
+  const dropdownUsername = document.querySelector(".dropdown-username");
+  if (dropdownUsername)
+    dropdownUsername.classList.toggle("bright-dropdown-username", isBright);
+
+  const addChatBtn = document.querySelector(".add-chat-main-button");
+  if (addChatBtn)
+    addChatBtn.classList.toggle("bright-add-chat-main-button", isBright);
+
+  document
+    .querySelectorAll(".section-title")
+    .forEach((el) => el.classList.toggle("bright-section-title", isBright));
+  document
+    .querySelectorAll(".list-item")
+    .forEach((el) => el.classList.toggle("bright-list-item", isBright));
+  document
+    .querySelectorAll(".item-name")
+    .forEach((el) => el.classList.toggle("bright-item-name", isBright));
+  document
+    .querySelectorAll(".item-status")
+    .forEach((el) => el.classList.toggle("bright-item-status", isBright));
+  document
+    .querySelectorAll(".dropdown-divider")
+    .forEach((el) => el.classList.toggle("bright-dropdown-divider", isBright));
+  document
+    .querySelectorAll(".dropdown-item")
+    .forEach((el) => el.classList.toggle("bright-dropdown-item", isBright));
+  document
+    .querySelectorAll(".modal-overlay")
+    .forEach((el) => el.classList.toggle("bright-modal-overlay", isBright));
+  document
+    .querySelectorAll(".modal-box")
+    .forEach((el) => el.classList.toggle("bright-modal-box", isBright));
+  document
+    .querySelectorAll(".cancel-btn")
+    .forEach((el) => el.classList.toggle("bright-cancel-btn", isBright));
+  document
+    .querySelectorAll(".modal")
+    .forEach((el) => el.classList.toggle("bright-modal", isBright));
+  document
+    .querySelectorAll(".modal-content")
+    .forEach((el) => el.classList.toggle("bright-modal-content", isBright));
+}
+
+function toggleTheme() {
+  const currentTheme = getCookie("theme");
+  const newTheme = currentTheme === "bright" ? "dark" : "bright";
+  document.cookie = "theme=" + newTheme + "; path=/; max-age=31536000";
+  applyTheme();
+}
+
+function addThemeOptionToSettings() {
+  const modalBox = document.querySelector("#settings-modal .modal-box");
+  if (modalBox) {
+    const themeSection = document.createElement("div");
+    themeSection.style.marginTop = "15px";
+    themeSection.style.borderTop = "1px solid #2f3b43";
+    themeSection.style.paddingTop = "15px";
+
+    const label = document.createElement("p");
+    label.innerText = "App Design:";
+    themeSection.appendChild(label);
+
+    const themeBtn = document.createElement("button");
+    themeBtn.type = "button";
+    themeBtn.innerText = "🌓 Switch Light/Dark Mode";
+    themeBtn.style.width = "100%";
+    themeBtn.style.padding = "10px";
+    themeBtn.style.borderRadius = "8px";
+    themeBtn.style.cursor = "pointer";
+    themeBtn.style.fontWeight = "bold";
+    themeBtn.style.border = "1px solid #2f3b43";
+    themeBtn.style.backgroundColor = "#2a3942";
+    themeBtn.style.color = "#ffffff";
+
+    themeBtn.onclick = toggleTheme;
+
+    themeSection.appendChild(themeBtn);
+
+    const buttonsDiv = modalBox.querySelector(".modal-buttons");
+    modalBox.insertBefore(themeSection, buttonsDiv);
+  }
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  applyTheme();
+  addThemeOptionToSettings();
+});
