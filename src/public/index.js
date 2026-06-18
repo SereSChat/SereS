@@ -101,7 +101,7 @@ function load_chats() {
     .then((response) => response.json())
     .then((data) => {
       chats = data.chats;
-      chatsCount = chats.length;
+      chats_count = chats.length;
 
       let dmList = document.getElementById("dm-list");
       dmList.innerHTML = "";
@@ -109,26 +109,25 @@ function load_chats() {
       for (let i = 0; i < chats.length; i++) {
         let currentChat = chats[i];
 
-        for (let name in currentChat) {
-          let username = name;
-          let lastMessage = currentChat[name];
-          let chatHtml =
-            '<div class="list-item" onclick="changeChat(\'' +
-            username +
-            "')\">" +
-            '<div class="avatar" style="background-color: #5865f2">TC</div>' +
-            '<div class="item-info">' +
-            '<span class="item-name">' +
-            username +
-            "</span>" +
-            '<span class="item-status">' +
-            lastMessage +
-            "</span>" +
-            "</div>" +
-            "</div>";
+        let chatHtml =
+          '<div class="list-item" onclick="changeChat(\'' +
+          username +
+          "')\">" +
+          '<div class="avatar" style="background-color: #5865f2">TC</div>' +
+          '<div class="item-info">' +
+          '<span class="item-name">' +
+          username +
+          "</span>" +
+          '<span class="item-status">' +
+          lastMessage +
+          "</span>" +
+          "</div>" +
+          '<button class="delete-chat-btn" type="button" onclick="remove_chat(\'' +
+          username +
+          "', event)\">×</button>" +
+          "</div>";
 
-          dmList.innerHTML = dmList.innerHTML + chatHtml;
-        }
+        dmList.innerHTML = dmList.innerHTML + chatHtml;
       }
     });
 }
