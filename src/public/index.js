@@ -12,6 +12,9 @@ function onload() {
   auth_cookie();
   load_avatar();
   load_username();
+  setInterval(() => {
+    load_chats();
+  }, 3000);
 }
 
 function load_avatar() {
