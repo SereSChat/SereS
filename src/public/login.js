@@ -65,7 +65,7 @@ function register() {
     .then((response) => response.json())
     .then((data) => {
       if (data.success) {
-        alert("Account Created");
+        alert("Account created");
         window.location.reload();
       }
     })

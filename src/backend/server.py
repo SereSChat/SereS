@@ -3,23 +3,25 @@ from flask import g
 import sqlite3
 import datetime
 import os
+import json
 import secrets
 import uuid
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
 # TODO: add /api/load_chats
-# TODO: add /api/add_friends
 # TODO: add /api/get_avatar
 # TODO: add /api/upload_avatar
 
 app = flask.Flask(__name__, static_folder="../public", static_url_path="/")
+CHATS = os.path.join(os.path.dirname(__file__), "chats")
 DB = os.path.join(os.path.dirname(__file__), "users.db")
+FRIENDS = os.path.join(os.path.dirname(__file__), "friends")
 ph = PasswordHasher(time_cost=4)
 
 
 def init_db():
-    conn = sqlite3.connect(DB)
+    conn = get_db()
     cursor = conn.cursor()
     cursor.execute(
         "CREATE TABLE IF NOT EXISTS users (id VARCHAR(255) PRIMARY KEY, email VARCHAR(255), username VARCHAR(255), passwd TEXT)"
@@ -121,6 +123,67 @@ def login():
     else:
         return {"message": "Login not succesfull, missing Arguments"}, 400
 
+@app.route("/api/logout", methods=["POST"])
+def logout():
+    if not flask.request.cookies.get("sessioncookie"):
+        return {"message": "Logout not succesfull, no sessioncookie"}, 400
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM sessions WHERE cookie = ?", (flask.request.cookies.get("sessioncookie"),))
+        conn.commit()
+    except Exception as e:
+        print(e)
+        return {"message": "Logout not succesfull, internal error"}, 400
+    response = flask.make_response(
+        {
+            "message": "Logout succesfull!",
+            "success": True,
+        }
+    )
+    response.set_cookie("sessioncookie", "")
+    response.set_cookie("username", "")
+    
+    return response, 200
+
+@app.route("/api/add_friend", methods=["POST"]) # TODO: add a function which asks the adding user to accept
+def add_friend():
+    sessioncookie = flask.request.cookies.get("sessioncookie")
+    if not sessioncookie:
+        return {"message": "No sessioncookie provided"}, 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id FROM sessions WHERE cookie = ?",
+        (sessioncookie,),
+    )
+    try:
+        user_id = cursor.fetchone()["user_id"]
+    except Exception as e:
+        print(e)
+        return {"message": "Invalid sessioncookie"}, 400
+    reqjson = flask.request.get_json()
+    friend_username = reqjson["friend_username"]
+    cursor.execute("SELECT id FROM users WHERE username = ?", (friend_username,))
+    try:
+        friend_id = cursor.fetchone()["id"]
+    except Exception as e:
+        print(e)
+        return {"message": "Friend username not found"}, 400
+    try:
+        with open(os.path.join(FRIENDS, user_id + ".json"), "x") as f:
+            json.dump({"friends": [friend_id]}, f)
+    except FileExistsError:
+        with open(os.path.join(FRIENDS, user_id + ".json"), "r+") as f:
+            data = json.load(f)
+            if friend_id in data["friends"]:
+                return {"message": "Friend already added"}, 400
+            data["friends"].append(friend_id)
+            f.seek(0)
+            json.dump(data, f)
+            f.truncate()
+    return {"message": "Friend added successfully!", "success": True}, 200
+
 
 def get_username_and_id(cursor, nameomail):
     if "@" in nameomail:
@@ -144,7 +207,7 @@ def generate_session_cookie(user_id):
     cookie = str(secrets.token_urlsafe(16))
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO sessions (id, cookie, user_id, expires_at, created_at) VALUES (?, ?, ?, datetime('now'), datetime('now', '+1 year'))",
+        "INSERT INTO sessions (id, cookie, user_id, expires_at, created_at) VALUES (?, ?, ?, datetime('now', '+1 year'), datetime('now'))",
         (
             str(uuid.uuid4()),
             cookie,
@@ -170,7 +233,7 @@ def auth_session_cookie():
         print(expire_date)
     except Exception:
         return {"message": "Cookie invalid"}, 400
-    if datetime.datetime.now() > expire_date:
+    if datetime.datetime.now() < expire_date:
         return {"message": "Cookie valid", "success": True}, 200
     else:
         return {"message": "Cookie expired"}, 400
