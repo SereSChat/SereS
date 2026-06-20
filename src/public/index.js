@@ -8,6 +8,7 @@ function onload() {
   if (debug) {
     console.log("DEBUG: onload loaded");
   }
+  load_animation();
   load_chats();
   auth_cookie();
   load_avatar();
@@ -15,6 +16,51 @@ function onload() {
   setInterval(() => {
     load_chats();
   }, 3000);
+}
+
+function load_animation() {
+  const introLayer = document.getElementById("intro-layer");
+  const introVideo = document.getElementById("intro-video");
+
+  function removeOverlay() {
+    if (introLayer) {
+      introLayer.style.opacity = "0";
+      setTimeout(() => {
+        introLayer.remove();
+      }, 500);
+    }
+  }
+
+  if (sessionStorage.getItem("introPlayed") === "true") {
+    if (introLayer) introLayer.remove();
+    return;
+  }
+
+  if (introVideo && introLayer) {
+    introVideo.muted = true;
+    introVideo.playsInline = true;
+
+    const safetyTimeout = setTimeout(() => {
+      sessionStorage.setItem("introPlayed", "true");
+      removeOverlay();
+    }, 5000);
+
+    introVideo.play().catch((error) => {
+      clearTimeout(safetyTimeout);
+      sessionStorage.setItem("introPlayed", "true");
+      if (introLayer) introLayer.remove();
+    });
+
+    introVideo.onended = () => {
+      clearTimeout(safetyTimeout);
+      sessionStorage.setItem("introPlayed", "true");
+      setTimeout(() => {
+        removeOverlay();
+      }, 1000);
+    };
+  } else {
+    if (introLayer) introLayer.remove();
+  }
 }
 
 function load_avatar() {
@@ -129,6 +175,56 @@ function load_chats() {
 
         dmList.innerHTML = dmList.innerHTML + chatHtml;
       }
+    });
+}
+
+function remove_chat(username, event) {
+  if (event) {
+    event.stopPropagation();
+  }
+
+  if (
+    !confirm("Do you really want to delete the chat with " + username + "?")
+  ) {
+    return;
+  }
+
+  if (debug) {
+    console.log("DEBUG: Deleting chat with: " + username);
+  }
+
+  fetch("/api/remove_chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: username }),
+    credentials: "include",
+  })
+    .then((response) => response.json())
+    .then((data) => {
+      if (data.success) {
+        if (debug) {
+          console.log("DEBUG: Chat successfully deleted in the backend.");
+        }
+
+        const currentChatHeader =
+          document.getElementById("current-chat-name").innerText;
+        if (currentChatHeader === username) {
+          document.getElementById("current-chat-name").innerText =
+            "Welcome " + getCookie("username");
+          document
+            .getElementById("chat-input-area")
+            .classList.add("modal-hidden");
+          document.querySelector(".messages-container").innerHTML = "";
+        }
+
+        load_chats();
+      } else {
+        alert("Error deleting chat: " + (data.message || "Unknown error"));
+      }
+    })
+    .catch((error) => {
+      console.error("Error:", error);
+      showAlert("Server unreachable. Chat could not be deleted.");
     });
 }
 

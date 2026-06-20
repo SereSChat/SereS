@@ -8,9 +8,42 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body onload="onload()">
+    <div
+      id="intro-layer"
+      style="
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: #000;
+        z-index: 9999;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        transition: opacity 0.5s ease;
+      "
+    >
+      <video
+        id="intro-video"
+        style="
+          width: 80%;
+          max-width: 300px;
+          height: auto;
+          object-fit: contain;
+          border-radius: 12px;
+        "
+        muted
+        playsinline
+      >
+        <source src="assets/animation.mp4" type="video/mp4" />
+        <source src="assets/animation.mov" type="video/quicktime" />
+      </video>
+    </div>
+
     <div class="sidebar">
       <div class="sidebar-header">
-        <span>Sermo</span>
+        <span>SereS</span>
         <button
           class="add-chat-main-button"
           type="button"
@@ -70,6 +103,7 @@
             Logout
           </a>
         </div>
+
         <div class="modal-overlay modal-hidden" id="settings-modal">
           <div class="modal-box">
             <h3>⚙️ Settings</h3>
