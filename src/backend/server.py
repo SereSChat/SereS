@@ -9,7 +9,6 @@ import uuid
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
-# TODO: add /api/load_chats
 # TODO: add /api/get_avatar
 # TODO: add /api/upload_avatar
 
@@ -40,11 +39,25 @@ def get_db():
     return g.db
 
 
+def get_chat_db(chat_id):
+    chat_db_path = os.path.join(CHATS, chat_id, "history.db")
+    if not os.path.exists(chat_db_path):
+        raise FileNotFoundError(f"Chat database for chat_id {chat_id} does not exist.")
+    if "chat_db" not in g:
+        g.chat_db = sqlite3.connect(chat_db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+        g.chat_db.row_factory = sqlite3.Row
+    return g.chat_db
+
+
 @app.teardown_appcontext
 def close_db(exception):
     db = g.pop("db", None)
     if db is not None:
         db.close()
+
+    chat_db = g.pop("chat_db", None)
+    if chat_db is not None:
+        chat_db.close()
 
 
 @app.route("/")
@@ -123,6 +136,7 @@ def login():
     else:
         return {"message": "Login not succesfull, missing Arguments"}, 400
 
+
 @app.route("/api/logout", methods=["POST"])
 def logout():
     if not flask.request.cookies.get("sessioncookie"):
@@ -130,7 +144,10 @@ def logout():
     conn = get_db()
     cursor = conn.cursor()
     try:
-        cursor.execute("DELETE FROM sessions WHERE cookie = ?", (flask.request.cookies.get("sessioncookie"),))
+        cursor.execute(
+            "DELETE FROM sessions WHERE cookie = ?",
+            (flask.request.cookies.get("sessioncookie"),),
+        )
         conn.commit()
     except Exception as e:
         print(e)
@@ -143,11 +160,12 @@ def logout():
     )
     response.set_cookie("sessioncookie", "")
     response.set_cookie("username", "")
-    
+
     return response, 200
 
-@app.route("/api/add_friend", methods=["POST"]) # TODO: add a function which asks the adding user to accept
-def add_friend():
+
+@app.route("/api/add_friend", methods=["POST"])
+def add_friend():  # TODO: add a function which asks the being added user to accept
     sessioncookie = flask.request.cookies.get("sessioncookie")
     if not sessioncookie:
         return {"message": "No sessioncookie provided"}, 400
@@ -183,6 +201,112 @@ def add_friend():
             json.dump(data, f)
             f.truncate()
     return {"message": "Friend added successfully!", "success": True}, 200
+
+
+@app.route("/api/new_chat", methods=["POST"])
+def new_chat():
+    sessioncookie = flask.request.cookies.get("sessioncookie")
+    if not sessioncookie:
+        return {"message": "No sessioncookie provided"}, 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id FROM sessions WHERE cookie = ?",
+        (sessioncookie,),
+    )
+    try:
+        user_id = cursor.fetchone()["user_id"]
+    except Exception as e:
+        print(e)
+        return {"message": "Invalid sessioncookie"}, 400
+    reqjson = flask.request.get_json()
+    friend_username = reqjson["friend_username"]
+    cursor.execute("SELECT id FROM users WHERE username = ?", (friend_username,))
+    try:
+        friend_id = cursor.fetchone()["id"]
+    except Exception as e:
+        print(e)
+        return {"message": "Friend username not found"}, 400
+    chat_id = str(uuid.uuid4())
+
+    chats = return_chats_for_user(user_id)
+    for chat in chats:
+        with open(os.path.join(CHATS, chat, "users.json"), "r") as f:
+            data = json.load(f)
+            if friend_id in data["users"]:
+                return {"message": "Chat already exists"}, 400
+    try:
+        os.makedirs(os.path.join(CHATS, chat_id), exist_ok=False)
+    except FileExistsError:
+        while True:
+            chat_id = str(uuid.uuid4())
+            try:
+                os.makedirs(os.path.join(CHATS, chat_id), exist_ok=False)
+                break
+            except FileExistsError:
+                continue
+    with open(os.path.join(CHATS, chat_id, "users.json"), "w") as f:
+        json.dump({"users": [user_id, friend_id]}, f)
+    with open(os.path.join(CHATS, chat_id, "history.db"), "w") as f:
+        pass
+    chat_cursor = get_chat_db(chat_id).cursor()
+    chat_cursor.execute(
+        "CREATE TABLE IF NOT EXISTS messages (id VARCHAR(255) PRIMARY KEY, sender_id VARCHAR(255), content TEXT, timestamp TIMESTAMP)"
+    )
+    with open(os.path.join(CHATS, chat_id, "cache.txt"), "w") as f:
+        pass
+    return {"message": "Chat created successfully!", "success": True}, 200
+
+
+def return_chats_for_user(user_id):
+    chats = []
+    for chat in os.listdir(CHATS):
+        try:
+            with open(os.path.join(CHATS, chat, "users.json"), "r") as f:
+                data = json.load(f)
+                if user_id in data["users"]:
+                    chats.append(chat)
+        except Exception as e:
+            print(e)
+            continue
+    return chats
+
+
+@app.route("/api/load_chats")
+def load_chats():
+    sessioncookie = flask.request.cookies.get("sessioncookie")
+    if not sessioncookie:
+        return {"message": "No sessioncookie provided"}, 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id FROM sessions WHERE cookie = ?",
+        (sessioncookie,),
+    )
+    try:
+        user_id = cursor.fetchone()["user_id"]
+    except Exception as e:
+        print(e)
+        return {"message": "Invalid sessioncookie"}, 400
+    chats = return_chats_for_user(user_id)
+    return_objects = []
+    for chat in chats:
+        with open(os.path.join(CHATS, chat, "users.json"), "r") as f:
+            data = json.load(f)
+            other_user_id = [uid for uid in data["users"] if uid != user_id][0]
+            cursor.execute("SELECT username FROM users WHERE id = ?", (other_user_id,))
+            try:
+                other_username = cursor.fetchone()["username"]
+            except Exception as e:
+                print(e)
+                other_username = "Unknown User"
+        with open(os.path.join(CHATS, chat, "cache.txt"), "r") as f:
+            last_message = f.read()
+        return_objects.append(
+            {"chat": chat, "other_user": other_username, "last_message": last_message}
+        )
+
+    return {"chats": return_objects, "success": True}, 200
 
 
 def get_username_and_id(cursor, nameomail):
@@ -227,7 +351,6 @@ def auth_session_cookie():
         "SELECT expires_at FROM sessions WHERE cookie = ?",
         (sessioncookie,),
     )
-    print("got cookie: ", sessioncookie)
     try:
         expire_date = cursor.fetchone()["expires_at"]
         print(expire_date)
