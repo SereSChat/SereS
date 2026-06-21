@@ -253,6 +253,7 @@ def new_chat():
     chat_cursor.execute(
         "CREATE TABLE IF NOT EXISTS messages (id VARCHAR(255) PRIMARY KEY, sender_id VARCHAR(255), content TEXT, timestamp TIMESTAMP)"
     )
+    chat_cursor.connection.commit()
     with open(os.path.join(CHATS, chat_id, "cache.txt"), "w") as f:
         pass
     return {"message": "Chat created successfully!", "success": True}, 200
