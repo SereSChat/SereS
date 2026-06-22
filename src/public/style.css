@@ -84,12 +84,15 @@ body.bright-body {
 }
 
 .list-item {
-  padding: 10px 16px;
-  cursor: pointer;
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
-  transition: background-color 0.2s;
+  padding: 10px;
+  cursor: pointer;
+}
+
+.list-item:hover .delete-chat-btn {
+  opacity: 0.6;
 }
 
 .list-item:hover,
@@ -821,4 +824,26 @@ button:disabled {
 
 .close-btn:hover {
   color: #111111;
+}
+
+.delete-chat-btn {
+  position: absolute;
+  right: 15px;
+  background: none;
+  border: none;
+  color: #b5bac1;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+  line-height: 1;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    color 0.15s ease;
+}
+
+.delete-chat-btn:hover {
+  opacity: 1 !important;
+  color: #db7676;
 }

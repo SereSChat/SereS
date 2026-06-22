@@ -140,8 +140,7 @@ function auth_cookie() {
 
 function load_chats() {
   fetch("/api/load_chats", {
-    method: "POST",
-    headers: { "Content-Type": "application.json" },
+    method: "GET",
     credentials: "include",
   })
     .then((response) => response.json())
@@ -157,25 +156,26 @@ function load_chats() {
 
         let chatHtml =
           '<div class="list-item" onclick="changeChat(\'' +
-          username +
+          currentChat.other_user +
           "')\">" +
           '<div class="avatar" style="background-color: #5865f2">TC</div>' +
           '<div class="item-info">' +
           '<span class="item-name">' +
-          username +
+          currentChat.other_user +
           "</span>" +
           '<span class="item-status">' +
-          lastMessage +
+          (currentChat.last_message || "No messages") +
           "</span>" +
           "</div>" +
           '<button class="delete-chat-btn" type="button" onclick="remove_chat(\'' +
-          username +
+          currentChat.other_user +
           "', event)\">×</button>" +
           "</div>";
 
         dmList.innerHTML = dmList.innerHTML + chatHtml;
       }
-    });
+    })
+    .catch((err) => console.error("Error loading chats:", err));
 }
 
 function remove_chat(username, event) {
@@ -353,13 +353,23 @@ function confirmAddFriends() {
   let friendsusernameinput = document.getElementById(
     "friends-username-input",
   ).value;
-  fetch("/api/add_friends", {
+
+  fetch("/api/new_chat", {
     method: "POST",
-    headers: { "Content-Type": "application.json" },
+    headers: { "Content-Type": "application/json" },
     credentials: "include",
+    body: JSON.stringify({
+      friend_username: friendsusernameinput,
+    }),
   })
-    .then((response) => response.json())
-    .then(() => onload())
+    .then((response) => {
+      if (!response.ok) throw new Error("Error creating chat");
+      return response.json();
+    })
+    .then(() => {
+      closeAddFriendsMenu();
+      onload();
+    })
     .catch((error) => {
       document.getElementById("warning").innerHTML =
         "<h4>This username does not exist or is already in your friends list.</h4>";
