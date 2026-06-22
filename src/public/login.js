@@ -16,7 +16,7 @@ function login() {
     .then((response) => response.json())
     .then((data) => {
       if (data.success) {
-        window.location.href = "index.html";
+        window.location.href = "index.html?login=true";
       } else {
         document.getElementById("warning").innerHTML =
           "<h4>Login failed, check your credentials.</h4>";

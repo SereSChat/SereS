@@ -31,7 +31,18 @@ function load_animation() {
     }
   }
 
-  if (sessionStorage.getItem("introPlayed") === "true") {
+  const urlParams = new URLSearchParams(window.location.search);
+  const isLoginRedirect = urlParams.get("login") === "true";
+  const isFirstLoadOfSession =
+    sessionStorage.getItem("sessionStarted") === null;
+
+  if (isLoginRedirect) {
+    const newUrl = window.location.pathname;
+    window.history.replaceState({}, document.title, newUrl);
+    sessionStorage.setItem("sessionStarted", "true");
+  } else if (isFirstLoadOfSession) {
+    sessionStorage.setItem("sessionStarted", "true");
+  } else {
     if (introLayer) introLayer.remove();
     return;
   }
@@ -41,19 +52,16 @@ function load_animation() {
     introVideo.playsInline = true;
 
     const safetyTimeout = setTimeout(() => {
-      sessionStorage.setItem("introPlayed", "true");
       removeOverlay();
     }, 5000);
 
     introVideo.play().catch((error) => {
       clearTimeout(safetyTimeout);
-      sessionStorage.setItem("introPlayed", "true");
       if (introLayer) introLayer.remove();
     });
 
     introVideo.onended = () => {
       clearTimeout(safetyTimeout);
-      sessionStorage.setItem("introPlayed", "true");
       setTimeout(() => {
         removeOverlay();
       }, 1000);
@@ -61,6 +69,13 @@ function load_animation() {
   } else {
     if (introLayer) introLayer.remove();
   }
+}
+
+function logout() {
+  sessionStorage.removeItem("sessionStarted");
+  document.cookie = "username=; max-age=1; path=/;";
+  document.cookie = "sessioncookie=; max-age=1; path=/;";
+  window.location.href = "login.html";
 }
 
 function load_avatar() {
