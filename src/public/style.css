@@ -847,3 +847,60 @@ button:disabled {
   opacity: 1 !important;
   color: #db7676;
 }
+.messages-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.message-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.message-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background-color: #5865f2;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.message-content-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.message-sender {
+  color: #f2f3f5;
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.message-timestamp {
+  color: #949ba4;
+  font-size: 12px;
+}
+
+.message-text {
+  color: #dbdee1;
+  font-size: 15px;
+  line-height: 1.375rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
