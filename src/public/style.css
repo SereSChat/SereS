@@ -84,11 +84,13 @@ body.bright-body {
 }
 
 .list-item {
-  position: relative;
   display: flex;
   align-items: center;
-  padding: 10px;
+  position: relative;
+  width: 100%;
+  padding: 10px 16px;
   cursor: pointer;
+  user-select: none;
 }
 
 .list-item:hover .delete-chat-btn {
@@ -129,6 +131,9 @@ body.bright-body {
 .item-info {
   display: flex;
   flex-direction: column;
+  flex-grow: 1;
+  margin-left: 16px;
+  padding-right: 30px;
 }
 
 .item-name {

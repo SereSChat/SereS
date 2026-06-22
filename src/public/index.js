@@ -173,7 +173,9 @@ function load_chats() {
           '<div class="list-item" onclick="changeChat(\'' +
           currentChat.other_user +
           "')\">" +
-          '<div class="avatar" style="background-color: #5865f2">TC</div>' +
+          '<div class="avatar" style="background-color: #5865f2">' +
+          currentChat.other_user.charAt(0).toUpperCase() +
+          "</div>" +
           '<div class="item-info">' +
           '<span class="item-name">' +
           currentChat.other_user +
