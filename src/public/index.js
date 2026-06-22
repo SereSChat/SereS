@@ -406,6 +406,8 @@ function changeChat(name) {
   if (groupItem) {
     groupItem.classList.remove("active");
   }
+
+  load_messages(name);
 }
 
 function switchToChat() {
@@ -612,3 +614,68 @@ window.addEventListener("DOMContentLoaded", () => {
   applyTheme();
   addThemeOptionToSettings();
 });
+
+function load_messages(name) {
+  fetch("/api/get_messages?chat=" + encodeURIComponent(name), {
+    method: "GET",
+    credentials: "include",
+  })
+    .then((response) => response.json())
+    .then((data) => {
+      let messagesContainer = document.querySelector(".messages-container");
+      messagesContainer.innerHTML = "";
+
+      data.messages.forEach((msg) => {
+        let messageElement = document.createElement("div");
+        messageElement.className = "message-row";
+
+        let avatar = document.createElement("div");
+        avatar.className = "message-avatar";
+        avatar.innerText = msg.sender.charAt(0).toUpperCase();
+
+        let contentWrapper = document.createElement("div");
+        contentWrapper.className = "message-content-wrapper";
+
+        let header = document.createElement("div");
+        header.className = "message-header";
+
+        let senderSpan = document.createElement("span");
+        senderSpan.className = "message-sender";
+        senderSpan.innerText = msg.sender;
+
+        let timeSpan = document.createElement("span");
+        timeSpan.className = "message-timestamp";
+        timeSpan.innerText = msg.timestamp || "Heute um 12:00";
+
+        header.appendChild(senderSpan);
+        header.appendChild(timeSpan);
+
+        let textDiv = document.createElement("div");
+        textDiv.className = "message-text";
+        textDiv.innerText = msg.text;
+
+        contentWrapper.appendChild(header);
+        contentWrapper.appendChild(textDiv);
+
+        messageElement.appendChild(avatar);
+        messageElement.appendChild(contentWrapper);
+
+        messagesContainer.appendChild(messageElement);
+      });
+    })
+    .catch((err) => console.error("Error loading messages:", err));
+}
+
+function send_message() {
+  if (debug) {
+    console.log("DEBUG: Chat changed: " + name);
+  }
+  fetch("/api/new_chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({
+      friend_username: friendsusernameinput,
+    }),
+  });
+}
