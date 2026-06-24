@@ -72,11 +72,15 @@ function load_animation() {
 }
 
 function logout() {
-  // TODO: use logout api to also delete the session cookie
-  sessionStorage.removeItem("sessionStarted");
-  document.cookie = "username=; max-age=1; path=/;";
-  document.cookie = "sessioncookie=; max-age=1; path=/;";
-  window.location.href = "login.html";
+  fetch("/api/logout", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+  })
+    .then((response) => response.json())
+    .then((data) => {
+      window.location.href = "login.html";
+    });
 }
 
 function load_avatar() {
