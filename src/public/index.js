@@ -670,7 +670,7 @@ function load_messages(name) {
 
 function send_message() {
   if (debug) {
-    console.log("DEBUG: Chat changed: " + name);
+    console.log("DEBUG: Chat changed to: " + name);
   }
   fetch("/api/new_chat", {
     method: "POST",
