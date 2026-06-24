@@ -9,7 +9,7 @@ import uuid
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
-# TODO: add /api/get_messages loock at index.js how made.
+# TODO: add /api/get_messages look at index.js how made
 # TODO: add /api/get_avatar
 # TODO: add /api/upload_avatar
 
@@ -66,7 +66,7 @@ def index():
     return app.send_static_file("index.html")
 
 
-@app.route("/api/online")
+@app.route("/api/online", methods=["GET", "POST"])
 def online():
     return {"message": "im up", "success": True}, 200
 
