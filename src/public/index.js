@@ -72,6 +72,7 @@ function load_animation() {
 }
 
 function logout() {
+  // TODO: use logout api to also delete the session cookie
   sessionStorage.removeItem("sessionStarted");
   document.cookie = "username=; max-age=1; path=/;";
   document.cookie = "sessioncookie=; max-age=1; path=/;";
