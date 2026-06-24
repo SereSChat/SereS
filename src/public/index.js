@@ -376,7 +376,7 @@ function confirmAddFriends() {
     "friends-username-input",
   ).value;
 
-  fetch("/api/new_chat", {
+  fetch("/api/add_friend", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
@@ -686,3 +686,5 @@ function send_message() {
     }),
   });
 }
+
+function new_chat() {}

@@ -39,7 +39,7 @@
       <div class="sidebar-header">
         <span>SereS</span>
         <button
-          class="add-chat-main-button"
+          class="add-friend-main-button"
           type="button"
           onclick="openAddFriendsMenu()"
         >
@@ -150,11 +150,8 @@
 
     <div class="modal-overlay modal-hidden" id="add-chat-modal">
       <div class="modal-box">
-        <h3>Start New Chat</h3>
-        <p>
-          Enter a name for a DM, or multiple names separated by commas for a
-          group.
-        </p>
+        <h3>Add friend</h3>
+        <p>Enter the name of your Friend.</p>
         <input
           type="text"
           id="friends-username-input"
@@ -173,6 +170,38 @@
             class="modal-btn confirm-btn"
             type="button"
             onclick="confirmAddFriends()"
+          >
+            Add
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay modal-hidden" id="add-chat-modal">
+      <div class="modal-box">
+        <h3>New chat</h3>
+        <p>
+          Enter a name for a DM, or multiple names separated by commas for a
+          group.
+        </p>
+        <input
+          type="text"
+          id="new-chat-username-input"
+          placeholder="Enter name(s)..."
+        />
+        <h4 style="color: red" id="warning"></h4>
+        <div class="modal-buttons">
+          <button
+            class="modal-btn cancel-btn"
+            type="button"
+            onclick="closenewchatMenu()"
+          >
+            Cancel
+          </button>
+          <button
+            class="modal-btn confirm-btn"
+            type="button"
+            onclick="confirnewchat()"
           >
             Create
           </button>

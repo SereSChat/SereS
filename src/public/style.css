@@ -456,6 +456,34 @@ body.bright-body {
   }
 }
 
+.add-friend-main-button {
+  position: absolute !important;
+  right: 16px !important;
+  background-color: #00a884 !important;
+  color: #ffffff !important;
+  border: none !important;
+  font-size: 24px !important;
+  font-weight: bold !important;
+  cursor: pointer !important;
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  width: 32px !important;
+  height: 32px !important;
+  border-radius: 50% !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+}
+
+.add-friend-main-button:hover {
+  background-color: #008f72 !important;
+}
+
+.add-friend-main-button.bright-add-friend-main-button {
+  background-color: #00a884 !important;
+  color: #ffffff !important;
+}
+
 .add-chat-main-button {
   position: absolute !important;
   right: 16px !important;
