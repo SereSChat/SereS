@@ -484,7 +484,7 @@ body.bright-body {
   color: #ffffff !important;
 }
 
-.add-chat-main-button {
+.new-chats-main-button {
   position: absolute !important;
   right: 16px !important;
   background-color: #00a884 !important;
@@ -496,18 +496,18 @@ body.bright-body {
   display: flex !important;
   justify-content: center !important;
   align-items: center !important;
-  width: 32px !important;
+  width: 100px !important;
   height: 32px !important;
-  border-radius: 50% !important;
+  border-radius: 10px !important;
   appearance: none !important;
   -webkit-appearance: none !important;
 }
 
-.add-chat-main-button:hover {
+.new-chats-main-button:hover {
   background-color: #008f72 !important;
 }
 
-.add-chat-main-button.bright-add-chat-main-button {
+.new-chats-main-button.bright-add-chat-main-button {
   background-color: #00a884 !important;
   color: #ffffff !important;
 }

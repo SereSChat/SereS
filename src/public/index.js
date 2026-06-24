@@ -354,21 +354,21 @@ function logout() {
   window.location.href = "login.html";
 }
 
-function openAddFriendsMenu() {
+function openAddFriendMenu() {
   if (debug) {
     console.log("DEBUG: opening addFriensMenu: ");
   }
-  document.getElementById("add-chat-modal").classList.remove("modal-hidden");
+  document.getElementById("add-friend-modal").classList.remove("modal-hidden");
 }
 
-function closeAddFriendsMenu() {
+function closeAddFriendMenu() {
   if (debug) {
     console.log("DEBUG: closing addFriensMenu: ");
   }
-  document.getElementById("add-chat-modal").classList.add("modal-hidden");
+  document.getElementById("add-friend-modal").classList.add("modal-hidden");
 }
 
-function confirmAddFriends() {
+function confirmAddFriend() {
   if (debug) {
     console.log("DEBUG: adding Friend(s): ");
   }
@@ -385,7 +385,7 @@ function confirmAddFriends() {
     }),
   })
     .then((response) => {
-      if (!response.ok) throw new Error("Error creating chat");
+      if (!response.ok) throw new Error("Error adding friend");
       return response.json();
     })
     .then(() => {
@@ -395,6 +395,50 @@ function confirmAddFriends() {
     .catch((error) => {
       document.getElementById("warning").innerHTML =
         "<h4>This username does not exist or is already in your friends list.</h4>";
+    });
+}
+
+function opennewchatsMenu() {
+  if (debug) {
+    console.log("DEBUG: opening newchatsMenu: ");
+  }
+  document.getElementById("add-chat-modal").classList.remove("modal-hidden");
+}
+
+function closenewchatsMenu() {
+  if (debug) {
+    console.log("DEBUG: closing newchatsMenu: ");
+  }
+  document.getElementById("add-chat-modal").classList.add("modal-hidden");
+}
+
+function confirnewchats() {
+  if (debug) {
+    console.log("DEBUG: new chat created");
+  }
+  let newchatusernameinput = document.getElementById(
+    "new-chat-username-input",
+  ).value;
+
+  fetch("/api/new_chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({
+      friend_username: newchatusernameinput,
+    }),
+  })
+    .then((response) => {
+      if (!response.ok) throw new Error("Error creating chat");
+      return response.json();
+    })
+    .then(() => {
+      closenewchatsMenu();
+      onload();
+    })
+    .catch((error) => {
+      document.getElementById("warning").innerHTML =
+        "<h4>This Chat already exists or an error occurred</h4>";
     });
 }
 
@@ -686,5 +730,3 @@ function send_message() {
     }),
   });
 }
-
-function new_chat() {}

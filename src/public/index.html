@@ -41,7 +41,7 @@
         <button
           class="add-friend-main-button"
           type="button"
-          onclick="openAddFriendsMenu()"
+          onclick="openAddFriendMenu()"
         >
           +
         </button>
@@ -129,13 +129,20 @@
       </div>
     </div>
 
-    <div id="alert" class="alert-box" onclick="closeAlert()">
+    <div id="alert" class="alert-box"">
       <span id="alert-text">Server unreachable. Please try again later.</span>
     </div>
 
     <div class="main-chat">
       <div class="chat-header">
         <span id="current-chat-name">Welcome Loading...</span>
+        <button
+          class="new-chats-main-button"
+          type="button"
+          onclick="opennewchatsMenu()"
+        >
+        <h6>New Chat</h6>
+        </button>
       </div>
 
       <div class="messages-container"></div>
@@ -148,28 +155,28 @@
       </div>
     </div>
 
-    <div class="modal-overlay modal-hidden" id="add-chat-modal">
+    <div class="modal-overlay modal-hidden" id="add-friend-modal">
       <div class="modal-box">
         <h3>Add friend</h3>
         <p>Enter the name of your Friend.</p>
         <input
           type="text"
           id="friends-username-input"
-          placeholder="Enter name(s)..."
+          placeholder="Enter name"
         />
         <h4 style="color: red" id="warning"></h4>
         <div class="modal-buttons">
           <button
             class="modal-btn cancel-btn"
             type="button"
-            onclick="closeAddFriendsMenu()"
+            onclick="closeAddFriendMenu()"
           >
             Cancel
           </button>
           <button
             class="modal-btn confirm-btn"
             type="button"
-            onclick="confirmAddFriends()"
+            onclick="confirmAddFriend()"
           >
             Add
           </button>
@@ -194,14 +201,14 @@
           <button
             class="modal-btn cancel-btn"
             type="button"
-            onclick="closenewchatMenu()"
+            onclick="closenewchatsMenu()"
           >
             Cancel
           </button>
           <button
             class="modal-btn confirm-btn"
             type="button"
-            onclick="confirnewchat()"
+            onclick="confirnewchats()"
           >
             Create
           </button>
