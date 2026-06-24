@@ -228,6 +228,10 @@ def new_chat():
     except Exception as e:
         print(e)
         return {"message": "Friend username not found"}, 400
+
+    if user_id == friend_id:
+        return {"message": "Cannot create chat with yourself"}, 400
+
     chat_id = str(uuid.uuid4())
 
     chats = return_chats_for_user(user_id)
