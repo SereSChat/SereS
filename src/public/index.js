@@ -725,14 +725,52 @@ function load_messages(name) {
 
 function send_message() {
   if (debug) {
-    console.log("DEBUG: Chat changed to: " + name);
+    console.log("DEBUG: function send_message");
   }
-  fetch("/api/new_chat", {
+  const inputElement = document.getElementById("message-input-field");
+  const messageText = inputElement.value.trim();
+  const currentChatName =
+    document.getElementById("current-chat-name").innerText;
+
+  if (!messageText) return;
+
+  fetch("/api/send_message", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify({
-      friend_username: friendsusernameinput,
+      chat: currentChatName,
+      text: messageText,
     }),
-  });
+  })
+    .then((response) => response.json())
+    .then((data) => {
+      if (data.success) {
+        inputElement.value = "";
+        load_messages(currentChatName);
+        if (debug) {
+          console.log("DEBUG: message sent");
+        }
+      } else {
+        showAlert("Error sending message");
+        if (debug) {
+          console.log("DEBUG: error while sending message");
+        }
+      }
+    })
+    .catch((error) => {
+      showAlert("Server unreachable.");
+    });
 }
+
+document.addEventListener("DOMContentLoaded", () => {
+  const messageInput = document.getElementById("message-input-field");
+  if (messageInput) {
+    messageInput.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        send_message();
+      }
+    });
+  }
+});

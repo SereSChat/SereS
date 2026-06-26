@@ -963,3 +963,17 @@ button:disabled {
 body.bright-body .message-text {
   background-color: #ffffff;
 }
+
+.icon-button {
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-button svg {
+  margin-left: 3px;
+}
