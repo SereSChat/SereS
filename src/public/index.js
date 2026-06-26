@@ -462,26 +462,22 @@ function changeChat(name) {
 }
 
 function switchToChat() {
+  if (debug) {
+    console.log("DEBUG: switched to chat");
+  }
   document.getElementById("current-chat-name").innerText = "Testchat";
   document.getElementById("group-item").classList.remove("active");
   document.getElementById("chat-item").classList.add("active");
 }
 
-function switchToGroup() {
-  document.getElementById("current-chat-name").innerText = "Testgruppe";
-  document.getElementById("chat-item").classList.remove("active");
-  document.getElementById("group-item").classList.add("active");
-}
-
 function showAlert(message) {
+  if (debug) {
+    console.log("DEBUG: Alert shown");
+  }
   const alertBox = document.getElementById("alert");
   const alertText = document.getElementById("alert-text");
   alertText.innerText = message;
   alertBox.style.display = "block";
-}
-
-function closeAlert() {
-  document.getElementById("alert").style.display = "none";
 }
 
 window.addEventListener("click", function (event) {
@@ -535,6 +531,9 @@ window.addEventListener("click", function (event) {
 });
 
 function getCookie(name) {
+  if (debug) {
+    console.log("DEBUG: load cookies");
+  }
   let matches = document.cookie.match(
     new RegExp(
       "(?:^|; )" +
@@ -622,6 +621,9 @@ function applyTheme() {
 }
 
 function toggleTheme() {
+  if (debug) {
+    console.log("DEBUG: theme toggled");
+  }
   const currentTheme = getCookie("theme");
   const newTheme = currentTheme === "bright" ? "dark" : "bright";
   document.cookie = "theme=" + newTheme + "; path=/; max-age=31536000";
@@ -667,12 +669,18 @@ window.addEventListener("DOMContentLoaded", () => {
 });
 
 function load_messages(name) {
+  if (debug) {
+    console.log("DEBUG: messages loading ...");
+  }
   fetch("/api/get_messages?chat=" + encodeURIComponent(name), {
     method: "GET",
     credentials: "include",
   })
     .then((response) => response.json())
     .then((data) => {
+      if (debug) {
+        console.log("DEBUG: messages loaded");
+      }
       let messagesContainer = document.querySelector(".messages-container");
       messagesContainer.innerHTML = "";
 
