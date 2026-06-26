@@ -10,6 +10,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
 # TODO: add /api/get_messages look at index.js how made
+# TODO: add /api/send_message
 # TODO: make, that you cant make new chats with users that doesnt exist or arent in your friend list.
 # TODO: add /api/get_avatar
 # TODO: add /api/upload_avatar

@@ -468,9 +468,9 @@ body.bright-body {
   display: flex !important;
   justify-content: center !important;
   align-items: center !important;
-  width: 32px !important;
+  width: 30% !important;
   height: 32px !important;
-  border-radius: 50% !important;
+  border-radius: 10px !important;
   appearance: none !important;
   -webkit-appearance: none !important;
 }
@@ -976,4 +976,38 @@ body.bright-body .message-text {
 
 .icon-button svg {
   margin-left: 3px;
+}
+
+.chat-section-header {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  padding-right: 16px;
+}
+
+.add-dm-button {
+  background: none;
+  border: none;
+  color: #8696a0;
+  font-size: 1.2rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: color 0.2s;
+  line-height: 1;
+}
+
+.add-dm-button:hover {
+  color: #e9edef;
+}
+
+body.bright-body .add-dm-button {
+  color: #667781;
+}
+
+body.bright-body .add-dm-button:hover {
+  color: #111b21;
 }

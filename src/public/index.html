@@ -43,12 +43,15 @@
           type="button"
           onclick="openAddFriendMenu()"
         >
-          +
+          <h6>Add Friend</h6>
         </button>
       </div>
 
       <div class="list-container">
-        <div class="section-title">Direct Messages</div>
+        <div class="section-title chat-section-header">
+          <span>Direct Messages</span>
+          <button class="add-dm-button" type="button" onclick="opennewchatsMenu()">+</button>
+        </div>
         <div id="dm-list"></div>
       </div>
 
@@ -133,13 +136,6 @@
     <div class="main-chat">
       <div class="chat-header">
         <span id="current-chat-name">Welcome Loading...</span>
-        <button
-          class="new-chats-main-button"
-          type="button"
-          onclick="opennewchatsMenu()"
-        >
-        <h6>New Chat</h6>
-        </button>
       </div>
 
       <div class="messages-container"></div>
