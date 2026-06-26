@@ -937,3 +937,29 @@ button:disabled {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.message-own {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+.message-own .message-content-wrapper {
+  align-items: flex-end;
+}
+
+.message-own .message-text {
+  background-color: #00a884;
+  color: #ffffff;
+  padding: 8px 12px;
+  border-radius: 8px 0px 8px 8px;
+}
+
+.message-text {
+  background-color: #2a3942;
+  padding: 8px 12px;
+  border-radius: 0px 8px 8px 8px;
+}
+
+body.bright-body .message-text {
+  background-color: #ffffff;
+}

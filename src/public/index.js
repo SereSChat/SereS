@@ -676,9 +676,15 @@ function load_messages(name) {
       let messagesContainer = document.querySelector(".messages-container");
       messagesContainer.innerHTML = "";
 
+      const myUsername = getCookie("username");
+
       data.messages.forEach((msg) => {
         let messageElement = document.createElement("div");
         messageElement.className = "message-row";
+
+        if (msg.sender === myUsername) {
+          messageElement.classList.add("message-own");
+        }
 
         let avatar = document.createElement("div");
         avatar.className = "message-avatar";
@@ -696,7 +702,7 @@ function load_messages(name) {
 
         let timeSpan = document.createElement("span");
         timeSpan.className = "message-timestamp";
-        timeSpan.innerText = msg.timestamp || "Heute um 12:00";
+        timeSpan.innerText = msg.timestamp || "Loading ...";
 
         header.appendChild(senderSpan);
         header.appendChild(timeSpan);
