@@ -9,7 +9,6 @@ import uuid
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
-# TODO: add /api/get_messages look at index.js how made
 # TODO: add /api/send_message
 # TODO: make, that you cant make new chats with users that doesnt exist or arent in your friend list.
 # TODO: add /api/get_avatar
@@ -46,6 +45,7 @@ def get_chat_db(chat_id):
     chat_db_path = os.path.join(CHATS, chat_id, "history.db")
     if not os.path.exists(chat_db_path):
         raise FileNotFoundError(f"Chat database for chat_id {chat_id} does not exist.")
+
     if "chat_db" not in g:
         g.chat_db = sqlite3.connect(chat_db_path, detect_types=sqlite3.PARSE_DECLTYPES)
         g.chat_db.row_factory = sqlite3.Row
@@ -315,6 +315,47 @@ def load_chats():
         )
 
     return {"chats": return_objects, "success": True}, 200
+
+
+@app.route("/api/get_messages", methods=["GET"])
+def get_messages():
+    sessioncookie = flask.request.cookies.get("sessioncookie")
+    if not sessioncookie:
+        return {"message": "No sessioncookie provided"}, 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id FROM sessions WHERE cookie = ?",
+        (sessioncookie,),
+    )
+    try:
+        user_id = cursor.fetchone()["user_id"]
+    except Exception as e:
+        print(e)
+        return {"message": "Invalid sessioncookie"}, 400
+    chat_id = flask.request.args.get("chat_id")
+    chats = return_chats_for_user(user_id)
+    if chat_id not in chats:
+        return {"message": "Invalid chat_id"}, 400
+    try:
+        chat_cursor = get_chat_db(chat_id).cursor()
+    except Exception as e:
+        print(e)
+        return {"message": "Invalid chat_id"}, 400
+    chat_cursor.execute(
+        "SELECT sender_id, content, timestamp FROM messages ORDER BY timestamp ASC"
+    )
+    messages = chat_cursor.fetchall()
+    message_list = []
+    for message in messages:
+        message_list.append(
+            {
+                "sender": message["sender_id"],
+                "content": message["content"],
+                "timestamp": message["timestamp"],
+            }
+        )
+    return {"messages": message_list, "success": True}, 200
 
 
 def get_username_and_id(cursor, nameomail):
