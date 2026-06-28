@@ -677,7 +677,7 @@ function load_messages(name) {
   if (debug) {
     console.log("DEBUG: messages loading ...");
   }
-  fetch("/api/get_messages?chat=" + encodeURIComponent(name), {
+  fetch("/api/get_messages?chat_id=" + encodeURIComponent(name), {
     method: "GET",
     credentials: "include",
   })
