@@ -76,16 +76,20 @@ def register():
     conn = get_db()
     cursor = conn.cursor()
 
-    json = flask.request.get_json()
-    hashed_passwd = ph.hash(json["passwd"])
-    username = json["username"]
+    req_json = flask.request.get_json()
+    hashed_passwd = ph.hash(req_json["passwd"])
+    try:
+        username = req_json["username"]
+        email = req_json["email"]
+    except KeyError:
+        return {"message": "Missing username or email in request body"}, 400
     if username_available(username):
         cursor.execute(
             "INSERT INTO users (id, email, username, passwd) VALUES (?, ?, ?, ?)",
             (
                 str(uuid.uuid4()),
-                json["email"],
-                json["username"],
+                email,
+                username,
                 hashed_passwd,
             ),
         )
@@ -99,9 +103,12 @@ def register():
 def login():
     conn = get_db()
     cursor = conn.cursor()
-    json = flask.request.get_json()
-    nameomail = json["nameomail"]
-    if nameomail and json["passwd"]:
+    req_json = flask.request.get_json()
+    try:
+        nameomail = req_json["nameomail"]
+    except KeyError:
+        return {"message": "Missing nameomail in request body"}, 400
+    if nameomail and req_json["passwd"]:
         if "@" in nameomail:
             cursor.execute(
                 "SELECT passwd FROM users WHERE email = ?",
@@ -117,7 +124,11 @@ def login():
 
         if passwd:
             try:
-                if ph.verify(passwd[0], json["passwd"]):
+                req_passwd = req_json["passwd"]
+            except KeyError:
+                return {"message": "Missing passwd in request body"}, 400
+            try:
+                if ph.verify(passwd[0], req_passwd):
                     username, tid = get_username_and_id(cursor, nameomail)
                     response = flask.make_response(
                         {
@@ -181,8 +192,11 @@ def add_friend():  # TODO: add a function which asks the being added user to acc
     except Exception as e:
         print(e)
         return {"message": "Invalid sessioncookie"}, 400
-    reqjson = flask.request.get_json()
-    friend_username = reqjson["friend_username"]
+    req_json = flask.request.get_json()
+    try:
+        friend_username = req_json["friend_username"]
+    except KeyError:
+        return {"message": "Missing friend_username in request body"}, 400
     cursor.execute("SELECT id FROM users WHERE username = ?", (friend_username,))
     try:
         friend_id = cursor.fetchone()["id"]
@@ -222,8 +236,11 @@ def new_chat():
     except Exception as e:
         print(e)
         return {"message": "Invalid sessioncookie"}, 400
-    reqjson = flask.request.get_json()
-    friend_username = reqjson["friend_username"]
+    req_json = flask.request.get_json()
+    try:
+        friend_username = req_json["friend_username"]
+    except KeyError:
+        return {"message": "Missing friend_username in request body"}, 400
     cursor.execute("SELECT id FROM users WHERE username = ?", (friend_username,))
     try:
         friend_id = cursor.fetchone()["id"]
@@ -346,8 +363,11 @@ def send_message():
         print(e)
         return {"message": "Invalid sessioncookie"}, 400
     reqjson = flask.request.get_json()
-    chat_id = reqjson["chat_id"]
-    content = reqjson["content"]
+    try:
+        chat_id = reqjson["chat_id"]
+        content = reqjson["content"]
+    except KeyError:
+        return {"message": "Missing chat_id or content in request body"}, 400
     chats = return_chats_for_user(user_id)
     if chat_id not in chats:
         return {"message": "Invalid chat_id"}, 400
