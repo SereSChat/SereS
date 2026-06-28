@@ -317,6 +317,47 @@ def load_chats():
     return {"chats": return_objects, "success": True}, 200
 
 
+@app.route("/api/send_message", methods=["POST"])
+def send_message():
+    sessioncookie = flask.request.cookies.get("sessioncookie")
+    if not sessioncookie:
+        return {"message": "No sessioncookie provided"}, 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id FROM sessions WHERE cookie = ?",
+        (sessioncookie,),
+    )
+    try:
+        user_id = cursor.fetchone()["user_id"]
+    except Exception as e:
+        print(e)
+        return {"message": "Invalid sessioncookie"}, 400
+    reqjson = flask.request.get_json()
+    chat_id = reqjson["chat_id"]
+    content = reqjson["content"]
+    chats = return_chats_for_user(user_id)
+    if chat_id not in chats:
+        return {"message": "Invalid chat_id"}, 400
+    try:
+        chat_cursor = get_chat_db(chat_id).cursor()
+    except Exception as e:
+        print(e)
+        return {"message": "Invalid chat_id"}, 400
+    chat_cursor.execute(
+        "INSERT INTO messages (id, sender_id, content, timestamp) VALUES (?, ?, ?, datetime('now'))",
+        (
+            str(uuid.uuid4()),
+            user_id,
+            content,
+        ),
+    )
+    chat_cursor.connection.commit()
+    with open(os.path.join(CHATS, chat_id, "cache.txt"), "w") as f:
+        f.write(content)
+    return {"message": "Message sent successfully!", "success": True}, 200
+
+
 @app.route("/api/get_messages", methods=["GET"])
 def get_messages():
     sessioncookie = flask.request.cookies.get("sessioncookie")
