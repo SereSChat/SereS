@@ -369,16 +369,35 @@ function confirmAddFriend() {
       if (!response.ok) throw new Error("Error adding friend");
       return response.json();
     })
+    .then((data) => {
+      if (debug) {
+        console.log("DEBUG: Friend added, now creating chat automatically...");
+      }
+
+      return fetch("/api/new_chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          friend_username: friendsusernameinput,
+        }),
+      });
+    })
+    .then((response) => {
+      if (!response.ok) throw new Error("Error creating automatic chat");
+      return response.json();
+    })
     .then(() => {
       if (debug) {
-        console.log("DEBUG: closing menu");
+        console.log("DEBUG: Automatic chat created, closing menu");
       }
       closeAddFriendsMenu();
       page_load();
     })
     .catch((error) => {
+      console.error("Error in friend/chat creation workflow:", error);
       document.getElementById("warning").innerHTML =
-        "<h4>This username does not exist or is already in your friends list.</h4>";
+        "<h4>This username does not exist, is already your friend, or the chat could not be created.</h4>";
     });
 }
 
