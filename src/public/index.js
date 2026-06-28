@@ -3,6 +3,7 @@ const debug = true;
 let chats = null;
 let chats_count = null;
 let userImagePath = "";
+let currentChatId = null;
 
 function page_load() {
   if (debug) {
@@ -174,25 +175,20 @@ function load_chats() {
       for (let i = 0; i < chats.length; i++) {
         let currentChat = chats[i];
 
-        let chatHtml =
-          '<div class="list-item" onclick="changeChat(\'' +
-          currentChat.other_user +
-          "')\">" +
-          '<div class="avatar" style="background-color: #5865f2">' +
-          currentChat.other_user.charAt(0).toUpperCase() +
-          "</div>" +
-          '<div class="item-info">' +
-          '<span class="item-name">' +
-          currentChat.other_user +
-          "</span>" +
-          '<span class="item-status">' +
-          (currentChat.last_message || "No messages") +
-          "</span>" +
-          "</div>" +
-          '<button class="delete-chat-btn" type="button" onclick="remove_chat(\'' +
-          currentChat.other_user +
-          "', event)\">×</button>" +
-          "</div>";
+        let chatId = currentChat.id || currentChat.chatid;
+
+        let chatHtml = `
+          <div class="list-item" onclick="changeChat('${currentChat.other_user}', '${chatId}')">
+            <div class="avatar" style="background-color: #5865f2">
+              ${currentChat.other_user.charAt(0).toUpperCase()}
+            </div>
+            <div class="item-info">
+              <span class="item-name">${currentChat.other_user}</span>
+              <span class="item-status">${currentChat.last_message || "No messages"}</span>
+            </div>
+            <button class="delete-chat-btn" type="button" onclick="remove_chat('${currentChat.other_user}', event)">×</button>
+          </div>
+        `;
 
         dmList.innerHTML = dmList.innerHTML + chatHtml;
       }
@@ -346,7 +342,7 @@ function openAddFriendMenu() {
   document.getElementById("add-friend-modal").classList.remove("modal-hidden");
 }
 
-function closeAddFriendMenu() {
+function closeAddFriendsMenu() {
   if (debug) {
     console.log("DEBUG: closing addFriensMenu: ");
   }
@@ -374,6 +370,9 @@ function confirmAddFriend() {
       return response.json();
     })
     .then(() => {
+      if (debug) {
+        console.log("DEBUG: closing menu");
+      }
       closeAddFriendsMenu();
       page_load();
     })
@@ -427,10 +426,12 @@ function confirnewchats() {
     });
 }
 
-function changeChat(name) {
+function changeChat(name, id) {
   if (debug) {
-    console.log("DEBUG: Chat changed: " + name);
+    console.log("DEBUG: Chat changed: " + name + " (ID: " + id + ")");
   }
+
+  currentChatId = id;
   document.getElementById("current-chat-name").innerText = name;
 
   let inputArea = document.getElementById("chat-input-area");
@@ -725,14 +726,14 @@ function send_message() {
   const currentChatName =
     document.getElementById("current-chat-name").innerText;
 
-  if (!messageText) return;
+  if (!messageText || !currentChatId) return;
 
   fetch("/api/send_message", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify({
-      chat: currentChatName,
+      chat_id: currentChatId,
       text: messageText,
     }),
   })
