@@ -269,15 +269,6 @@ window.addEventListener("click", function (event) {
   }
 });
 
-function getCookie(name) {
-  const value = `; ${document.cookie}`;
-  const parts = value.split(`; ${name}=`);
-  if (parts.length === 2) {
-    return parts.pop().split(";").shift();
-  }
-  return undefined;
-}
-
 function openSettings() {
   if (debug) {
     console.log("DEBUG: opening settingsMenu");
@@ -346,12 +337,6 @@ function closeSettingsMenu() {
   if (warningText) warningText.innerText = "";
 
   document.getElementById("settings-modal").classList.add("modal-hidden");
-}
-
-function logout() {
-  document.cookie = "username=; max-age=1; path=/;";
-  document.cookie = "sessioncookie=; max-age=1; path=/;";
-  window.location.href = "login.html";
 }
 
 function openAddFriendMenu() {
