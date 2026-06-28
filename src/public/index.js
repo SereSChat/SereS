@@ -753,7 +753,7 @@ function send_message() {
     credentials: "include",
     body: JSON.stringify({
       chat_id: currentChatId,
-      text: messageText,
+      content: messageText,
     }),
   })
     .then((response) => response.json())
