@@ -4,9 +4,9 @@ let chats = null;
 let chats_count = null;
 let userImagePath = "";
 
-function onload() {
+function page_load() {
   if (debug) {
-    console.log("DEBUG: onload loaded");
+    console.log("DEBUG: page_load loaded");
   }
   load_animation();
   load_chats();
@@ -145,7 +145,7 @@ function auth_cookie() {
     })
     .catch((error) => {
       if (debug) {
-        console.log("DEBUG: error onload");
+        console.log("DEBUG: error page_load");
       }
       showAlert("Server unreachable. Please try again later.");
       console.log(
@@ -314,7 +314,7 @@ function saveSettings() {
       if (data.success) {
         alert("Avatar updated successfully!");
         closeSettingsMenu();
-        onload();
+        page_load();
       } else {
         if (warningText)
           warningText.innerText = "Upload failed: " + data.message;
@@ -375,7 +375,7 @@ function confirmAddFriend() {
     })
     .then(() => {
       closeAddFriendsMenu();
-      onload();
+      page_load();
     })
     .catch((error) => {
       document.getElementById("warning").innerHTML =
@@ -419,7 +419,7 @@ function confirnewchats() {
     })
     .then(() => {
       closenewchatsMenu();
-      onload();
+      page_load();
     })
     .catch((error) => {
       document.getElementById("warning").innerHTML =
