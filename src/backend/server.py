@@ -9,7 +9,6 @@ import uuid
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
-# TODO: make, that you cant make new chats with users that doesnt exist or arent in your friend list.
 # TODO: add /api/get_avatar
 # TODO: add /api/upload_avatar
 
@@ -190,6 +189,8 @@ def add_friend():  # TODO: add a function which asks the being added user to acc
     except Exception as e:
         print(e)
         return {"message": "Friend username not found"}, 400
+    if user_id == friend_id:
+        return {"message": "Cannot add yourself as a friend"}, 400
     try:
         with open(os.path.join(FRIENDS, user_id + ".json"), "x") as f:
             json.dump({"friends": [friend_id]}, f)
@@ -233,6 +234,9 @@ def new_chat():
     if user_id == friend_id:
         return {"message": "Cannot create chat with yourself"}, 400
 
+    if friend_id not in get_friends_for_user(user_id):
+        return {"message": "Cannot create chat with a user who is not your friend"}, 400
+
     chat_id = str(uuid.uuid4())
 
     chats = return_chats_for_user(user_id)
@@ -263,6 +267,15 @@ def new_chat():
     with open(os.path.join(CHATS, chat_id, "cache.txt"), "w") as f:
         pass
     return {"message": "Chat created successfully!", "success": True}, 200
+
+
+def get_friends_for_user(user_id):
+    try:
+        with open(os.path.join(FRIENDS, user_id + ".json"), "r") as f:
+            data = json.load(f)
+            return data["friends"]
+    except FileNotFoundError:
+        return []
 
 
 def return_chats_for_user(user_id):
