@@ -84,6 +84,38 @@ def register():
         email = req_json["email"]
     except KeyError:
         return {"message": "Missing username or email in request body"}, 400
+
+    for char in [
+        "@",
+        ".",
+        "!",
+        "#",
+        "$",
+        "%",
+        "^",
+        "&",
+        "*",
+        "+",
+        "=",
+        "{",
+        "}",
+        "[",
+        "]",
+        "|",
+        "\\",
+        ":",
+        ";",
+        "'",
+        '"',
+        "<",
+        ">",
+    ]:
+        if char in username:
+            return {"message": "Username contains invalid characters"}, 400
+
+    if "@" not in email or "." not in email:
+        return {"message": "Email is invalid"}, 400
+
     if username_available(username):
         cursor.execute(
             "INSERT INTO users (id, email, username, passwd) VALUES (?, ?, ?, ?)",
@@ -107,9 +139,10 @@ def login():
     req_json = flask.request.get_json()
     try:
         nameomail = req_json["nameomail"]
+        passwd = req_json["passwd"]
     except KeyError:
         return {"message": "Missing nameomail in request body"}, 400
-    if nameomail and req_json["passwd"]:
+    if nameomail and passwd:
         if "@" in nameomail:
             cursor.execute(
                 "SELECT passwd FROM users WHERE email = ?",
@@ -139,8 +172,16 @@ def login():
                             "success": True,
                         }
                     )
-                    response.set_cookie("sessioncookie", generate_session_cookie(tid))
-                    response.set_cookie("username", username)
+                    response.set_cookie(
+                        "sessioncookie",
+                        generate_session_cookie(tid),
+                        expires=datetime.datetime.now() + datetime.timedelta(days=365),
+                    )
+                    response.set_cookie(
+                        "username",
+                        username,
+                        expires=datetime.datetime.now() + datetime.timedelta(days=365),
+                    )
                     return response, 200
                 else:
                     return {"message": "Login not succesfull"}, 400
@@ -173,8 +214,8 @@ def logout():
             "success": True,
         }
     )
-    response.set_cookie("sessioncookie", "")
-    response.set_cookie("username", "")
+    response.set_cookie("sessioncookie", "", expires=datetime.datetime.now())
+    response.set_cookie("username", "", expires=datetime.datetime.now())
 
     return response, 200
 
@@ -514,8 +555,9 @@ def username_available(username: str) -> bool:
     return cursor.fetchone() is None
 
 
+with app.app_context():
+    init_db()
+
 if __name__ == "__main__":
-    with app.app_context():
-        init_db()
     app.config["DEBUG"] = True
     app.run(host="0.0.0.0", port=5000)
