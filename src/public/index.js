@@ -249,7 +249,7 @@
             dropdown.classList.add("modal-hidden");
         }
         if (event.target === modalAddFriend) {
-            closeAddFriendsMenu();
+            closeAddFriendMenu();
         }
         if (event.target === modalSettings) {
             closeSettingsMenu();
@@ -335,7 +335,7 @@
             modal.classList.remove("modal-hidden");
         }
     }
-    function closeAddFriendsMenu() {
+    function closeAddFriendMenu() {
         if (debug) {
             console.log("DEBUG: closing addFriensMenu: ");
         }
@@ -387,7 +387,7 @@
             if (debug) {
                 console.log("DEBUG: Automatic chat created, closing menu");
             }
-            closeAddFriendsMenu();
+            closeAddFriendMenu();
             page_load();
         })
             .catch((error) => {
@@ -733,11 +733,12 @@
     window.saveSettings = saveSettings;
     window.closeSettingsMenu = closeSettingsMenu;
     window.openAddFriendMenu = openAddFriendMenu;
-    window.closeAddFriendsMenu = closeAddFriendsMenu;
+    window.closeAddFriendMenu = closeAddFriendMenu;
     window.confirmAddFriend = confirmAddFriend;
     window.opennewchatsMenu = opennewchatsMenu;
     window.closenewchatsMenu = closenewchatsMenu;
     window.confirnewchats = confirnewchats;
     window.changeChat = changeChat;
     window.switchToChat = switchToChat;
+    window.send_message = send_message;
 })();

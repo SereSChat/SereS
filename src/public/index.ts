@@ -3,6 +3,7 @@
 
   let chats: any[] | null = null;
   let chats_count: number | null = null;
+  let current_chat: string | null = null;
   let userImagePath = "";
   let currentChatId: string | null = null;
 
@@ -292,7 +293,7 @@
     }
 
     if (event.target === modalAddFriend) {
-      closeAddFriendsMenu();
+      closeAddFriendMenu();
     }
 
     if (event.target === modalSettings) {
@@ -394,7 +395,7 @@
     }
   }
 
-  function closeAddFriendsMenu() {
+  function closeAddFriendMenu() {
     if (debug) {
       console.log("DEBUG: closing addFriensMenu: ");
     }
@@ -452,7 +453,7 @@
         if (debug) {
           console.log("DEBUG: Automatic chat created, closing menu");
         }
-        closeAddFriendsMenu();
+        closeAddFriendMenu();
         page_load();
       })
       .catch((error) => {
@@ -860,11 +861,12 @@
   (window as any).saveSettings = saveSettings;
   (window as any).closeSettingsMenu = closeSettingsMenu;
   (window as any).openAddFriendMenu = openAddFriendMenu;
-  (window as any).closeAddFriendsMenu = closeAddFriendsMenu;
+  (window as any).closeAddFriendMenu = closeAddFriendMenu;
   (window as any).confirmAddFriend = confirmAddFriend;
   (window as any).opennewchatsMenu = opennewchatsMenu;
   (window as any).closenewchatsMenu = closenewchatsMenu;
   (window as any).confirnewchats = confirnewchats;
   (window as any).changeChat = changeChat;
   (window as any).switchToChat = switchToChat;
+  (window as any).send_message = send_message;
 })();
