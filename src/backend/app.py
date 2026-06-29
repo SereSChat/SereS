@@ -78,6 +78,10 @@ def register():
     cursor = conn.cursor()
 
     req_json = flask.request.get_json()
+
+    if len(req_json["passwd"]) < 8:
+        return {"message": "Password must be at least 8 characters long"}, 400
+
     hashed_passwd = ph.hash(req_json["passwd"])
     try:
         username = req_json["username"]
@@ -113,8 +117,11 @@ def register():
         if char in username:
             return {"message": "Username contains invalid characters"}, 400
 
-    if "@" not in email or "." not in email:
+    if "@" not in email or "." not in email or len(email) < 4:
         return {"message": "Email is invalid"}, 400
+
+    if len(username) < 3 or len(username) > 20:
+        return {"message": "Username must be between 3 and 20 characters"}, 400
 
     if username_available(username):
         cursor.execute(
