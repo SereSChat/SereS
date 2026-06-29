@@ -760,7 +760,7 @@
 
         if (data.messages && data.messages.length > 0) {
           data.messages.forEach(
-            (msg: { sender: string; content: string; timestamp?: string }) => {
+            (msg: { sender: string; content: string; timestamp: string }) => {
               let messageElement = document.createElement("div");
               messageElement.className = "message-row";
 

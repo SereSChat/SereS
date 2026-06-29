@@ -130,6 +130,8 @@ def login():
             try:
                 if ph.verify(passwd[0], req_passwd):
                     username, tid = get_username_and_id(cursor, nameomail)
+                    if not username or not tid:
+                        return {"message": "Login not succesfull"}, 400
                     response = flask.make_response(
                         {
                             "message": "Login succesfull!",
@@ -418,12 +420,13 @@ def get_messages():
     chat_cursor.execute(
         "SELECT sender_id, content, timestamp FROM messages ORDER BY timestamp ASC"
     )
+
     messages = chat_cursor.fetchall()
     message_list = []
     for message in messages:
         message_list.append(
             {
-                "sender": message["sender_id"],
+                "sender": get_username_by_id(cursor, message["sender_id"]),
                 "content": message["content"],
                 "timestamp": message["timestamp"],
             }
@@ -431,19 +434,38 @@ def get_messages():
     return {"messages": message_list, "success": True}, 200
 
 
+def get_username_by_id(cursor, id):
+    cursor.execute("SELECT username FROM users WHERE id = ?", (id,))
+    try:
+        data = cursor.fetchone()["username"]
+    except Exception as e:
+        print(e)
+        return None
+    return data if data else None
+
+
 def get_username_and_id(cursor, nameomail):
     if "@" in nameomail:
         cursor.execute("SELECT username, id FROM users WHERE email = ?", (nameomail,))
         data = cursor.fetchone()
-        username = data["username"]
-        tid = data["id"]
+        try:
+            username = data["username"]
+            tid = data["id"]
+        except Exception as e:
+            print(e)
+            return None, None
+
     else:
         cursor.execute(
             "SELECT username, id FROM users WHERE username = ?", (nameomail,)
         )
         data = cursor.fetchone()
-        username = data["username"]
-        tid = data["id"]
+        try:
+            username = data["username"]
+            tid = data["id"]
+        except Exception as e:
+            print(e)
+            return None, None
 
     return username, tid
 
