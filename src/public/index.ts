@@ -18,6 +18,7 @@
     load_username();
     setInterval(() => {
       load_chats();
+      load_messages();
     }, 3000);
   }
 
@@ -726,7 +727,7 @@
     addThemeOptionToSettings();
   });
 
-  function load_messages(name: string) {
+  function load_messages(name?: string) {
     if (debug) {
       console.log("DEBUG: messages loading ...");
     }

@@ -17,6 +17,7 @@
         load_username();
         setInterval(() => {
             load_chats();
+            load_messages();
         }, 3000);
     }
     function load_animation() {
