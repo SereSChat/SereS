@@ -514,8 +514,9 @@ def username_available(username: str) -> bool:
     return cursor.fetchone() is None
 
 
+with app.app_context():
+    init_db()
+
 if __name__ == "__main__":
-    with app.app_context():
-        init_db()
     app.config["DEBUG"] = True
     app.run(host="0.0.0.0", port=5000)
