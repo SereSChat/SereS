@@ -2,6 +2,7 @@
 (() => {
     const debug = true;
     let chats = null;
+    let current_chat = null;
     let chats_count = null;
     let userImagePath = "";
     let currentChatId = null;
@@ -165,7 +166,14 @@
                 dmList.innerHTML = "";
                 for (let i = 0; i < chats.length; i++) {
                     let currentChat = chats[i];
-                    let chatId = currentChat.id || currentChat.chatid;
+                    let chatId = currentChat.chat;
+                    if (debug) {
+                        console.log("DEBUG: Loading chat with: " +
+                            currentChat.other_user +
+                            " (ID: " +
+                            chatId +
+                            ")");
+                    }
                     let chatHtml = `
               <div class="list-item" onclick="changeChat('${currentChat.other_user}', '${chatId}')">
                 <div class="avatar" style="background-color: #5865f2">
