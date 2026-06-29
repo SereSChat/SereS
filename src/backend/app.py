@@ -172,8 +172,16 @@ def login():
                             "success": True,
                         }
                     )
-                    response.set_cookie("sessioncookie", generate_session_cookie(tid))
-                    response.set_cookie("username", username)
+                    response.set_cookie(
+                        "sessioncookie",
+                        generate_session_cookie(tid),
+                        expires=datetime.datetime.now() + datetime.timedelta(days=365),
+                    )
+                    response.set_cookie(
+                        "username",
+                        username,
+                        expires=datetime.datetime.now() + datetime.timedelta(days=365),
+                    )
                     return response, 200
                 else:
                     return {"message": "Login not succesfull"}, 400
@@ -206,8 +214,8 @@ def logout():
             "success": True,
         }
     )
-    response.set_cookie("sessioncookie", "")
-    response.set_cookie("username", "")
+    response.set_cookie("sessioncookie", "", expires=datetime.datetime.now())
+    response.set_cookie("username", "", expires=datetime.datetime.now())
 
     return response, 200
 
