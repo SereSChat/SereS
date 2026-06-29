@@ -84,6 +84,38 @@ def register():
         email = req_json["email"]
     except KeyError:
         return {"message": "Missing username or email in request body"}, 400
+
+    for char in [
+        "@",
+        ".",
+        "!",
+        "#",
+        "$",
+        "%",
+        "^",
+        "&",
+        "*",
+        "+",
+        "=",
+        "{",
+        "}",
+        "[",
+        "]",
+        "|",
+        "\\",
+        ":",
+        ";",
+        "'",
+        '"',
+        "<",
+        ">",
+    ]:
+        if char in username:
+            return {"message": "Username contains invalid characters"}, 400
+
+    if "@" not in email or "." not in email:
+        return {"message": "Email is invalid"}, 400
+
     if username_available(username):
         cursor.execute(
             "INSERT INTO users (id, email, username, passwd) VALUES (?, ?, ?, ?)",
@@ -107,9 +139,10 @@ def login():
     req_json = flask.request.get_json()
     try:
         nameomail = req_json["nameomail"]
+        passwd = req_json["passwd"]
     except KeyError:
         return {"message": "Missing nameomail in request body"}, 400
-    if nameomail and req_json["passwd"]:
+    if nameomail and passwd:
         if "@" in nameomail:
             cursor.execute(
                 "SELECT passwd FROM users WHERE email = ?",
