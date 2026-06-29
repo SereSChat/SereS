@@ -1,9 +1,12 @@
+export {};
+
 const username_input = document.getElementById("username");
-username_input.style.display = "none";
+username_input!.style.display = "none";
 
 function login() {
-  var email = document.getElementById("email").value;
-  var password = document.getElementById("password").value;
+  var email = (document.getElementById("email") as HTMLInputElement).value;
+  var password = (document.getElementById("password") as HTMLInputElement)
+    .value;
 
   fetch("/api/login", {
     method: "POST",
@@ -18,40 +21,46 @@ function login() {
       if (data.success) {
         window.location.href = "index.html?login=true";
       } else {
-        document.getElementById("warning").innerHTML =
+        document.getElementById("warning")!.innerHTML =
           "<h4>Login failed, check your credentials.</h4>";
       }
     })
     .catch((error) => {
-      document.getElementById("warning").innerHTML =
+      document.getElementById("warning")!.innerHTML =
         "<h4>Server unreachable. Please try again later.</h4>";
     });
 }
 
 function register_redirect() {
-  const login_button = document.getElementById("login");
-  const main_button = document.getElementById("register_redirect");
+  const login_button = document.getElementById("login") as HTMLInputElement;
+  const main_button = document.getElementById(
+    "register_redirect",
+  ) as HTMLInputElement;
 
-  document.getElementById("ahaa").innerHTML =
+  document.getElementById("ahaa")!.innerHTML =
     '<a onclick="gotologin()">Already have an account?</a>';
 
   main_button.textContent = "Register";
   main_button.setAttribute("onclick", "register()");
   main_button.className = "action-button";
 
-  document.getElementById("landr").innerHTML = "<div>Register</div>";
+  document.getElementById("landr")!.innerHTML = "<div>Register</div>";
 
   login_button.style.display = "none";
-  username_input.style.display = "block";
+  username_input!.style.display = "block";
 
-  document.getElementById("tos-container").style.display = "flex";
-  main_button.disabled = !document.getElementById("tos-checkbox").checked;
+  document.getElementById("tos-container")!.style.display = "flex";
+  main_button.disabled = (
+    document.getElementById("tos-checkbox") as HTMLInputElement
+  ).checked;
 }
 
 function register() {
-  var username = document.getElementById("username").value;
-  var email = document.getElementById("email").value;
-  var password = document.getElementById("password").value;
+  var username = (document.getElementById("username") as HTMLInputElement)
+    .value;
+  var email = (document.getElementById("email") as HTMLInputElement).value;
+  var password = (document.getElementById("password") as HTMLInputElement)
+    .value;
 
   fetch("/api/register", {
     method: "POST",
@@ -70,52 +79,56 @@ function register() {
       }
     })
     .catch((error) => {
-      document.getElementById("warning").innerHTML =
+      document.getElementById("warning")!.innerHTML =
         "<h4>Server unreachable. Please try again later.</h4>";
     });
 }
 
 function gotologin() {
-  const login_button = document.getElementById("login");
-  const main_button = document.getElementById("register_redirect");
+  const login_button = document.getElementById("login") as HTMLButtonElement;
+  const main_button = document.getElementById(
+    "register_redirect",
+  ) as HTMLButtonElement;
 
-  document.getElementById("ahaa").innerHTML = "";
+  document.getElementById("ahaa")!.innerHTML = "";
 
   main_button.textContent = "Register";
   main_button.setAttribute("onclick", "register_redirect()");
   main_button.className = "";
 
-  document.getElementById("landr").innerHTML = "<div>Login</div>";
+  document.getElementById("landr")!.innerHTML = "<div>Login</div>";
 
   login_button.style.display = "block";
-  username_input.style.display = "none";
+  username_input!.style.display = "none";
 
-  document.getElementById("tos-container").style.display = "none";
+  document.getElementById("tos-container")!.style.display = "none";
   main_button.disabled = false;
 }
 
 function toggleRegisterButton() {
-  const checkbox = document.getElementById("tos-checkbox");
-  const registerBtn = document.getElementById("register_redirect");
-  registerBtn.disabled = !checkbox.checked;
+  const checkbox = document.getElementById("tos-checkbox") as HTMLInputElement;
+  const registerBtn = document.getElementById(
+    "register_redirect",
+  ) as HTMLButtonElement;
+  registerBtn.disabled = checkbox.checked;
 }
 
 function openToS() {
-  document.getElementById("tos-modal").style.display = "flex";
+  document.getElementById("tos-modal")!.style.display = "flex";
 }
 
 function closeToS() {
-  document.getElementById("tos-modal").style.display = "none";
+  document.getElementById("tos-modal")!.style.display = "none";
 }
 
-window.onclick = function (event) {
+window.onclick = function (event: MouseEvent) {
   const modal = document.getElementById("tos-modal");
-  if (event.target === modal) {
+  if (modal && event.target === modal) {
     modal.style.display = "none";
   }
 };
 
-function getCookie(name) {
+function getCookie(name: string) {
   let matches = document.cookie.match(
     new RegExp(
       "(?:^|; )" +

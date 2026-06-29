@@ -1,9 +1,11 @@
 const debug = true;
 
-let chats = null;
-let chats_count = null;
+export {};
+
+let chats: any[] | null = null;
+let chats_count: number | null = null;
 let userImagePath = "";
-let currentChatId: null = null;
+let currentChatId: string | null = null;
 
 function page_load() {
   if (debug) {
@@ -169,30 +171,31 @@ function load_chats() {
     .then((response) => response.json())
     .then((data) => {
       chats = data.chats;
-      chats_count = chats.length;
 
-      let dmList = document.getElementById("dm-list")!;
-      dmList.innerHTML = "";
+      if (chats) {
+        chats_count = chats.length;
 
-      for (let i = 0; i < chats.length; i++) {
-        let currentChat = chats[i];
+        let dmList = document.getElementById("dm-list")!;
+        dmList.innerHTML = "";
 
-        let chatId = currentChat.id || currentChat.chatid;
+        for (let i = 0; i < chats.length; i++) {
+          let currentChat = chats[i];
+          let chatId = currentChat.id || currentChat.chatid;
 
-        let chatHtml = `
-          <div class="list-item" onclick="changeChat('${currentChat.other_user}', '${chatId}')">
-            <div class="avatar" style="background-color: #5865f2">
-              ${currentChat.other_user.charAt(0).toUpperCase()}
+          let chatHtml = `
+            <div class="list-item" onclick="changeChat('${currentChat.other_user}', '${chatId}')">
+              <div class="avatar" style="background-color: #5865f2">
+                ${currentChat.other_user.charAt(0).toUpperCase()}
+              </div>
+              <div class="item-info">
+                <span class="item-name">${currentChat.other_user}</span>
+                <span class="item-status">${currentChat.last_message || "No messages"}</span>
+              </div>
+              <button class="delete-chat-btn" type="button" onclick="remove_chat('${currentChat.other_user}', event)">×</button>
             </div>
-            <div class="item-info">
-              <span class="item-name">${currentChat.other_user}</span>
-              <span class="item-status">${currentChat.last_message || "No messages"}</span>
-            </div>
-            <button class="delete-chat-btn" type="button" onclick="remove_chat('${currentChat.other_user}', event)">×</button>
-          </div>
-        `;
-
-        dmList.innerHTML = dmList.innerHTML + chatHtml;
+          `;
+          dmList.innerHTML = dmList.innerHTML + chatHtml;
+        }
       }
     })
     .catch((err) => console.error("Error loading chats:", err));
@@ -455,7 +458,7 @@ function changeChat(name: string, id: string) {
     console.log("DEBUG: Chat changed: " + name + " (ID: " + id + ")");
   }
 
-  let currentChatId = id;
+  currentChatId = id;
   document.getElementById("current-chat-name")!.innerText = name;
 
   let inputArea = document.getElementById("chat-input-area");
@@ -489,32 +492,6 @@ function showAlert(message: string) {
   alertText!.innerText = message;
   alertBox!.style.display = "block";
 }
-
-window.addEventListener("click", function (event) {
-  const modal = document.getElementById("add-chat-modal");
-  if (event.target === modal) {
-    closeAddFriendsMenu();
-  }
-});
-
-window.addEventListener("click", function (event) {
-  const trigger = document.querySelector(".user-menu-trigger");
-  const dropdown = document.getElementById("user-dropdown-menu");
-  const modal = document.getElementById("add-chat-modal");
-
-  if (
-    trigger &&
-    !trigger.contains(event.target as Node) &&
-    dropdown &&
-    !dropdown.contains(event.target as Node)
-  ) {
-    dropdown.classList.add("modal-hidden");
-  }
-
-  if (event.target === modal) {
-    closeAddFriendsMenu();
-  }
-});
 
 window.addEventListener("click", function (event) {
   const trigger = document.querySelector(".user-menu-trigger");
