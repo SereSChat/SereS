@@ -1,0 +1,735 @@
+"use strict";
+(() => {
+    const debug = true;
+    let chats = null;
+    let chats_count = null;
+    let userImagePath = "";
+    let currentChatId = null;
+    function page_load() {
+        if (debug) {
+            console.log("DEBUG: page_load loaded");
+        }
+        load_animation();
+        load_chats();
+        auth_cookie();
+        load_avatar();
+        load_username();
+        setInterval(() => {
+            load_chats();
+        }, 3000);
+    }
+    function load_animation() {
+        const introLayer = document.getElementById("intro-layer");
+        const introVideo = document.getElementById("intro-video");
+        function removeOverlay() {
+            if (introLayer) {
+                introLayer.style.opacity = "0";
+                setTimeout(() => {
+                    introLayer.remove();
+                }, 500);
+            }
+        }
+        const urlParams = new URLSearchParams(window.location.search);
+        const isLoginRedirect = urlParams.get("login") === "true";
+        const isFirstLoadOfSession = sessionStorage.getItem("sessionStarted") === null;
+        if (isLoginRedirect) {
+            const newUrl = window.location.pathname;
+            window.history.replaceState({}, document.title, newUrl);
+            sessionStorage.setItem("sessionStarted", "true");
+        }
+        else if (isFirstLoadOfSession) {
+            sessionStorage.setItem("sessionStarted", "true");
+        }
+        else {
+            if (introLayer)
+                introLayer.remove();
+            return;
+        }
+        if (introVideo && introLayer) {
+            introVideo.muted = true;
+            introVideo.playsInline = true;
+            const safetyTimeout = setTimeout(() => {
+                removeOverlay();
+            }, 5000);
+            introVideo.play().catch((error) => {
+                clearTimeout(safetyTimeout);
+                if (introLayer)
+                    introLayer.remove();
+            });
+            introVideo.onended = () => {
+                clearTimeout(safetyTimeout);
+                setTimeout(() => {
+                    removeOverlay();
+                }, 1000);
+            };
+        }
+        else {
+            if (introLayer)
+                introLayer.remove();
+        }
+    }
+    function logout() {
+        fetch("/api/logout", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+        })
+            .then((response) => response.json())
+            .then((data) => {
+            window.location.href = "login.html";
+        });
+    }
+    function load_avatar() {
+        const avatarText = document.getElementById("user-avatar-text");
+        const avatarImg = document.getElementById("user-avatar-img");
+        const username = getCookie("username");
+        if (avatarText && avatarImg) {
+            fetch("/api/get_avatar", {
+                method: "GET",
+                credentials: "include",
+            })
+                .then((response) => {
+                if (!response.ok) {
+                    throw new Error("No avatar found");
+                }
+                return response.blob();
+            })
+                .then((imageBlob) => {
+                userImagePath = URL.createObjectURL(imageBlob);
+                avatarImg.src = userImagePath;
+                avatarImg.style.display = "block";
+                avatarText.style.display = "none";
+            })
+                .catch((error) => {
+                if (username) {
+                    avatarText.innerText = username.charAt(0).toUpperCase();
+                }
+                else {
+                    avatarText.innerText = "?";
+                }
+                avatarText.style.display = "block";
+                avatarImg.style.display = "none";
+            });
+        }
+        else {
+            console.log("WARNING: 'user-avatar-text' or 'user-avatar-img' was not found in the HTML!");
+        }
+    }
+    function load_username() {
+        const username = getCookie("username") || "";
+        const usernameDisplay = document.getElementById("my-username-display");
+        const currentChatName = document.getElementById("current-chat-name");
+        if (usernameDisplay) {
+            usernameDisplay.innerText = username;
+        }
+        if (currentChatName) {
+            currentChatName.innerText = "Welcome " + username;
+        }
+    }
+    function auth_cookie() {
+        fetch("/api/auth_cookie", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+        })
+            .then((response) => response.json())
+            .then((data) => {
+            if (debug) {
+                console.log("DEBUG: respone get auth-cookies");
+            }
+            if (!data.success) {
+                window.location.href = "login.html";
+            }
+        })
+            .catch((error) => {
+            if (debug) {
+                console.log("DEBUG: error page_load");
+            }
+            showAlert("Server unreachable. Please try again later.");
+            console.log("Server not reachable. Please try again later. (cookie failed)");
+        });
+    }
+    function load_chats() {
+        fetch("/api/load_chats", {
+            method: "GET",
+            credentials: "include",
+        })
+            .then((response) => response.json())
+            .then((data) => {
+            chats = data.chats;
+            if (chats) {
+                chats_count = chats.length;
+                let dmList = document.getElementById("dm-list");
+                if (!dmList)
+                    return;
+                dmList.innerHTML = "";
+                for (let i = 0; i < chats.length; i++) {
+                    let currentChat = chats[i];
+                    let chatId = currentChat.id || currentChat.chatid;
+                    let chatHtml = `
+              <div class="list-item" onclick="changeChat('${currentChat.other_user}', '${chatId}')">
+                <div class="avatar" style="background-color: #5865f2">
+                  ${currentChat.other_user.charAt(0).toUpperCase()}
+                </div>
+                <div class="item-info">
+                  <span class="item-name">${currentChat.other_user}</span>
+                  <span class="item-status">${currentChat.last_message || "No messages"}</span>
+                </div>
+                <button class="delete-chat-btn" type="button" onclick="remove_chat('${currentChat.other_user}', event)">×</button>
+              </div>
+            `;
+                    dmList.innerHTML = dmList.innerHTML + chatHtml;
+                }
+            }
+        })
+            .catch((err) => console.error("Error loading chats:", err));
+    }
+    function remove_chat(username, event) {
+        if (event) {
+            event.stopPropagation();
+        }
+        if (!confirm("Do you really want to delete the chat with " + username + "?")) {
+            return;
+        }
+        if (debug) {
+            console.log("DEBUG: Deleting chat with: " + username);
+        }
+        fetch("/api/remove_chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: username }),
+            credentials: "include",
+        })
+            .then((response) => response.json())
+            .then((data) => {
+            if (data.success) {
+                if (debug) {
+                    console.log("DEBUG: Chat successfully deleted in the backend.");
+                }
+                const currentChatNameElem = document.getElementById("current-chat-name");
+                if (currentChatNameElem &&
+                    currentChatNameElem.innerText === username) {
+                    currentChatNameElem.innerText =
+                        "Welcome " + (getCookie("username") || "");
+                    const chatInputArea = document.getElementById("chat-input-area");
+                    if (chatInputArea) {
+                        chatInputArea.classList.add("modal-hidden");
+                    }
+                    const messagesContainer = document.querySelector(".messages-container");
+                    if (messagesContainer) {
+                        messagesContainer.innerHTML = "";
+                    }
+                }
+                load_chats();
+            }
+            else {
+                alert("Error deleting chat: " + (data.message || "Unknown error"));
+            }
+        })
+            .catch((error) => {
+            console.error("Error:", error);
+            showAlert("Server unreachable. Chat could not be deleted.");
+        });
+    }
+    function toggleUserMenu() {
+        const dropdown = document.getElementById("user-dropdown-menu");
+        if (dropdown) {
+            dropdown.classList.toggle("modal-hidden");
+        }
+    }
+    window.addEventListener("click", function (event) {
+        const trigger = document.querySelector(".user-menu-trigger");
+        const dropdown = document.getElementById("user-dropdown-menu");
+        const modalAddFriend = document.getElementById("add-chat-modal");
+        const modalSettings = document.getElementById("settings-modal");
+        if (trigger &&
+            !trigger.contains(event.target) &&
+            dropdown &&
+            !dropdown.contains(event.target)) {
+            dropdown.classList.add("modal-hidden");
+        }
+        if (event.target === modalAddFriend) {
+            closeAddFriendsMenu();
+        }
+        if (event.target === modalSettings) {
+            closeSettingsMenu();
+        }
+    });
+    function openSettings() {
+        if (debug) {
+            console.log("DEBUG: opening settingsMenu");
+        }
+        const modal = document.getElementById("settings-modal");
+        if (modal) {
+            modal.classList.remove("modal-hidden");
+        }
+    }
+    function saveSettings() {
+        if (debug) {
+            console.log("DEBUG: saving settings and uploading avatar");
+        }
+        const fileInput = document.getElementById("avatar-upload-input");
+        const warningText = document.getElementById("settings-warning");
+        if (warningText)
+            warningText.innerText = "";
+        if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+            closeSettingsMenu();
+            return;
+        }
+        const file = fileInput.files[0];
+        const maxSizeBytes = 1 * 1024 * 1024;
+        if (file.size > maxSizeBytes) {
+            if (warningText) {
+                warningText.innerText = "File is too large! Maximum size is 1MB.";
+            }
+            return;
+        }
+        const formData = new FormData();
+        formData.append("avatar", file);
+        fetch("/api/upload_avatar", {
+            method: "POST",
+            body: formData,
+            credentials: "include",
+        })
+            .then((response) => response.json())
+            .then((data) => {
+            if (data.success) {
+                alert("Avatar updated successfully!");
+                closeSettingsMenu();
+                page_load();
+            }
+            else {
+                if (warningText)
+                    warningText.innerText = "Upload failed: " + data.message;
+            }
+        })
+            .catch((error) => {
+            if (debug)
+                console.log("DEBUG: Error uploading avatar", error);
+            if (warningText)
+                warningText.innerText = "Server error. Please try again later.";
+        });
+    }
+    function closeSettingsMenu() {
+        if (debug) {
+            console.log("DEBUG: closing settingsMenu");
+        }
+        const uploadInput = document.getElementById("avatar-upload-input");
+        if (uploadInput) {
+            uploadInput.value = "";
+        }
+        const warningText = document.getElementById("settings-warning");
+        if (warningText)
+            warningText.innerText = "";
+        const modal = document.getElementById("settings-modal");
+        if (modal) {
+            modal.classList.add("modal-hidden");
+        }
+    }
+    function openAddFriendMenu() {
+        if (debug) {
+            console.log("DEBUG: opening addFriensMenu: ");
+        }
+        const modal = document.getElementById("add-friend-modal");
+        if (modal) {
+            modal.classList.remove("modal-hidden");
+        }
+    }
+    function closeAddFriendsMenu() {
+        if (debug) {
+            console.log("DEBUG: closing addFriensMenu: ");
+        }
+        const modal = document.getElementById("add-friend-modal");
+        if (modal) {
+            modal.classList.add("modal-hidden");
+        }
+    }
+    function confirmAddFriend() {
+        if (debug) {
+            console.log("DEBUG: adding Friend(s): ");
+        }
+        const inputElem = document.getElementById("friends-username-input");
+        if (!inputElem)
+            return;
+        let friendsusernameinput = inputElem.value;
+        fetch("/api/add_friend", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+                friend_username: friendsusernameinput,
+            }),
+        })
+            .then((response) => {
+            if (!response.ok)
+                throw new Error("Error adding friend");
+            return response.json();
+        })
+            .then((data) => {
+            if (debug) {
+                console.log("DEBUG: Friend added, now creating chat automatically...");
+            }
+            return fetch("/api/new_chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({
+                    friend_username: friendsusernameinput,
+                }),
+            });
+        })
+            .then((response) => {
+            if (!response.ok)
+                throw new Error("Error creating automatic chat");
+            return response.json();
+        })
+            .then(() => {
+            if (debug) {
+                console.log("DEBUG: Automatic chat created, closing menu");
+            }
+            closeAddFriendsMenu();
+            page_load();
+        })
+            .catch((error) => {
+            console.error("Error in friend/chat creation workflow:", error);
+            const warningElem = document.getElementById("warning");
+            if (warningElem) {
+                warningElem.innerHTML =
+                    "<h4>This username does not exist, is already your friend, or the chat could not be created.</h4>";
+            }
+        });
+    }
+    function opennewchatsMenu() {
+        if (debug) {
+            console.log("DEBUG: opening newchatsMenu: ");
+        }
+        const modal = document.getElementById("add-chat-modal");
+        if (modal) {
+            modal.classList.remove("modal-hidden");
+        }
+    }
+    function closenewchatsMenu() {
+        if (debug) {
+            console.log("DEBUG: closing newchatsMenu: ");
+        }
+        const modal = document.getElementById("add-chat-modal");
+        if (modal) {
+            modal.classList.add("modal-hidden");
+        }
+    }
+    function confirnewchats() {
+        if (debug) {
+            console.log("DEBUG: new chat created");
+        }
+        const inputElem = document.getElementById("new-chat-username-input");
+        if (!inputElem)
+            return;
+        let newchatusernameinput = inputElem.value;
+        fetch("/api/new_chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+                friend_username: newchatusernameinput,
+            }),
+        })
+            .then((response) => {
+            if (!response.ok)
+                throw new Error("Error creating chat");
+            return response.json();
+        })
+            .then(() => {
+            closenewchatsMenu();
+            page_load();
+        })
+            .catch((error) => {
+            const warningElem = document.getElementById("warning");
+            if (warningElem) {
+                warningElem.innerHTML =
+                    "<h4>This Chat already exists or an error occurred</h4>";
+            }
+        });
+    }
+    function changeChat(name, id) {
+        if (debug) {
+            console.log("DEBUG: Chat changed: " + name + " (ID: " + id + ")");
+        }
+        currentChatId = id;
+        const chatNameElem = document.getElementById("current-chat-name");
+        if (chatNameElem) {
+            chatNameElem.innerText = name;
+        }
+        let inputArea = document.getElementById("chat-input-area");
+        if (inputArea) {
+            inputArea.classList.remove("modal-hidden");
+        }
+        let groupItem = document.getElementById("group-item");
+        if (groupItem) {
+            groupItem.classList.remove("active");
+        }
+        load_messages(name);
+    }
+    function switchToChat() {
+        if (debug) {
+            console.log("DEBUG: switched to chat");
+        }
+        const chatNameElem = document.getElementById("current-chat-name");
+        if (chatNameElem)
+            chatNameElem.innerText = "Testchat";
+        const groupItemElem = document.getElementById("group-item");
+        if (groupItemElem)
+            groupItemElem.classList.remove("active");
+        const chatItemElem = document.getElementById("chat-item");
+        if (chatItemElem)
+            chatItemElem.classList.add("active");
+    }
+    function showAlert(message) {
+        if (debug) {
+            console.log("DEBUG: Alert shown");
+        }
+        const alertBox = document.getElementById("alert");
+        const alertText = document.getElementById("alert-text");
+        if (alertText)
+            alertText.innerText = message;
+        if (alertBox)
+            alertBox.style.display = "block";
+    }
+    function getCookie(name) {
+        if (debug) {
+            console.log("DEBUG: load cookies");
+        }
+        let matches = document.cookie.match(new RegExp("(?:^|; )" +
+            name.replace(/([\.$?*|{}\(\)\[\]\\\/\+^])/g, "\\$1") +
+            "=([^;]*)"));
+        return matches ? decodeURIComponent(matches[1]) : undefined;
+    }
+    function applyTheme() {
+        const isBright = getCookie("theme") === "bright";
+        document.body.classList.toggle("bright-body", isBright);
+        const sidebar = document.querySelector(".sidebar");
+        if (sidebar)
+            sidebar.classList.toggle("bright-sidebar", isBright);
+        const sidebarHeader = document.querySelector(".sidebar-header");
+        if (sidebarHeader)
+            sidebarHeader.classList.toggle("bright-sidebar-header", isBright);
+        const mainChat = document.querySelector(".main-chat");
+        if (mainChat)
+            mainChat.classList.toggle("bright-main-chat", isBright);
+        const chatHeader = document.querySelector(".chat-header");
+        if (chatHeader)
+            chatHeader.classList.toggle("bright-chat-header", isBright);
+        const inputContainer = document.querySelector(".input-container");
+        if (inputContainer)
+            inputContainer.classList.toggle("bright-input-container", isBright);
+        const inputBox = document.querySelector(".input-box");
+        if (inputBox)
+            inputBox.classList.toggle("bright-input-box", isBright);
+        const userMenuContainer = document.querySelector(".user-menu-container");
+        if (userMenuContainer)
+            userMenuContainer.classList.toggle("bright-user-menu-container", isBright);
+        const userDropdown = document.querySelector(".user-dropdown");
+        if (userDropdown)
+            userDropdown.classList.toggle("bright-user-dropdown", isBright);
+        const dropdownUsername = document.querySelector(".dropdown-username");
+        if (dropdownUsername)
+            dropdownUsername.classList.toggle("bright-dropdown-username", isBright);
+        const addChatBtn = document.querySelector(".add-chat-main-button");
+        if (addChatBtn)
+            addChatBtn.classList.toggle("bright-add-chat-main-button", isBright);
+        document
+            .querySelectorAll(".section-title")
+            .forEach((el) => el.classList.toggle("bright-section-title", isBright));
+        document
+            .querySelectorAll(".list-item")
+            .forEach((el) => el.classList.toggle("bright-list-item", isBright));
+        document
+            .querySelectorAll(".item-name")
+            .forEach((el) => el.classList.toggle("bright-item-name", isBright));
+        document
+            .querySelectorAll(".item-status")
+            .forEach((el) => el.classList.toggle("bright-item-status", isBright));
+        document
+            .querySelectorAll(".dropdown-divider")
+            .forEach((el) => el.classList.toggle("bright-dropdown-divider", isBright));
+        document
+            .querySelectorAll(".dropdown-item")
+            .forEach((el) => el.classList.toggle("bright-dropdown-item", isBright));
+        document
+            .querySelectorAll(".modal-overlay")
+            .forEach((el) => el.classList.toggle("bright-modal-overlay", isBright));
+        document
+            .querySelectorAll(".modal-box")
+            .forEach((el) => el.classList.toggle("bright-modal-box", isBright));
+        document
+            .querySelectorAll(".cancel-btn")
+            .forEach((el) => el.classList.toggle("bright-cancel-btn", isBright));
+        document
+            .querySelectorAll(".modal")
+            .forEach((el) => el.classList.toggle("bright-modal", isBright));
+        document
+            .querySelectorAll(".modal-content")
+            .forEach((el) => el.classList.toggle("bright-modal-content", isBright));
+    }
+    function toggleTheme() {
+        if (debug) {
+            console.log("DEBUG: theme toggled");
+        }
+        const currentTheme = getCookie("theme");
+        const newTheme = currentTheme === "bright" ? "dark" : "bright";
+        document.cookie = "theme=" + newTheme + "; path=/; max-age=31536000";
+        applyTheme();
+    }
+    function addThemeOptionToSettings() {
+        const modalBox = document.querySelector("#settings-modal .modal-box");
+        if (modalBox) {
+            const themeSection = document.createElement("div");
+            themeSection.style.marginTop = "15px";
+            themeSection.style.borderTop = "1px solid #2f3b43";
+            themeSection.style.paddingTop = "15px";
+            const label = document.createElement("p");
+            label.innerText = "App Design:";
+            themeSection.appendChild(label);
+            const themeBtn = document.createElement("button");
+            themeBtn.type = "button";
+            themeBtn.innerText = "🌓 Switch Light/Dark Mode";
+            themeBtn.style.width = "100%";
+            themeBtn.style.padding = "10px";
+            themeBtn.style.borderRadius = "8px";
+            themeBtn.style.cursor = "pointer";
+            themeBtn.style.fontWeight = "bold";
+            themeBtn.style.border = "1px solid #2f3b43";
+            themeBtn.style.backgroundColor = "#2a3942";
+            themeBtn.style.color = "#ffffff";
+            themeBtn.onclick = toggleTheme;
+            themeSection.appendChild(themeBtn);
+            const buttonsDiv = modalBox.querySelector(".modal-buttons");
+            if (buttonsDiv) {
+                modalBox.insertBefore(themeSection, buttonsDiv);
+            }
+        }
+    }
+    window.addEventListener("DOMContentLoaded", () => {
+        applyTheme();
+        addThemeOptionToSettings();
+    });
+    function load_messages(name) {
+        if (debug) {
+            console.log("DEBUG: messages loading ...");
+        }
+        fetch("/api/get_messages?chat_id=" + encodeURIComponent(name), {
+            method: "GET",
+            credentials: "include",
+        })
+            .then((response) => response.json())
+            .then((data) => {
+            if (debug) {
+                console.log("DEBUG: messages loaded");
+            }
+            let messagesContainer = document.querySelector(".messages-container");
+            if (!messagesContainer)
+                return;
+            messagesContainer.innerHTML = "";
+            const myUsername = getCookie("username");
+            if (data.messages && data.messages.length > 0) {
+                data.messages.forEach((msg) => {
+                    let messageElement = document.createElement("div");
+                    messageElement.className = "message-row";
+                    if (msg.sender === myUsername) {
+                        messageElement.classList.add("message-own");
+                    }
+                    let avatar = document.createElement("div");
+                    avatar.className = "message-avatar";
+                    avatar.innerText = msg.sender.charAt(0).toUpperCase();
+                    let contentWrapper = document.createElement("div");
+                    contentWrapper.className = "message-content-wrapper";
+                    let header = document.createElement("div");
+                    header.className = "message-header";
+                    let senderSpan = document.createElement("span");
+                    senderSpan.className = "message-sender";
+                    senderSpan.innerText = msg.sender;
+                    let timeSpan = document.createElement("span");
+                    timeSpan.className = "message-timestamp";
+                    timeSpan.innerText = msg.timestamp || "Loading ...";
+                    header.appendChild(senderSpan);
+                    header.appendChild(timeSpan);
+                    let textDiv = document.createElement("div");
+                    textDiv.className = "message-text";
+                    textDiv.innerText = msg.text;
+                    contentWrapper.appendChild(header);
+                    contentWrapper.appendChild(textDiv);
+                    messageElement.appendChild(avatar);
+                    messageElement.appendChild(contentWrapper);
+                    messagesContainer.appendChild(messageElement);
+                });
+            }
+        })
+            .catch((err) => console.error("Error loading messages:", err));
+    }
+    function send_message() {
+        if (debug) {
+            console.log("DEBUG: function send_message");
+        }
+        const inputElement = document.getElementById("message-input-field");
+        if (!inputElement)
+            return;
+        const messageText = inputElement.value.trim();
+        const chatNameElem = document.getElementById("current-chat-name");
+        const currentChatName = chatNameElem ? chatNameElem.innerText : "";
+        if (!messageText || !currentChatId)
+            return;
+        fetch("/api/send_message", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+                chat_id: currentChatId,
+                content: messageText,
+            }),
+        })
+            .then((response) => response.json())
+            .then((data) => {
+            if (data.success) {
+                inputElement.value = "";
+                load_messages(currentChatName);
+                if (debug) {
+                    console.log("DEBUG: message sent");
+                }
+            }
+            else {
+                showAlert("Error sending message");
+                if (debug) {
+                    console.log("DEBUG: error while sending message");
+                }
+            }
+        })
+            .catch((error) => {
+            showAlert("Server unreachable.");
+        });
+    }
+    document.addEventListener("DOMContentLoaded", () => {
+        const messageInput = document.getElementById("message-input-field");
+        if (messageInput) {
+            messageInput.addEventListener("keydown", function (event) {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    send_message();
+                }
+            });
+        }
+    });
+    window.page_load = page_load;
+    window.logout = logout;
+    window.remove_chat = remove_chat;
+    window.toggleUserMenu = toggleUserMenu;
+    window.openSettings = openSettings;
+    window.saveSettings = saveSettings;
+    window.closeSettingsMenu = closeSettingsMenu;
+    window.openAddFriendMenu = openAddFriendMenu;
+    window.closeAddFriendsMenu = closeAddFriendsMenu;
+    window.confirmAddFriend = confirmAddFriend;
+    window.opennewchatsMenu = opennewchatsMenu;
+    window.closenewchatsMenu = closenewchatsMenu;
+    window.confirnewchats = confirnewchats;
+    window.changeChat = changeChat;
+    window.switchToChat = switchToChat;
+})();
