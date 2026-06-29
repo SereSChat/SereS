@@ -2,6 +2,7 @@
   const debug = true;
 
   let chats: any[] | null = null;
+  let current_chat: any | null = null;
   let chats_count: number | null = null;
   let userImagePath = "";
   let currentChatId: string | null = null;
@@ -185,7 +186,17 @@
 
           for (let i = 0; i < chats.length; i++) {
             let currentChat = chats[i];
-            let chatId = currentChat.id || currentChat.chatid;
+            let chatId = currentChat.chat;
+
+            if (debug) {
+              console.log(
+                "DEBUG: Loading chat with: " +
+                  currentChat.other_user +
+                  " (ID: " +
+                  chatId +
+                  ")",
+              );
+            }
 
             let chatHtml = `
               <div class="list-item" onclick="changeChat('${currentChat.other_user}', '${chatId}')">
