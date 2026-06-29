@@ -13,6 +13,7 @@ from argon2.exceptions import VerifyMismatchError
 # TODO: add /api/upload_avatar
 
 app = flask.Flask(__name__, static_folder="../public", static_url_path="/")
+app.config["DEBUG"] = False
 CHATS = os.path.join(os.path.dirname(__file__), "chats")
 DB = os.path.join(os.path.dirname(__file__), "users.db")
 FRIENDS = os.path.join(os.path.dirname(__file__), "friends")
@@ -516,4 +517,5 @@ def username_available(username: str) -> bool:
 if __name__ == "__main__":
     with app.app_context():
         init_db()
+    app.config["DEBUG"] = True
     app.run(host="0.0.0.0", port=5000)
