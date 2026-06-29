@@ -4,7 +4,6 @@
   let chats: any[] | null = null;
   let current_chat: any | null = null;
   let chats_count: number | null = null;
-  let current_chat: string | null = null;
   let userImagePath = "";
   let currentChatId: string | null = null;
 
