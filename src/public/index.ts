@@ -3,7 +3,7 @@ const debug = true;
 let chats = null;
 let chats_count = null;
 let userImagePath = "";
-let currentChatId = null;
+let currentChatId: null = null;
 
 function page_load() {
   if (debug) {
@@ -21,7 +21,7 @@ function page_load() {
 
 function load_animation() {
   const introLayer = document.getElementById("intro-layer");
-  const introVideo = document.getElementById("intro-video");
+  const introVideo = document.getElementById("intro-video") as HTMLVideoElement;
 
   function removeOverlay() {
     if (introLayer) {
@@ -86,7 +86,9 @@ function logout() {
 
 function load_avatar() {
   const avatarText = document.getElementById("user-avatar-text");
-  const avatarImg = document.getElementById("user-avatar-img");
+  const avatarImg = document.getElementById(
+    "user-avatar-img",
+  ) as HTMLImageElement;
   const username = getCookie("username");
 
   if (avatarText && avatarImg) {
@@ -117,15 +119,15 @@ function load_avatar() {
       });
   } else {
     console.log(
-      "WARNING: 'user-avatar-text' or 'user-avatar-img' was not found in the HTML!",
+      "WARNING: 'user-avatar-text' or 'user-avatar-img' was not found",
     );
   }
 }
 
 function load_username() {
-  const username = getCookie("username");
-  document.getElementById("my-username-display").innerText = username;
-  document.getElementById("current-chat-name").innerText =
+  const username = getCookie("username") ?? "";
+  document.getElementById("my-username-display")!.innerText = username;
+  document.getElementById("current-chat-name")!.innerText =
     "Welcome " + username;
 }
 
@@ -169,7 +171,7 @@ function load_chats() {
       chats = data.chats;
       chats_count = chats.length;
 
-      let dmList = document.getElementById("dm-list");
+      let dmList = document.getElementById("dm-list")!;
       dmList.innerHTML = "";
 
       for (let i = 0; i < chats.length; i++) {
@@ -196,7 +198,7 @@ function load_chats() {
     .catch((err) => console.error("Error loading chats:", err));
 }
 
-function remove_chat(username, event) {
+function remove_chat(username: string, event: MouseEvent) {
   if (event) {
     event.stopPropagation();
   }
@@ -225,14 +227,14 @@ function remove_chat(username, event) {
         }
 
         const currentChatHeader =
-          document.getElementById("current-chat-name").innerText;
+          document.getElementById("current-chat-name")!.innerText;
         if (currentChatHeader === username) {
-          document.getElementById("current-chat-name").innerText =
+          document.getElementById("current-chat-name")!.innerText =
             "Welcome " + getCookie("username");
           document
-            .getElementById("chat-input-area")
+            .getElementById("chat-input-area")!
             .classList.add("modal-hidden");
-          document.querySelector(".messages-container").innerHTML = "";
+          document.querySelector(".messages-container")!.innerHTML = "";
         }
 
         load_chats();
@@ -247,7 +249,7 @@ function remove_chat(username, event) {
 }
 
 function toggleUserMenu() {
-  const dropdown = document.getElementById("user-dropdown-menu");
+  const dropdown = document.getElementById("user-dropdown-menu")!;
   dropdown.classList.toggle("modal-hidden");
 }
 
@@ -257,9 +259,9 @@ window.addEventListener("click", function (event) {
 
   if (
     trigger &&
-    !trigger.contains(event.target) &&
+    !trigger.contains(event.target as Node) &&
     dropdown &&
-    !dropdown.contains(event.target)
+    !dropdown.contains(event.target as Node)
   ) {
     dropdown.classList.add("modal-hidden");
   }
@@ -269,7 +271,7 @@ function openSettings() {
   if (debug) {
     console.log("DEBUG: opening settingsMenu");
   }
-  document.getElementById("settings-modal").classList.remove("modal-hidden");
+  document.getElementById("settings-modal")!.classList.remove("modal-hidden");
 }
 
 function saveSettings() {
@@ -277,17 +279,19 @@ function saveSettings() {
     console.log("DEBUG: saving settings and uploading avatar");
   }
 
-  const fileInput = document.getElementById("avatar-upload-input");
+  const fileInput = document.getElementById(
+    "avatar-upload-input",
+  ) as HTMLInputElement;
   const warningText = document.getElementById("settings-warning");
 
   if (warningText) warningText.innerText = "";
 
-  if (fileInput.files.length === 0) {
+  if (fileInput.files!.length === 0) {
     closeSettingsMenu();
     return;
   }
 
-  const file = fileInput.files[0];
+  const file = fileInput.files![0];
   const maxSizeBytes = 1 * 1024 * 1024;
 
   if (file.size > maxSizeBytes) {
@@ -328,33 +332,34 @@ function closeSettingsMenu() {
     console.log("DEBUG: closing settingsMenu");
   }
 
-  document.getElementById("avatar-upload-input").value = "";
+  (document.getElementById("avatar-upload-input") as HTMLInputElement).value =
+    "";
   const warningText = document.getElementById("settings-warning");
   if (warningText) warningText.innerText = "";
 
-  document.getElementById("settings-modal").classList.add("modal-hidden");
+  document.getElementById("settings-modal")!.classList.add("modal-hidden");
 }
 
 function openAddFriendMenu() {
   if (debug) {
     console.log("DEBUG: opening addFriensMenu: ");
   }
-  document.getElementById("add-friend-modal").classList.remove("modal-hidden");
+  document.getElementById("add-friend-modal")!.classList.remove("modal-hidden");
 }
 
 function closeAddFriendsMenu() {
   if (debug) {
     console.log("DEBUG: closing addFriensMenu: ");
   }
-  document.getElementById("add-friend-modal").classList.add("modal-hidden");
+  document.getElementById("add-friend-modal")!.classList.add("modal-hidden");
 }
 
 function confirmAddFriend() {
   if (debug) {
     console.log("DEBUG: adding Friend(s): ");
   }
-  let friendsusernameinput = document.getElementById(
-    "friends-username-input",
+  let friendsusernameinput = (
+    document.getElementById("friends-username-input") as HTMLInputElement
   ).value;
 
   fetch("/api/add_friend", {
@@ -396,7 +401,7 @@ function confirmAddFriend() {
     })
     .catch((error) => {
       console.error("Error in friend/chat creation workflow:", error);
-      document.getElementById("warning").innerHTML =
+      document.getElementById("warning")!.innerHTML =
         "<h4>This username does not exist, is already your friend, or the chat could not be created.</h4>";
     });
 }
@@ -405,22 +410,22 @@ function opennewchatsMenu() {
   if (debug) {
     console.log("DEBUG: opening newchatsMenu: ");
   }
-  document.getElementById("add-chat-modal").classList.remove("modal-hidden");
+  document.getElementById("add-chat-modal")!.classList.remove("modal-hidden");
 }
 
 function closenewchatsMenu() {
   if (debug) {
     console.log("DEBUG: closing newchatsMenu: ");
   }
-  document.getElementById("add-chat-modal").classList.add("modal-hidden");
+  document.getElementById("add-chat-modal")!.classList.add("modal-hidden");
 }
 
 function confirnewchats() {
   if (debug) {
     console.log("DEBUG: new chat created");
   }
-  let newchatusernameinput = document.getElementById(
-    "new-chat-username-input",
+  let newchatusernameinput = (
+    document.getElementById("new-chat-username-input") as HTMLInputElement
   ).value;
 
   fetch("/api/new_chat", {
@@ -440,18 +445,18 @@ function confirnewchats() {
       page_load();
     })
     .catch((error) => {
-      document.getElementById("warning").innerHTML =
+      document.getElementById("warning")!.innerHTML =
         "<h4>This Chat already exists or an error occurred</h4>";
     });
 }
 
-function changeChat(name, id) {
+function changeChat(name: string, id: string) {
   if (debug) {
     console.log("DEBUG: Chat changed: " + name + " (ID: " + id + ")");
   }
 
-  currentChatId = id;
-  document.getElementById("current-chat-name").innerText = name;
+  let currentChatId = id;
+  document.getElementById("current-chat-name")!.innerText = name;
 
   let inputArea = document.getElementById("chat-input-area");
   if (inputArea) {
@@ -470,19 +475,19 @@ function switchToChat() {
   if (debug) {
     console.log("DEBUG: switched to chat");
   }
-  document.getElementById("current-chat-name").innerText = "Testchat";
-  document.getElementById("group-item").classList.remove("active");
-  document.getElementById("chat-item").classList.add("active");
+  document.getElementById("current-chat-name")!.innerText = "Testchat";
+  document.getElementById("group-item")!.classList.remove("active");
+  document.getElementById("chat-item")!.classList.add("active");
 }
 
-function showAlert(message) {
+function showAlert(message: string) {
   if (debug) {
     console.log("DEBUG: Alert shown");
   }
   const alertBox = document.getElementById("alert");
   const alertText = document.getElementById("alert-text");
-  alertText.innerText = message;
-  alertBox.style.display = "block";
+  alertText!.innerText = message;
+  alertBox!.style.display = "block";
 }
 
 window.addEventListener("click", function (event) {
@@ -499,9 +504,9 @@ window.addEventListener("click", function (event) {
 
   if (
     trigger &&
-    !trigger.contains(event.target) &&
+    !trigger.contains(event.target as Node) &&
     dropdown &&
-    !dropdown.contains(event.target)
+    !dropdown.contains(event.target as Node)
   ) {
     dropdown.classList.add("modal-hidden");
   }
@@ -519,9 +524,9 @@ window.addEventListener("click", function (event) {
 
   if (
     trigger &&
-    !trigger.contains(event.target) &&
+    !trigger.contains(event.target as Node) &&
     dropdown &&
-    !dropdown.contains(event.target)
+    !dropdown.contains(event.target as Node)
   ) {
     dropdown.classList.add("modal-hidden");
   }
@@ -535,7 +540,7 @@ window.addEventListener("click", function (event) {
   }
 });
 
-function getCookie(name) {
+function getCookie(name: string) {
   if (debug) {
     console.log("DEBUG: load cookies");
   }
@@ -673,7 +678,7 @@ window.addEventListener("DOMContentLoaded", () => {
   addThemeOptionToSettings();
 });
 
-function load_messages(name) {
+function load_messages(name: string) {
   if (debug) {
     console.log("DEBUG: messages loading ...");
   }
@@ -687,51 +692,65 @@ function load_messages(name) {
         console.log("DEBUG: messages loaded");
       }
       let messagesContainer = document.querySelector(".messages-container");
-      messagesContainer.innerHTML = "";
+      messagesContainer!.innerHTML = "";
+
+      if (!data.messages || data.messages.length === 0) {
+        let emptyMessage = document.createElement("div");
+        emptyMessage.className = "no-messages-hint";
+        emptyMessage.style.textAlign = "center";
+        emptyMessage.style.padding = "20px";
+        emptyMessage.style.color = "#888";
+        emptyMessage.innerText = "No Messages.";
+
+        messagesContainer!.appendChild(emptyMessage);
+        return;
+      }
 
       const myUsername = getCookie("username");
 
-      data.messages.forEach((msg) => {
-        let messageElement = document.createElement("div");
-        messageElement.className = "message-row";
+      data.messages.forEach(
+        (msg: { sender: string; text: string; timestamp?: string }) => {
+          let messageElement = document.createElement("div");
+          messageElement.className = "message-row";
 
-        if (msg.sender === myUsername) {
-          messageElement.classList.add("message-own");
-        }
+          if (msg.sender === myUsername) {
+            messageElement.classList.add("message-own");
+          }
 
-        let avatar = document.createElement("div");
-        avatar.className = "message-avatar";
-        avatar.innerText = msg.sender.charAt(0).toUpperCase();
+          let avatar = document.createElement("div");
+          avatar.className = "message-avatar";
+          avatar.innerText = msg.sender.charAt(0).toUpperCase();
 
-        let contentWrapper = document.createElement("div");
-        contentWrapper.className = "message-content-wrapper";
+          let contentWrapper = document.createElement("div");
+          contentWrapper.className = "message-content-wrapper";
 
-        let header = document.createElement("div");
-        header.className = "message-header";
+          let header = document.createElement("div");
+          header.className = "message-header";
 
-        let senderSpan = document.createElement("span");
-        senderSpan.className = "message-sender";
-        senderSpan.innerText = msg.sender;
+          let senderSpan = document.createElement("span");
+          senderSpan.className = "message-sender";
+          senderSpan.innerText = msg.sender;
 
-        let timeSpan = document.createElement("span");
-        timeSpan.className = "message-timestamp";
-        timeSpan.innerText = msg.timestamp || "Loading ...";
+          let timeSpan = document.createElement("span");
+          timeSpan.className = "message-timestamp";
+          timeSpan.innerText = msg.timestamp || "Loading ...";
 
-        header.appendChild(senderSpan);
-        header.appendChild(timeSpan);
+          header.appendChild(senderSpan);
+          header.appendChild(timeSpan);
 
-        let textDiv = document.createElement("div");
-        textDiv.className = "message-text";
-        textDiv.innerText = msg.text;
+          let textDiv = document.createElement("div");
+          textDiv.className = "message-text";
+          textDiv.innerText = msg.text;
 
-        contentWrapper.appendChild(header);
-        contentWrapper.appendChild(textDiv);
+          contentWrapper.appendChild(header);
+          contentWrapper.appendChild(textDiv);
 
-        messageElement.appendChild(avatar);
-        messageElement.appendChild(contentWrapper);
+          messageElement.appendChild(avatar);
+          messageElement.appendChild(contentWrapper);
 
-        messagesContainer.appendChild(messageElement);
-      });
+          messagesContainer!.appendChild(messageElement);
+        },
+      );
     })
     .catch((err) => console.error("Error loading messages:", err));
 }
@@ -740,10 +759,12 @@ function send_message() {
   if (debug) {
     console.log("DEBUG: function send_message");
   }
-  const inputElement = document.getElementById("message-input-field");
+  const inputElement = document.getElementById(
+    "message-input-field",
+  ) as HTMLInputElement;
   const messageText = inputElement.value.trim();
   const currentChatName =
-    document.getElementById("current-chat-name").innerText;
+    document.getElementById("current-chat-name")!.innerText;
 
   if (!messageText || !currentChatId) return;
 
