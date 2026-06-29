@@ -719,10 +719,13 @@
     if (debug) {
       console.log("DEBUG: messages loading ...");
     }
-    fetch("/api/get_messages?chat_id=" + encodeURIComponent(name), {
-      method: "GET",
-      credentials: "include",
-    })
+    fetch(
+      "/api/get_messages?chat_id=" + encodeURIComponent(currentChatId || ""),
+      {
+        method: "GET",
+        credentials: "include",
+      },
+    )
       .then((response) => response.json())
       .then((data) => {
         if (debug) {

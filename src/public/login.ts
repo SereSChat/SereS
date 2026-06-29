@@ -78,6 +78,9 @@
         if (data.success) {
           console.log("Account created");
           window.location.reload();
+        } else {
+          document.getElementById("warning")!.innerHTML =
+            "<h4>Registration failed. Email already used.</h4>";
         }
       })
       .catch((error) => {
