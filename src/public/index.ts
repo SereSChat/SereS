@@ -719,13 +719,22 @@
     if (debug) {
       console.log("DEBUG: messages loading ...");
     }
-    fetch(
-      "/api/get_messages?chat_id=" + encodeURIComponent(currentChatId || ""),
-      {
-        method: "GET",
-        credentials: "include",
-      },
-    )
+
+    if (
+      !currentChatId ||
+      currentChatId === "undefined" ||
+      currentChatId.trim() === ""
+    ) {
+      if (debug) {
+        console.log("DEBUG: no valid currentChatId.");
+      }
+      return;
+    }
+
+    fetch("/api/get_messages?chat_id=" + encodeURIComponent(currentChatId), {
+      method: "GET",
+      credentials: "include",
+    })
       .then((response) => response.json())
       .then((data) => {
         if (debug) {
