@@ -616,7 +616,7 @@
         if (debug) {
             console.log("DEBUG: messages loading ...");
         }
-        fetch("/api/get_messages?chat_id=" + encodeURIComponent(name), {
+        fetch("/api/get_messages?chat_id=" + encodeURIComponent(currentChatId || ""), {
             method: "GET",
             credentials: "include",
         })
