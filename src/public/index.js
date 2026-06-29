@@ -670,7 +670,7 @@
                     header.appendChild(timeSpan);
                     let textDiv = document.createElement("div");
                     textDiv.className = "message-text";
-                    textDiv.innerText = msg.text;
+                    textDiv.innerText = msg.content;
                     contentWrapper.appendChild(header);
                     contentWrapper.appendChild(textDiv);
                     messageElement.appendChild(avatar);

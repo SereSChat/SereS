@@ -760,7 +760,7 @@
 
         if (data.messages && data.messages.length > 0) {
           data.messages.forEach(
-            (msg: { sender: string; text: string; timestamp?: string }) => {
+            (msg: { sender: string; content: string; timestamp?: string }) => {
               let messageElement = document.createElement("div");
               messageElement.className = "message-row";
 
@@ -791,7 +791,7 @@
 
               let textDiv = document.createElement("div");
               textDiv.className = "message-text";
-              textDiv.innerText = msg.text;
+              textDiv.innerText = msg.content;
 
               contentWrapper.appendChild(header);
               contentWrapper.appendChild(textDiv);
