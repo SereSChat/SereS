@@ -1,0 +1,5 @@
+Added:
+- phone compitability added
+
+Changes:
+- fixed lighed mode
