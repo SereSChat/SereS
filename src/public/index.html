@@ -45,6 +45,10 @@
         >
           <h6>Add Friend</h6>
         </button>
+        <div class="mobile-welcome">
+          Welcome <span id="mobile-username">Loading...</span>
+        </div>
+        <div class="sidebar-header"></div>
       </div>
 
       <div class="list-container">
@@ -135,6 +139,11 @@
 
     <div class="main-chat">
       <div class="chat-header">
+        <button class="menu-toggle" type="button" onclick="toggleSidebar()">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+            <path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"></path>
+          </svg>
+        </button>
         <span id="current-chat-name">Welcome Loading...</span>
       </div>
 

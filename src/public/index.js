@@ -15,6 +15,12 @@
         auth_cookie();
         load_avatar();
         load_username();
+        if (window.innerWidth <= 768) {
+            const sidebar = document.querySelector(".sidebar");
+            if (sidebar) {
+                sidebar.classList.add("open");
+            }
+        }
         setInterval(() => {
             load_chats();
             load_messages();
@@ -121,11 +127,15 @@
         const username = getCookie("username") || "";
         const usernameDisplay = document.getElementById("my-username-display");
         const currentChatName = document.getElementById("current-chat-name");
+        const mobileUsername = document.getElementById("mobile-username");
         if (usernameDisplay) {
             usernameDisplay.innerText = username;
         }
         if (currentChatName) {
             currentChatName.innerText = "Welcome " + username;
+        }
+        if (mobileUsername) {
+            mobileUsername.innerText = username;
         }
     }
     function auth_cookie() {
@@ -195,50 +205,46 @@
     }
     function remove_chat(username, event) {
         if (event) {
+            event.preventDefault();
             event.stopPropagation();
         }
-        if (!confirm("Do you really want to delete the chat with " + username + "?")) {
-            return;
-        }
-        if (debug) {
-            console.log("DEBUG: Deleting chat with: " + username);
-        }
-        fetch("/api/remove_chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ username: username }),
-            credentials: "include",
-        })
-            .then((response) => response.json())
-            .then((data) => {
-            if (data.success) {
-                if (debug) {
-                    console.log("DEBUG: Chat successfully deleted in the backend.");
-                }
-                const currentChatNameElem = document.getElementById("current-chat-name");
-                if (currentChatNameElem &&
-                    currentChatNameElem.innerText === username) {
-                    currentChatNameElem.innerText =
-                        "Welcome " + (getCookie("username") || "");
-                    const chatInputArea = document.getElementById("chat-input-area");
-                    if (chatInputArea) {
-                        chatInputArea.classList.add("modal-hidden");
-                    }
-                    const messagesContainer = document.querySelector(".messages-container");
-                    if (messagesContainer) {
-                        messagesContainer.innerHTML = "";
-                    }
-                }
-                load_chats();
+        setTimeout(() => {
+            if (!window.confirm("Do you really want to delete the chat with " + username + "?")) {
+                return;
             }
-            else {
-                alert("Error deleting chat: " + (data.message || "Unknown error"));
-            }
-        })
-            .catch((error) => {
-            console.error("Error:", error);
-            showAlert("Server unreachable. Chat could not be deleted.");
-        });
+            fetch("/api/remove_chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: username }),
+                credentials: "include",
+            })
+                .then((response) => response.json())
+                .then((data) => {
+                if (data.success) {
+                    const currentChatNameElem = document.getElementById("current-chat-name");
+                    if (currentChatNameElem &&
+                        currentChatNameElem.innerText === username) {
+                        currentChatNameElem.innerText =
+                            "Welcome " + (getCookie("username") || "");
+                        const chatInputArea = document.getElementById("chat-input-area");
+                        if (chatInputArea) {
+                            chatInputArea.classList.add("modal-hidden");
+                        }
+                        const messagesContainer = document.querySelector(".messages-container");
+                        if (messagesContainer) {
+                            messagesContainer.innerHTML = "";
+                        }
+                    }
+                    load_chats();
+                }
+                else {
+                    alert("Error deleting chat: " + (data.message || "Unknown error"));
+                }
+            })
+                .catch((error) => {
+                showAlert("Server unreachable. Chat could not be deleted.");
+            });
+        }, 10);
     }
     function toggleUserMenu() {
         const dropdown = document.getElementById("user-dropdown-menu");
@@ -477,7 +483,13 @@
             groupItem.classList.remove("active");
         }
         load_messages(name);
-    }
+        if (window.innerWidth <= 768) {
+            const sidebar = document.querySelector(".sidebar");
+            if (sidebar) {
+                sidebar.classList.remove("open");
+            }
+        }
+    } // <--- Diese Klammer hat gefehlt!
     function switchToChat() {
         if (debug) {
             console.log("DEBUG: switched to chat");
@@ -500,8 +512,18 @@
         const alertText = document.getElementById("alert-text");
         if (alertText)
             alertText.innerText = message;
-        if (alertBox)
+        if (alertBox) {
+            alertBox.classList.remove("hidden");
             alertBox.style.display = "block";
+        }
+        setTimeout(() => {
+            if (alertBox) {
+                alertBox.classList.add("hidden");
+                setTimeout(() => {
+                    alertBox.style.display = "none";
+                }, 500);
+            }
+        }, 4000);
     }
     function getCookie(name) {
         if (debug) {
@@ -723,17 +745,39 @@
             showAlert("Server unreachable.");
         });
     }
-    document.addEventListener("DOMContentLoaded", () => {
-        const messageInput = document.getElementById("message-input-field");
-        if (messageInput) {
-            messageInput.addEventListener("keydown", function (event) {
-                if (event.key === "Enter") {
-                    event.preventDefault();
-                    send_message();
-                }
-            });
+    function toggleSidebar() {
+        const sidebar = document.querySelector(".sidebar");
+        if (sidebar) {
+            sidebar.classList.toggle("open");
+        }
+    }
+    document.addEventListener("click", (event) => {
+        const sidebar = document.querySelector(".sidebar");
+        const toggleBtn = document.querySelector(".menu-toggle");
+        const target = event.target;
+        const isModalClick = target.closest(".modal-overlay") !== null ||
+            target.classList.contains("modal-overlay");
+        if (sidebar &&
+            sidebar.classList.contains("open") &&
+            window.innerWidth <= 768) {
+            if (!sidebar.contains(target) &&
+                toggleBtn &&
+                !toggleBtn.contains(target) &&
+                !isModalClick) {
+                sidebar.classList.remove("open");
+            }
         }
     });
+    document.addEventListener("DOMContentLoaded", () => {
+        const modals = ["add-friend-modal", "add-chat-modal", "settings-modal"];
+        modals.forEach((id) => {
+            const modal = document.getElementById(id);
+            if (modal) {
+                document.body.appendChild(modal);
+            }
+        });
+    });
+    window.toggleSidebar = toggleSidebar;
     window.page_load = page_load;
     window.logout = logout;
     window.remove_chat = remove_chat;
