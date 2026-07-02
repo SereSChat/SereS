@@ -483,13 +483,14 @@
             groupItem.classList.remove("active");
         }
         load_messages(name);
+        load_messages(name, true);
         if (window.innerWidth <= 768) {
             const sidebar = document.querySelector(".sidebar");
             if (sidebar) {
                 sidebar.classList.remove("open");
             }
         }
-    } // <--- Diese Klammer hat gefehlt!
+    }
     function switchToChat() {
         if (debug) {
             console.log("DEBUG: switched to chat");
@@ -643,7 +644,7 @@
         applyTheme();
         addThemeOptionToSettings();
     });
-    function load_messages(name) {
+    function load_messages(name, shouldScroll = false) {
         if (debug) {
             console.log("DEBUG: messages loading ...");
         }
@@ -700,6 +701,9 @@
                     messageElement.appendChild(contentWrapper);
                     messagesContainer.appendChild(messageElement);
                 });
+                if (shouldScroll) {
+                    scrollToBottom();
+                }
             }
         })
             .catch((err) => console.error("Error loading messages:", err));
@@ -730,12 +734,14 @@
             if (data.success) {
                 inputElement.value = "";
                 load_messages(currentChatName);
+                load_messages(currentChatName, true);
                 if (debug) {
                     console.log("DEBUG: message sent");
                 }
             }
             else {
                 showAlert("Error sending message");
+                load_messages(currentChatName, true);
                 if (debug) {
                     console.log("DEBUG: error while sending message");
                 }
@@ -776,6 +782,25 @@
                 document.body.appendChild(modal);
             }
         });
+    });
+    function scrollToBottom() {
+        setTimeout(() => {
+            const messageContainer = document.querySelector(".messages-container");
+            if (messageContainer) {
+                messageContainer.scrollTop = messageContainer.scrollHeight;
+            }
+        }, 50);
+    }
+    document.addEventListener("DOMContentLoaded", () => {
+        const messageInput = document.getElementById("message-input-field");
+        if (messageInput) {
+            messageInput.addEventListener("keydown", (event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    send_message();
+                }
+            });
+        }
     });
     window.toggleSidebar = toggleSidebar;
     window.page_load = page_load;

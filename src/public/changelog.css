@@ -1,0 +1,274 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  background-color: #0c1317;
+  color: #e9edef;
+  line-height: 1.5;
+}
+
+.changelog-container {
+  max-width: 700px;
+  margin: 40px auto;
+  padding: 0 20px;
+}
+
+.changelog-header {
+  text-align: center;
+  margin-bottom: 50px;
+}
+
+.changelog-header h1 {
+  font-size: 2.2rem;
+  color: #ffffff;
+  margin: 0 0 10px 0;
+}
+
+.changelog-header p {
+  color: #8696a0;
+  margin: 0;
+}
+
+.timeline {
+  position: relative;
+  padding: 10px 0;
+}
+
+.version-block {
+  position: relative;
+  margin-bottom: 40px;
+  padding-left: 50px;
+}
+
+.version-block::before {
+  content: "";
+  position: absolute;
+  top: 22px;
+  left: 18px;
+  width: 2px;
+  bottom: -45px;
+  background-color: #222e35;
+  z-index: 1;
+}
+
+.version-block:last-child::before {
+  display: none !important;
+}
+
+.version-dot {
+  position: absolute;
+  left: 10px;
+  top: 4px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background-color: #00a884;
+  border: 4px solid #0c1317;
+  box-shadow: 0 0 0 2px #00a884;
+  z-index: 2;
+}
+
+.version-block:first-child .version-dot {
+  box-shadow:
+    0 0 0 2px #00a884,
+    0 0 10px #00a884;
+}
+
+.version-dot.beta {
+  background-color: #eab308 !important;
+  box-shadow: 0 0 0 2px #eab308 !important;
+}
+
+.version-block:first-child .version-dot.beta {
+  box-shadow:
+    0 0 0 2px #eab308,
+    0 0 10px #eab308 !important;
+}
+
+.version-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.version-number {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #ffffff;
+  margin: 0;
+}
+
+.version-date {
+  font-size: 0.9rem;
+  color: #8696a0;
+}
+
+.badge-latest {
+  background-color: rgba(0, 168, 132, 0.15);
+  color: #00a884;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: bold;
+  text-transform: uppercase;
+}
+
+.badge-beta {
+  background-color: rgba(234, 179, 8, 0.15);
+  color: #eab308;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: bold;
+  text-transform: uppercase;
+}
+
+.badge-release {
+  background-color: rgba(52, 152, 219, 0.15);
+  color: #3498db;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: bold;
+  text-transform: uppercase;
+}
+
+.version-card {
+  background-color: #111b21;
+  border: 1px solid #222e35;
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.change-section {
+  margin-bottom: 15px;
+}
+
+.change-section:last-child {
+  margin-bottom: 0;
+}
+
+.section-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin: 0 0 8px 0;
+}
+
+.title-added {
+  color: #00a884;
+}
+.title-fixed {
+  color: #3498db;
+}
+.title-improved {
+  color: #e67e22;
+}
+
+.change-list {
+  margin: 0;
+  padding-left: 20px;
+  color: #d1d7db;
+}
+
+.change-list li {
+  margin-bottom: 6px;
+  font-size: 0.95rem;
+}
+
+body.bright-body {
+  background-color: #f0f2f5;
+  color: #111b21;
+}
+
+body.bright-body .changelog-header h1 {
+  color: #111b21;
+}
+
+body.bright-body .changelog-header p {
+  color: #667781;
+}
+
+body.bright-body .version-block::before {
+  background-color: #e1e9eb;
+}
+
+body.bright-body .version-dot {
+  border-color: #f0f2f5;
+}
+
+body.bright-body .version-number {
+  color: #111b21;
+}
+
+body.bright-body .version-date {
+  color: #667781;
+}
+
+body.bright-body .version-card {
+  background-color: #ffffff;
+  border-color: #e1e9eb;
+}
+
+body.bright-body .change-list {
+  color: #3b4a54;
+}
+
+.back-button {
+  position: fixed;
+  top: 20px;
+  left: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background-color: #111b21;
+  border: 1px solid #222e35;
+  border-radius: 6px;
+  color: #00a884;
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 600;
+  z-index: 100;
+  transition:
+    transform 0.2s ease,
+    background-color 0.2s ease;
+}
+
+.back-button:hover {
+  background-color: #222e35;
+  transform: translateX(-2px);
+}
+
+.back-button svg {
+  transition: transform 0.2s ease;
+}
+
+body.bright-body .back-button {
+  background-color: #ffffff;
+  border-color: #e1e9eb;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+body.bright-body .back-button:hover {
+  background-color: #f0f2f5;
+}
+
+@media (max-width: 768px) {
+  .back-button {
+    position: absolute;
+    top: 15px;
+    left: 15px;
+  }
+  .changelog-container {
+    margin-top: 60px;
+  }
+}
