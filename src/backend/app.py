@@ -6,11 +6,20 @@ import os
 import json
 import secrets
 import uuid
+import pyheartbeat
+import dotenv
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
 # TODO: add /api/get_avatar
 # TODO: add /api/upload_avatar
+
+dotenv.load_dotenv()
+
+url = os.getenv("URL")
+
+pyheartbeat.setUrl(url)
+pyheartbeat.heartbeat(interval=600, name="uptime-checker")
 
 app = flask.Flask(__name__, static_folder="../public", static_url_path="/")
 app.config["DEBUG"] = False
