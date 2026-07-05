@@ -12,7 +12,6 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
 # TODO: add /api/get_avatar
-# TODO: add /api/upload_avatar
 
 dotenv.load_dotenv()
 
@@ -23,6 +22,7 @@ pyheartbeat.heartbeat(interval=600, name="uptime-checker")
 
 app = flask.Flask(__name__, static_folder="../public", static_url_path="/")
 app.config["DEBUG"] = False
+USER_DATA = os.path.join(os.path.dirname(__file__), "user_data")
 CHATS = os.path.join(os.path.dirname(__file__), "chats")
 DB = os.path.join(os.path.dirname(__file__), "users.db")
 FRIENDS = os.path.join(os.path.dirname(__file__), "friends")
@@ -234,6 +234,44 @@ def logout():
     response.set_cookie("username", "", expires=datetime.datetime.now())
 
     return response, 200
+
+
+@app.route("/api/upload_avatar", methods=["POST"])
+def upload_avatar():
+    sessioncookie = flask.request.cookies.get("sessioncookie")
+    if not sessioncookie:
+        return {"message": "No sessioncookie provided"}, 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id FROM sessions WHERE cookie = ?",
+        (sessioncookie,),
+    )
+    try:
+        user_id = cursor.fetchone()["user_id"]
+    except Exception as e:
+        print(e)
+        return {"message": "Invalid sessioncookie"}, 400
+
+    if "image" not in flask.request.files:
+        return {"message": "No file part"}, 400
+
+    file = flask.request.files["image"]
+
+    if not file.filename:
+        return {"message": "No selected file"}, 400
+
+    file.seek(0, 2)
+    fsize = file.tell()
+    file.seek(0)
+
+    if fsize > 5 * 1024 * 1024:
+        return {"message": "File size exceeds 5MB limit"}, 400
+
+    if file:
+        file.save(os.path.join(USER_DATA, user_id, "avatar.png"))
+        return {"message": "Image uploaded successfully", "success": True}, 200
+    return {"message": "Image upload didn't work"}, 400
 
 
 @app.route("/api/add_friend", methods=["POST"])
