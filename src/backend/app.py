@@ -14,8 +14,6 @@ from PIL import Image
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
-# TODO: add /api/get_avatar
-
 dotenv.load_dotenv()
 
 heartbeaturl = os.getenv("URL")
