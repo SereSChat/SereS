@@ -1,3 +1,5 @@
+import io
+
 import flask
 from flask import g
 import sqlite3
@@ -8,6 +10,7 @@ import secrets
 import uuid
 import pyheartbeat
 import dotenv
+from PIL import Image
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
@@ -15,9 +18,9 @@ from argon2.exceptions import VerifyMismatchError
 
 dotenv.load_dotenv()
 
-url = os.getenv("URL")
+heartbeaturl = os.getenv("URL")
 
-pyheartbeat.setUrl(url)
+pyheartbeat.setUrl(heartbeaturl)
 pyheartbeat.heartbeat(interval=600, name="uptime-checker")
 
 app = flask.Flask(__name__, static_folder="../public", static_url_path="/")
@@ -236,6 +239,30 @@ def logout():
     return response, 200
 
 
+@app.route("/api/get_avatar")
+def get_avatar():
+    sessioncookie = flask.request.cookies.get("sessioncookie")
+    if not sessioncookie:
+        return {"message": "No sessioncookie provided"}, 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id FROM sessions WHERE cookie = ?",
+        (sessioncookie,),
+    )
+    try:
+        user_id = cursor.fetchone()["user_id"]
+    except Exception as e:
+        print(e)
+        return {"message": "Invalid sessioncookie"}, 400
+    image_path = os.path.join(USER_DATA, user_id, "avatar.png")
+    image = Image.open(image_path)
+    io_img = io.BytesIO()
+    image.save(io_img, "PNG")
+    response = flask.send_file(io_img, mimetype="image/png")
+    return response, 200
+
+
 @app.route("/api/upload_avatar", methods=["POST"])
 def upload_avatar():
     sessioncookie = flask.request.cookies.get("sessioncookie")
@@ -260,6 +287,9 @@ def upload_avatar():
 
     if not file.filename:
         return {"message": "No selected file"}, 400
+
+    if not file.mimetype == "image/png":
+        return {"message": "Wrong filetype (only support png's)"}, 400
 
     file.seek(0, 2)
     fsize = file.tell()
