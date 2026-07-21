@@ -254,9 +254,12 @@ def get_avatar():
         print(e)
         return {"message": "Invalid sessioncookie"}, 400
     image_path = os.path.join(USER_DATA, user_id, "avatar.png")
-    image = Image.open(image_path)
-    io_img = io.BytesIO()
-    image.save(io_img, "PNG")
+    try:
+        image = Image.open(image_path)
+        io_img = io.BytesIO()
+        image.save(io_img, "PNG")
+    except Exception:
+        return {"message": "No avatar uploaded"}, 400
     response = flask.send_file(io_img, mimetype="image/png")
     return response, 200
 
@@ -296,8 +299,13 @@ def upload_avatar():
     if fsize > 5 * 1024 * 1024:
         return {"message": "File size exceeds 5MB limit"}, 400
 
+    os.makedirs(os.path.join(USER_DATA, user_id), exist_ok=True)
+
     if file:
-        file.save(os.path.join(USER_DATA, user_id, "avatar.png"))
+        avatarpath = os.path.join(USER_DATA, user_id, "avatar.png")
+        if os.path.exists(avatarpath):
+            os.remove(avatarpath)
+        file.save(avatarpath)
         return {"message": "Image uploaded successfully", "success": True}, 200
     return {"message": "Image upload didn't work"}, 400
 
@@ -331,11 +339,15 @@ def add_friend():  # TODO: add a function which asks the being added user to acc
         return {"message": "Friend username not found"}, 400
     if user_id == friend_id:
         return {"message": "Cannot add yourself as a friend"}, 400
+
+    os.makedirs(os.path.join(USER_DATA, user_id), exist_ok=True)
+
+    friendspath = os.path.join(USER_DATA, user_id, "friends.json")
     try:
-        with open(os.path.join(FRIENDS, user_id + ".json"), "x") as f:
+        with open(os.path.join(friendspath), "x") as f:
             json.dump({"friends": [friend_id]}, f)
     except FileExistsError:
-        with open(os.path.join(FRIENDS, user_id + ".json"), "r+") as f:
+        with open(os.path.join(friendspath), "r+") as f:
             data = json.load(f)
             if friend_id in data["friends"]:
                 return {"message": "Friend already added"}, 400
@@ -344,6 +356,25 @@ def add_friend():  # TODO: add a function which asks the being added user to acc
             json.dump(data, f)
             f.truncate()
     return {"message": "Friend added successfully!", "success": True}, 200
+
+
+@app.route("/api/pending_friend")
+def pending_friend():
+    sessioncookie = flask.request.cookies.get("sessioncookie")
+    if not sessioncookie:
+        return {"message": "No sessioncookie provided"}, 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id FROM sessions WHERE cookie = ?",
+        (sessioncookie,),
+    )
+    try:
+        user_id = cursor.fetchone()["user_id"]
+    except Exception as e:
+        print(e)
+        return {"message": "Invalid sessioncookie"}, 400
+    return {"message": "Not implemented", "success": False}, 400
 
 
 @app.route("/api/new_chat", methods=["POST"])
