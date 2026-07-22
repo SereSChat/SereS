@@ -1,4 +1,7 @@
 .venv
+node_modules
+package-lock.json
+package.json
 users.db
 __pycache__/
 .env
