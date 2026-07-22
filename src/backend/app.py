@@ -311,7 +311,7 @@ def upload_avatar():
 
 
 @app.route("/api/add_friend", methods=["POST"])
-def add_friend():  # TODO: add a function which asks the being added user to accept
+def add_friend():
     sessioncookie = flask.request.cookies.get("sessioncookie")
     if not sessioncookie:
         return {"message": "No sessioncookie provided"}, 400
@@ -340,22 +340,48 @@ def add_friend():  # TODO: add a function which asks the being added user to acc
     if user_id == friend_id:
         return {"message": "Cannot add yourself as a friend"}, 400
 
-    os.makedirs(os.path.join(USER_DATA, user_id), exist_ok=True)
-
-    friendspath = os.path.join(USER_DATA, user_id, "friends.json")
     try:
-        with open(os.path.join(friendspath), "x") as f:
-            json.dump({"friends": [friend_id]}, f)
+        with open(os.path.join(USER_DATA, friend_id, "pending_friends.json"), "r") as f:
+            pending_list = json.load(f)
+            if user_id in pending_list["pending"]:
+                os.makedirs(os.path.join(USER_DATA, user_id), exist_ok=True)
+                friendspath = os.path.join(USER_DATA, user_id, "friends.json")
+                try:
+                    with open(os.path.join(friendspath), "x") as f:
+                        json.dump({"friends": [friend_id]}, f)
+                except FileExistsError:
+                    with open(os.path.join(friendspath), "r+") as f:
+                        data = json.load(f)
+                        if friend_id in data["friends"]:
+                            return {"message": "Friend already added"}, 400
+                        data["friends"].append(friend_id)
+                        f.seek(0)
+                        json.dump(data, f)
+                        f.truncate()
+                return {"message": "Friend added successfully!", "success": True}, 200
+    except FileNotFoundError:
+        pass
+
+    try:
+        with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "x") as f:
+            json.dump({"pending": [friend_id]}, f)
     except FileExistsError:
-        with open(os.path.join(friendspath), "r+") as f:
-            data = json.load(f)
-            if friend_id in data["friends"]:
-                return {"message": "Friend already added"}, 400
-            data["friends"].append(friend_id)
-            f.seek(0)
-            json.dump(data, f)
-            f.truncate()
-    return {"message": "Friend added successfully!", "success": True}, 200
+        try:
+            with open(
+                os.path.join(USER_DATA, user_id, "pending_friends.json"), "r"
+            ) as f:
+                pending_list = json.load(f)
+            if friend_id not in pending_list["pending"]:
+                pending_list["pending"].append(friend_id)
+            else:
+                return {"message": "Already pending request"}
+            with open(
+                os.path.join(USER_DATA, user_id, "pending_friends.json"), "w"
+            ) as f:
+                json.dump(pending_list, f, indent=2)
+        except Exception:
+            return {"message": "Internal error"}, 400
+    return {"message": "Requestet sended"}
 
 
 @app.route("/api/pending_friend")
