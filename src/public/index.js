@@ -300,7 +300,7 @@
             return;
         }
         const formData = new FormData();
-        formData.append("avatar", file);
+        formData.append("avatar_img", file);
         fetch("/api/upload_avatar", {
             method: "POST",
             body: formData,

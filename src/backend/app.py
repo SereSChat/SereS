@@ -281,10 +281,10 @@ def upload_avatar():
         print(e)
         return {"message": "Invalid sessioncookie"}, 400
 
-    if "image" not in flask.request.files:
+    if "avatar_img" not in flask.request.files:
         return {"message": "No file part"}, 400
 
-    file = flask.request.files["image"]
+    file = flask.request.files["avatar_img"]
 
     if not file.filename:
         return {"message": "No selected file"}, 400
