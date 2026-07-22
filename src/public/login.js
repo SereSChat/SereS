@@ -41,8 +41,13 @@
         username_input.style.display = "block";
         document.getElementById("tos-container").style.display = "flex";
         main_button.disabled = !document.getElementById("tos-checkbox").checked;
+        const passwordInput = document.getElementById("password");
+        if (passwordInput) {
+            passwordInput.placeholder = "Password (minimum 8 characters)";
+        }
     }
     function register() {
+        const warningElement = document.getElementById("warning");
         const username = document.getElementById("username")
             .value;
         const email = document.getElementById("email").value;
@@ -55,8 +60,8 @@
                 accept: "application/json",
             },
             body: JSON.stringify({
-                username: username,
-                email: email,
+                username,
+                email,
                 passwd: password,
             }),
         })
@@ -64,16 +69,21 @@
             .then((data) => {
             if (data.success) {
                 console.log("Account created");
+                alert("Account created successfully! You can now log in.");
                 window.location.reload();
             }
-            else {
-                document.getElementById("warning").innerHTML =
-                    "<h4>Registration failed. Email already used.</h4>";
+            else if (warningElement) {
+                warningElement.textContent =
+                    data.message || "An Error occurred during registration.";
             }
         })
             .catch((error) => {
-            document.getElementById("warning").innerHTML =
-                "<h4>Server unreachable. Please try again later.</h4>";
+            if (warningElement) {
+                warningElement.textContent =
+                    error instanceof Error
+                        ? error.message
+                        : "An Error occurred during registration.";
+            }
         });
     }
     function gotologin() {
@@ -89,6 +99,10 @@
         username_input.style.display = "none";
         document.getElementById("tos-container").style.display = "none";
         main_button.disabled = false;
+        const passwordInput = document.getElementById("password");
+        if (passwordInput) {
+            passwordInput.placeholder = "Password";
+        }
     }
     function toggleRegisterButton() {
         const checkbox = document.getElementById("tos-checkbox");
