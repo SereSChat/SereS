@@ -384,7 +384,7 @@ def add_friend():
     return {"message": "Requestet sended"}
 
 
-@app.route("/api/pending_friend")
+@app.route("/api/pending_friends")
 def pending_friend():
     sessioncookie = flask.request.cookies.get("sessioncookie")
     if not sessioncookie:
@@ -400,7 +400,20 @@ def pending_friend():
     except Exception as e:
         print(e)
         return {"message": "Invalid sessioncookie"}, 400
-    return {"message": "Not implemented", "success": False}, 400
+    try:
+        with open(os.path.join(USER_DATA, user_id)) as f:
+            pendings = json.load(f)
+            try:
+                pending_reqs = pendings["pending"]
+            except Exception:
+                return {"message": "No pending friend requests", "success": True}, 200
+            return {
+                "message": "Found some, here they are",
+                "success": True,
+                "pending_friends": pending_reqs,
+            }
+    except FileNotFoundError:
+        return {"message": "No pending friend requests", "success": True}, 200
 
 
 @app.route("/api/new_chat", methods=["POST"])
