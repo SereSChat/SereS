@@ -258,6 +258,7 @@ def get_avatar():
         image = Image.open(image_path)
         io_img = io.BytesIO()
         image.save(io_img, "PNG")
+        io_img.seek(0)
     except Exception:
         return {"message": "No avatar uploaded"}, 400
     response = flask.send_file(io_img, mimetype="image/png")
