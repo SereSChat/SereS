@@ -394,7 +394,7 @@ def add_friend():
                 os.path.join(USER_DATA, friend_id, "pending_friends.json"), "r"
             ) as f:
                 pending_list = json.load(f)
-            if friend_id not in pending_list["pending"]:
+            if user_id not in pending_list["pending"]:
                 pending_list["pending"].append(user_id)
             else:
                 return {"message": "Already pending request"}
