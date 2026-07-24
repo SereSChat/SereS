@@ -340,6 +340,9 @@ def add_friend():
     if user_id == friend_id:
         return {"message": "Cannot add yourself as a friend"}, 400
 
+    if friend_id in get_friends_for_user(user_id):
+        return {"message": "Already Friends"}, 400
+
     try:
         with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "r+") as f:
             pending_list = json.load(f)
