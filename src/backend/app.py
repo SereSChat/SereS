@@ -26,7 +26,6 @@ app.config["DEBUG"] = False
 USER_DATA = os.path.join(os.path.dirname(__file__), "user_data")
 CHATS = os.path.join(os.path.dirname(__file__), "chats")
 DB = os.path.join(os.path.dirname(__file__), "users.db")
-FRIENDS = os.path.join(os.path.dirname(__file__), "friends")
 ph = PasswordHasher(time_cost=4)
 
 
@@ -348,7 +347,7 @@ def add_friend():
                 os.makedirs(os.path.join(USER_DATA, user_id), exist_ok=True)
                 friendspath = os.path.join(USER_DATA, user_id, "friends.json")
                 try:
-                    with open(os.path.join(friendspath), "x") as f:
+                    with open(friendspath, "x") as f:
                         json.dump({"friends": [friend_id]}, f)
                 except FileExistsError:
                     with open(os.path.join(friendspath), "r+") as f:
@@ -379,7 +378,7 @@ def add_friend():
             with open(
                 os.path.join(USER_DATA, user_id, "pending_friends.json"), "w"
             ) as f:
-                json.dump(pending_list, f, indent=2)
+                json.dump(pending_list, f)
         except Exception:
             return {"message": "Internal error"}, 400
     return {"message": "Requestet sended"}
@@ -485,7 +484,7 @@ def new_chat():
 
 def get_friends_for_user(user_id):
     try:
-        with open(os.path.join(FRIENDS, user_id + ".json"), "r") as f:
+        with open(os.path.join(USER_DATA, user_id, "friends.json"), "r") as f:
             data = json.load(f)
             return data["friends"]
     except FileNotFoundError:
