@@ -341,16 +341,17 @@ def add_friend():
         return {"message": "Cannot add yourself as a friend"}, 400
 
     try:
-        with open(os.path.join(USER_DATA, friend_id, "pending_friends.json"), "r") as f:
+        with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "r") as f:
             pending_list = json.load(f)
-            if user_id in pending_list["pending"]:
+            if friend_id in pending_list["pending"]:
                 os.makedirs(os.path.join(USER_DATA, user_id), exist_ok=True)
-                friendspath = os.path.join(USER_DATA, user_id, "friends.json")
+                selfpath = os.path.join(USER_DATA, user_id, "friends.json")
+                friendpath = os.path.join(USER_DATA, friend_id, "friends.json")
                 try:
-                    with open(friendspath, "x") as f:
+                    with open(selfpath, "x") as f:
                         json.dump({"friends": [friend_id]}, f)
                 except FileExistsError:
-                    with open(os.path.join(friendspath), "r+") as f:
+                    with open(selfpath, "r+") as f:
                         data = json.load(f)
                         if friend_id in data["friends"]:
                             return {"message": "Friend already added"}, 400
@@ -358,6 +359,20 @@ def add_friend():
                         f.seek(0)
                         json.dump(data, f)
                         f.truncate()
+
+                try:
+                    with open(friendpath, "x") as f:
+                        json.dump({"friends": [user_id]}, f)
+                except FileExistsError:
+                    with open(friendpath, "r+") as f:
+                        data = json.load(f)
+                        if user_id in data["friends"]:
+                            return {"message": "Friend already added"}, 400
+                        data["friends"].append(user_id)
+                        f.seek(0)
+                        json.dump(data, f)
+                        f.truncate()
+
                 return {"message": "Friend added successfully!", "success": True}, 200
     except FileNotFoundError:
         pass
