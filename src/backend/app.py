@@ -384,6 +384,7 @@ def add_friend():
         pass
 
     try:
+        os.makedirs(os.path.join(USER_DATA, friend_id), exist_ok=True)
         with open(os.path.join(USER_DATA, friend_id, "pending_friends.json"), "x") as f:
             json.dump({"pending": [user_id]}, f)
     except FileExistsError:
