@@ -6,6 +6,7 @@
   let chats_count: number | null = null;
   let userImagePath = "";
   let currentChatId: string | null = null;
+  let currentListView: "chats" | "requests" = "chats";
 
   function page_load() {
     if (debug) {
@@ -13,9 +14,11 @@
     }
     load_animation();
     load_chats();
+    load_pending_requests();
     auth_cookie();
     load_avatar();
     load_username();
+    initListViewButtons();
 
     if (window.innerWidth <= 768) {
       const sidebar = document.querySelector(".sidebar");
@@ -229,6 +232,92 @@
         }
       })
       .catch((err) => console.error("Error loading chats:", err));
+  }
+
+  function load_pending_requests() {
+    fetch("/api/pending_friends", {
+      method: "GET",
+      credentials: "include",
+    })
+      .then((response) => response.json())
+      .then((data) => {
+        const requestsList = document.getElementById("requests-list");
+        if (!requestsList) return;
+
+        requestsList.innerHTML = "";
+
+        const pendingFriends = data.pending_friends || [];
+        if (!pendingFriends.length) {
+          requestsList.innerHTML = `
+            <div class="list-item">
+              <div class="avatar" style="background-color: #5865f2">!</div>
+              <div class="item-info">
+                <span class="item-name">No pending requests</span>
+                <span class="item-status">Friend requests you received will show here.</span>
+              </div>
+            </div>
+          `;
+          return;
+        }
+
+        pendingFriends.forEach((username: string) => {
+          requestsList.innerHTML += `
+            <div class="list-item">
+              <div class="avatar" style="background-color: #00a884">${username.charAt(0).toUpperCase()}</div>
+              <div class="item-info">
+                <span class="item-name">${username}</span>
+                <span class="item-status">Pending friend request</span>
+              </div>
+              <span class="request-badge">New</span>
+            </div>
+          `;
+        });
+      })
+      .catch((err) => console.error("Error loading pending requests:", err));
+  }
+
+  function switchListViewr() {
+    const directMessagesHeader = document.getElementById("direct-messages");
+    const panels = document.querySelectorAll<HTMLElement>(".list-view-panel");
+    const buttons = document.querySelectorAll<HTMLElement>(".list-view-toggle");
+
+    buttons.forEach((button) => {
+      button.classList.toggle("active", button.id === "requests-toggle");
+    });
+
+    panels.forEach((panel) => {
+      panel.classList.toggle("active", panel.id === "requests-list");
+    });
+
+    if (directMessagesHeader) {
+      directMessagesHeader.style.display = "none";
+    }
+  }
+
+  function switchListViewc() {
+    const directMessagesHeader = document.getElementById("direct-messages");
+    const panels = document.querySelectorAll<HTMLElement>(".list-view-panel");
+    const buttons = document.querySelectorAll<HTMLElement>(".list-view-toggle");
+
+    buttons.forEach((button) => {
+      button.classList.toggle("active", button.id === "chats-toggle");
+    });
+
+    panels.forEach((panel) => {
+      panel.classList.toggle("active", panel.id === "dm-list");
+    });
+
+    if (directMessagesHeader) {
+      directMessagesHeader.style.display = "block";
+    }
+  }
+
+  function initListViewButtons() {
+    const requestsButton = document.getElementById("requests-toggle");
+    const chatsButton = document.getElementById("chats-toggle");
+
+    requestsButton?.addEventListener("click", switchListViewr);
+    chatsButton?.addEventListener("click", switchListViewc);
   }
 
   function remove_chat(username: string, event: any) {
@@ -450,27 +539,7 @@
       })
       .then((data) => {
         if (debug) {
-          console.log(
-            "DEBUG: Friend added, now creating chat automatically...",
-          );
-        }
-
-        return fetch("/api/new_chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            friend_username: friendsusernameinput,
-          }),
-        });
-      })
-      .then((response) => {
-        if (!response.ok) throw new Error("Error creating automatic chat");
-        return response.json();
-      })
-      .then(() => {
-        if (debug) {
-          console.log("DEBUG: Automatic chat created, closing menu");
+          console.log("DEBUG: Friend added, waiting for acceptance...");
         }
         closeAddFriendMenu();
         page_load();
@@ -479,8 +548,7 @@
         console.error("Error in friend/chat creation workflow:", error);
         const warningElem = document.getElementById("warning");
         if (warningElem) {
-          warningElem.innerHTML =
-            "<h4>This username does not exist, is already your friend, or the chat could not be created.</h4>";
+          warningElem.innerHTML = error.message;
         }
       });
   }
@@ -954,6 +1022,8 @@
   });
 
   (window as any).toggleSidebar = toggleSidebar;
+  (window as any).switchListViewr = switchListViewr;
+  (window as any).switchListViewc = switchListViewc;
   (window as any).page_load = page_load;
   (window as any).logout = logout;
   (window as any).remove_chat = remove_chat;

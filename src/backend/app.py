@@ -402,7 +402,7 @@ def pending_friend():
         print(e)
         return {"message": "Invalid sessioncookie"}, 400
     try:
-        with open(os.path.join(USER_DATA, user_id)) as f:
+        with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "r") as f:
             pendings = json.load(f)
             try:
                 pending_reqs = pendings["pending"]

@@ -52,11 +52,22 @@
       </div>
 
       <div class="list-container">
-        <div class="section-title chat-section-header">
+        <div class="list-view-switcher" role="tablist" aria-label="Sidebar views">
+          <button id="chats-toggle" class="list-view-toggle active" type="button" data-view="chats" onclick="switchListViewc()">
+            Chats
+          </button>
+          <button id="requests-toggle" class="list-view-toggle" type="button" data-view="requests" onclick="switchListViewr()">
+            Requests
+          </button>
+        </div>
+
+        <div class="section-title chat-section-header" id="direct-messages">
           <span>Direct Messages</span>
           <button class="add-dm-button" type="button" onclick="opennewchatsMenu()">+</button>
         </div>
-        <div id="dm-list"></div>
+
+        <div id="dm-list" class="list-view-panel active"></div>
+        <div id="requests-list" class="list-view-panel"></div>
       </div>
 
       <div class="user-menu-container">
