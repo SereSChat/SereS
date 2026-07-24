@@ -422,6 +422,9 @@ def pending_friend():
                 pending_reqs = pendings["pending"]
             except Exception:
                 return {"message": "No pending friend requests", "success": True}, 200
+            ret_obj = []
+            for req in pending_reqs:
+                ret_obj.append(get_username_by_id(cursor, req))
             return {
                 "message": "Found some, here they are",
                 "success": True,
