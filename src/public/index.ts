@@ -234,6 +234,74 @@
       .catch((err) => console.error("Error loading chats:", err));
   }
 
+  function acceptFriendRequest(username: string, event: Event) {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+
+    const target = event.target as HTMLElement | null;
+    const requestItem = target?.closest(".list-item");
+    if (requestItem) {
+      requestItem.remove();
+    }
+
+    const requestsList = document.getElementById("requests-list");
+    if (requestsList && requestsList.children.length === 0) {
+      requestsList.innerHTML = `
+        <div class="list-item">
+          <div class="avatar" style="background-color: #5865f2">!</div>
+          <div class="item-info">
+            <span class="item-name">No pending requests</span>
+            <span class="item-status">Friend requests you received will show here.</span>
+          </div>
+        </div>
+      `;
+    }
+  }
+
+  function discardFriendRequest(username: string, event: Event) {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+
+    fetch("/api/discard_friend_request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ friend_username: username }),
+    })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data.success) {
+          console.error("Error discarding friend request:", data.message);
+        }
+      })
+      .catch((error) => {
+        console.error("Error discarding friend request:", error);
+      });
+
+    const target = event.target as HTMLElement | null;
+    const requestItem = target?.closest(".list-item");
+    if (requestItem) {
+      requestItem.remove();
+    }
+
+    const requestsList = document.getElementById("requests-list");
+    if (requestsList && requestsList.children.length === 0) {
+      requestsList.innerHTML = `
+        <div class="list-item">
+          <div class="avatar" style="background-color: #5865f2">!</div>
+          <div class="item-info">
+            <span class="item-name">No pending requests</span>
+            <span class="item-status">Friend requests you received will show here.</span>
+          </div>
+        </div>
+      `;
+    }
+  }
+
   function load_pending_requests() {
     fetch("/api/pending_friends", {
       method: "GET",
@@ -268,7 +336,10 @@
                 <span class="item-name">${username}</span>
                 <span class="item-status">Pending friend request</span>
               </div>
-              <span class="request-badge">New</span>
+              <div class="request-actions">
+                <button class="request-action-btn accept" type="button" onclick="acceptFriendRequest(${JSON.stringify(username)}, event)">Accept</button>
+                <button class="request-action-btn discard" type="button" onclick="discardFriendRequest(${JSON.stringify(username)}, event)">Discard</button>
+              </div>
             </div>
           `;
         });
@@ -1024,6 +1095,8 @@
   (window as any).toggleSidebar = toggleSidebar;
   (window as any).switchListViewr = switchListViewr;
   (window as any).switchListViewc = switchListViewc;
+  (window as any).acceptFriendRequest = acceptFriendRequest;
+  (window as any).discardFriendRequest = discardFriendRequest;
   (window as any).page_load = page_load;
   (window as any).logout = logout;
   (window as any).remove_chat = remove_chat;

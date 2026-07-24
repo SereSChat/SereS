@@ -212,6 +212,33 @@ body.bright-body {
   flex-shrink: 0;
 }
 
+.request-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+
+.request-action-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.request-action-btn.accept {
+  background-color: #00a884;
+  color: #ffffff;
+}
+
+.request-action-btn.discard {
+  background-color: #5865f2;
+  color: #ffffff;
+}
+
 .list-view-panel {
   display: none;
 }
