@@ -427,8 +427,41 @@ def remove_chat():
 
 @app.route("/api/discard_request", methods=["POST"])
 def discard_request():
-    # TODO: Implement
-    return {"message": "Not implemented yet... sowwyy.."}, 400
+    user_id = get_id()
+    conn = get_db()
+    cursor = conn.cursor()
+
+    if not user_id:
+        return {"message": "Invalid user_id"}, 400
+    req_json = flask.request.get_json()
+    try:
+        discarding_req = req_json["username"]
+    except KeyError:
+        return {"message": "No username provided"}, 400
+    try:
+        with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "r+") as f:
+            deleted_one = False
+            pendings = json.load(f)
+            try:
+                pending_reqs = pendings["pending"]
+            except Exception:
+                return {"message": "No pending friend requests", "success": True}, 200
+            for i, req in enumerate(pending_reqs):
+                un = get_username_by_id(cursor, req)
+                if un == discarding_req:
+                    deleted_one = True
+                    del pendings["pending"][i]
+                    break
+            if not deleted_one:
+                return {"message": "Request doesnt exist"}, 400
+            f.seek(0)
+            json.dump(pending_reqs, f)
+            f.truncate()
+
+    except FileNotFoundError:
+        return {"message": "Request doesnt exist"}, 400
+
+    return {"message": "successfully deleted the request", "success": True}, 200
 
 
 @app.route("/api/block_user", methods=["POST"])
@@ -541,7 +574,7 @@ def new_chat():
 def get_id():
     sessioncookie = flask.request.cookies.get("sessioncookie")
     if not sessioncookie:
-        return {"message": "No sessioncookie provided"}, 400
+        return False
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute(
