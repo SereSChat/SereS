@@ -363,20 +363,20 @@ def add_friend():
         pass
 
     try:
-        with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "x") as f:
-            json.dump({"pending": [friend_id]}, f)
+        with open(os.path.join(USER_DATA, friend_id, "pending_friends.json"), "x") as f:
+            json.dump({"pending": [user_id]}, f)
     except FileExistsError:
         try:
             with open(
-                os.path.join(USER_DATA, user_id, "pending_friends.json"), "r"
+                os.path.join(USER_DATA, friend_id, "pending_friends.json"), "r"
             ) as f:
                 pending_list = json.load(f)
             if friend_id not in pending_list["pending"]:
-                pending_list["pending"].append(friend_id)
+                pending_list["pending"].append(user_id)
             else:
                 return {"message": "Already pending request"}
             with open(
-                os.path.join(USER_DATA, user_id, "pending_friends.json"), "w"
+                os.path.join(USER_DATA, friend_id, "pending_friends.json"), "w"
             ) as f:
                 json.dump(pending_list, f)
         except Exception:
