@@ -21,6 +21,7 @@
         load_username();
         initListViewButtons();
         attachPendingRequestListeners();
+        attachChatListListeners();
         if (window.innerWidth <= 768) {
             const sidebar = document.querySelector(".sidebar");
             if (sidebar) {
@@ -193,16 +194,16 @@
                 dmList.innerHTML = "";
                 for (let i = 0; i < chats.length; i++) {
                     let currentChat = chats[i];
-                    let chatId = currentChat.chat;
+                    let cId = currentChat.chat;
                     if (debug) {
                         console.log("DEBUG: Loading chat with: " +
                             currentChat.other_user +
                             " (ID: " +
-                            chatId +
+                            currentChat.other_user +
                             ")");
                     }
                     let chatHtml = `
-              <div class="list-item" onclick="changeChat('${currentChat.other_user}', '${chatId}')">
+              <div class="list-item" data-username="${currentChat.other_user}" data-chatid="${cId}">
                 <div class="avatar" style="background-color: #5865f2">
                   ${currentChat.other_user.charAt(0).toUpperCase()}
                 </div>
@@ -210,7 +211,7 @@
                   <span class="item-name">${currentChat.other_user}</span>
                   <span class="item-status">${currentChat.last_message || "No messages"}</span>
                 </div>
-                <button class="delete-chat-btn" type="button" onclick="remove_chat('${currentChat.other_user}', event)">×</button>
+                <button class="delete-chat-btn" type="button" data-username="${currentChat.other_user}" data-chatid="${cId}">×</button>
               </div>
             `;
                     dmList.innerHTML = dmList.innerHTML + chatHtml;
@@ -218,6 +219,28 @@
             }
         })
             .catch((err) => console.error("Error loading chats:", err));
+    }
+    function attachChatListListeners() {
+        const dmList = document.getElementById("dm-list");
+        if (!dmList)
+            return;
+        dmList.addEventListener("click", (event) => {
+            const target = event.target;
+            const deleteBtn = target.closest(".delete-chat-btn");
+            if (deleteBtn) {
+                event.stopPropagation();
+                const username = deleteBtn.dataset.username;
+                const chatId = deleteBtn.dataset.chatid;
+                remove_chat(username, chatId, event);
+                return;
+            }
+            const item = target.closest(".list-item");
+            if (item) {
+                const username = item.dataset.username;
+                const chatId = item.dataset.chatid;
+                changeChat(username, chatId);
+            }
+        });
     }
     function acceptFriendRequest(username, event) {
         if (event) {
@@ -394,7 +417,7 @@
             }
         });
     }
-    function remove_chat(username, event) {
+    function remove_chat(username, chatId, event) {
         if (event) {
             event.preventDefault();
             event.stopPropagation();
@@ -406,7 +429,7 @@
             fetch("/api/remove_chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ username: username }),
+                body: JSON.stringify({ chat_id: chatId }),
                 credentials: "include",
             })
                 .then((response) => response.json())
