@@ -1,4 +1,5 @@
 import io
+import shutil
 import flask
 from flask import g
 import sqlite3
@@ -406,6 +407,36 @@ def add_friend():
     return {"message": "Requestet sended"}
 
 
+@app.route("/api/remove_chat", methods=["POST"])
+def remove_chat():
+    user_id = get_id()
+    if not user_id:
+        return {"message": "Invalid sessioncookie"}, 400
+    req_json = flask.request.get_json()
+    try:
+        chat_id = req_json["chat_id"]
+    except Exception:
+        return {"message": "No chat_id provided"}, 400
+    chats_user_is_in = return_chats_for_user(user_id)
+    if chat_id not in chats_user_is_in:
+        return {"message": "Chat doesnt exist"}, 400
+
+    shutil.rmtree(os.path.join(CHATS, chat_id))
+    return {"message": "Chat deleted successfully", "success": True}, 200
+
+
+@app.route("/api/discard_request", methods=["POST"])
+def discard_request():
+    # TODO: Implement
+    return {"message": "Not implemented yet... sowwyy.."}, 400
+
+
+@app.route("/api/block_user", methods=["POST"])
+def block_user():
+    # TODO: Implement
+    return {"message": "Not implemented yet... sowwyy.."}, 400
+
+
 @app.route("/api/pending_friends")
 def pending_friend():
     sessioncookie = flask.request.cookies.get("sessioncookie")
@@ -505,6 +536,24 @@ def new_chat():
     with open(os.path.join(CHATS, chat_id, "cache.txt"), "w") as f:
         pass
     return {"message": "Chat created successfully!", "success": True}, 200
+
+
+def get_id():
+    sessioncookie = flask.request.cookies.get("sessioncookie")
+    if not sessioncookie:
+        return {"message": "No sessioncookie provided"}, 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id FROM sessions WHERE cookie = ?",
+        (sessioncookie,),
+    )
+    try:
+        user_id = cursor.fetchone()["user_id"]
+    except Exception as e:
+        print(e)
+        return False
+    return user_id
 
 
 def get_friends_for_user(user_id):
