@@ -428,7 +428,7 @@ def pending_friend():
             return {
                 "message": "Found some, here they are",
                 "success": True,
-                "pending_friends": pending_reqs,
+                "pending_friends": ret_obj,
             }
     except FileNotFoundError:
         return {"message": "No pending friend requests", "success": True}, 200
