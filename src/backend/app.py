@@ -1,3 +1,4 @@
+import enum
 import io
 
 import flask
@@ -341,9 +342,16 @@ def add_friend():
         return {"message": "Cannot add yourself as a friend"}, 400
 
     try:
-        with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "r") as f:
+        with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "r+") as f:
             pending_list = json.load(f)
             if friend_id in pending_list["pending"]:
+                for i, j in enumerate(pending_list["pending"]):
+                    if j == friend_id:
+                        del pending_list["pending"][i]
+                        break
+                f.seek(0)
+                json.dump(pending_list, f)
+                f.truncate()
                 os.makedirs(os.path.join(USER_DATA, user_id), exist_ok=True)
                 selfpath = os.path.join(USER_DATA, user_id, "friends.json")
                 friendpath = os.path.join(USER_DATA, friend_id, "friends.json")
