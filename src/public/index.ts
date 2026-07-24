@@ -7,6 +7,11 @@
   let userImagePath = "";
   let currentChatId: string | null = null;
   let currentListView: "chats" | "requests" = "chats";
+  const resolvedFriendRequests = new Set<string>(
+    JSON.parse(sessionStorage.getItem("resolvedFriendRequests") || "[]"),
+  );
+
+  let refreshTimer: number | null = null;
 
   function page_load() {
     if (debug) {
@@ -19,6 +24,7 @@
     load_avatar();
     load_username();
     initListViewButtons();
+    attachPendingRequestListeners();
 
     if (window.innerWidth <= 768) {
       const sidebar = document.querySelector(".sidebar");
@@ -27,10 +33,20 @@
       }
     }
 
-    setInterval(() => {
-      load_chats();
-      load_messages();
-    }, 3000);
+    if (refreshTimer !== null) {
+      clearInterval(refreshTimer);
+    }
+
+    refreshTimer = window.setInterval(() => {
+      if (currentListView === "requests") {
+        load_pending_requests();
+      } else {
+        load_chats();
+      }
+      if (currentChatId) {
+        load_messages();
+      }
+    }, 10000);
   }
 
   function load_animation() {
@@ -234,36 +250,64 @@
       .catch((err) => console.error("Error loading chats:", err));
   }
 
-  function acceptFriendRequest(username: string, event: Event) {
+  function acceptFriendRequest(username: string, event?: Event) {
     if (event) {
       event.preventDefault();
       event.stopPropagation();
     }
 
-    const target = event.target as HTMLElement | null;
-    const requestItem = target?.closest(".list-item");
-    if (requestItem) {
-      requestItem.remove();
+    if (debug) {
+      console.log("DEBUG: accepting friend request for username:", username);
     }
 
-    const requestsList = document.getElementById("requests-list");
-    if (requestsList && requestsList.children.length === 0) {
-      requestsList.innerHTML = `
-        <div class="list-item">
-          <div class="avatar" style="background-color: #5865f2">!</div>
-          <div class="item-info">
-            <span class="item-name">No pending requests</span>
-            <span class="item-status">Friend requests you received will show here.</span>
-          </div>
-        </div>
-      `;
-    }
+    fetch("/api/add_friend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ friend_username: username }),
+    })
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success) {
+          throw new Error(data.message || "Error accepting friend request");
+        }
+      })
+      .then(() =>
+        fetch("/api/new_chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ friend_username: username }),
+        }),
+      )
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success) {
+          throw new Error(data.message || "Error creating new chat");
+        }
+      })
+      .then(() => {
+        resolvedFriendRequests.add(username);
+        sessionStorage.setItem(
+          "resolvedFriendRequests",
+          JSON.stringify([...resolvedFriendRequests]),
+        );
+        load_pending_requests();
+        load_chats();
+      })
+      .catch((error) => {
+        console.error("Error accepting friend request or creating chat:", error);
+      });
   }
 
-  function discardFriendRequest(username: string, event: Event) {
+  function discardFriendRequest(username: string, event?: Event) {
     if (event) {
       event.preventDefault();
       event.stopPropagation();
+    }
+
+    if (debug) {
+      console.log("DEBUG: discarding friend request for username:", username);
     }
 
     fetch("/api/discard_friend_request", {
@@ -272,33 +316,25 @@
       credentials: "include",
       body: JSON.stringify({ friend_username: username }),
     })
-      .then((response) => response.json())
-      .then((data) => {
-        if (!data.success) {
-          console.error("Error discarding friend request:", data.message);
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success) {
+          throw new Error(data.message || "Error discarding friend request");
         }
+        return data;
+      })
+      .then(() => {
+        load_pending_requests();
       })
       .catch((error) => {
         console.error("Error discarding friend request:", error);
       });
 
-    const target = event.target as HTMLElement | null;
+    const target =
+      event instanceof Event ? (event.target as HTMLElement | null) : null;
     const requestItem = target?.closest(".list-item");
     if (requestItem) {
       requestItem.remove();
-    }
-
-    const requestsList = document.getElementById("requests-list");
-    if (requestsList && requestsList.children.length === 0) {
-      requestsList.innerHTML = `
-        <div class="list-item">
-          <div class="avatar" style="background-color: #5865f2">!</div>
-          <div class="item-info">
-            <span class="item-name">No pending requests</span>
-            <span class="item-status">Friend requests you received will show here.</span>
-          </div>
-        </div>
-      `;
     }
   }
 
@@ -314,10 +350,12 @@
 
         requestsList.innerHTML = "";
 
-        const pendingFriends = data.pending_friends || [];
+        const pendingFriends = (data.pending_friends || []).filter(
+          (username: string) => !resolvedFriendRequests.has(username),
+        );
         if (!pendingFriends.length) {
           requestsList.innerHTML = `
-            <div class="list-item">
+            <div class="list-item request-list-item">
               <div class="avatar" style="background-color: #5865f2">!</div>
               <div class="item-info">
                 <span class="item-name">No pending requests</span>
@@ -330,15 +368,15 @@
 
         pendingFriends.forEach((username: string) => {
           requestsList.innerHTML += `
-            <div class="list-item">
+            <div class="list-item request-list-item">
               <div class="avatar" style="background-color: #00a884">${username.charAt(0).toUpperCase()}</div>
               <div class="item-info">
                 <span class="item-name">${username}</span>
                 <span class="item-status">Pending friend request</span>
               </div>
               <div class="request-actions">
-                <button class="request-action-btn accept" type="button" onclick="acceptFriendRequest(${JSON.stringify(username)}, event)">Accept</button>
-                <button class="request-action-btn discard" type="button" onclick="discardFriendRequest(${JSON.stringify(username)}, event)">Discard</button>
+                <button class="request-action-btn accept" type="button" data-action="accept" data-username="${username}">Accept</button>
+                <button class="request-action-btn discard" type="button" data-action="discard" data-username="${username}">Discard</button>
               </div>
             </div>
           `;
@@ -348,6 +386,7 @@
   }
 
   function switchListViewr() {
+    currentListView = "requests";
     const directMessagesHeader = document.getElementById("direct-messages");
     const panels = document.querySelectorAll<HTMLElement>(".list-view-panel");
     const buttons = document.querySelectorAll<HTMLElement>(".list-view-toggle");
@@ -366,6 +405,7 @@
   }
 
   function switchListViewc() {
+    currentListView = "chats";
     const directMessagesHeader = document.getElementById("direct-messages");
     const panels = document.querySelectorAll<HTMLElement>(".list-view-panel");
     const buttons = document.querySelectorAll<HTMLElement>(".list-view-toggle");
@@ -389,6 +429,30 @@
 
     requestsButton?.addEventListener("click", switchListViewr);
     chatsButton?.addEventListener("click", switchListViewc);
+  }
+
+  function attachPendingRequestListeners() {
+    const requestsList = document.getElementById("requests-list");
+    if (!requestsList) return;
+
+    requestsList.addEventListener("click", (event) => {
+      const target = event.target;
+      const element = target instanceof HTMLElement ? target : null;
+      const button = element?.closest<HTMLButtonElement>(
+        "button.request-action-btn",
+      );
+      if (!button) return;
+
+      const username = button.dataset.username;
+      const action = button.dataset.action;
+      if (!username || !action) return;
+
+      if (action === "accept") {
+        acceptFriendRequest(username, event);
+      } else if (action === "discard") {
+        discardFriendRequest(username, event);
+      }
+    });
   }
 
   function remove_chat(username: string, event: any) {
@@ -584,6 +648,53 @@
     }
   }
 
+  function requestAddFriend(friendUsername: string, sourceModal = false) {
+    const trimmedUsername = friendUsername.trim();
+    if (!trimmedUsername) return;
+
+    const warningElem = document.getElementById("warning-add-friend");
+    if (warningElem) warningElem.innerHTML = "";
+
+    fetch("/api/add_friend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        friend_username: trimmedUsername,
+      }),
+    })
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.message || "Error adding friend");
+        }
+        return data;
+      })
+      .then((data) => {
+        if (debug) {
+          console.log("DEBUG: Friend added, waiting for acceptance...");
+        }
+        if (sourceModal) {
+          closeAddFriendMenu();
+        }
+        load_pending_requests();
+      })
+      .catch((error) => {
+        console.error("Error in friend/chat creation workflow:", error);
+        if (warningElem) {
+          warningElem.innerHTML = error.message;
+        }
+      });
+  }
+
+  function promptAddFriend() {
+    const friendUsername = window.prompt(
+      "Enter the username of the friend to add:",
+    );
+    if (!friendUsername) return;
+    requestAddFriend(friendUsername, false);
+  }
+
   function confirmAddFriend() {
     if (debug) {
       console.log("DEBUG: adding Friend(s): ");
@@ -594,34 +705,7 @@
     ) as HTMLInputElement | null;
     if (!inputElem) return;
 
-    let friendsusernameinput = inputElem.value;
-
-    fetch("/api/add_friend", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        friend_username: friendsusernameinput,
-      }),
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error("Error adding friend");
-        return response.json();
-      })
-      .then((data) => {
-        if (debug) {
-          console.log("DEBUG: Friend added, waiting for acceptance...");
-        }
-        closeAddFriendMenu();
-        page_load();
-      })
-      .catch((error) => {
-        console.error("Error in friend/chat creation workflow:", error);
-        const warningElem = document.getElementById("warning");
-        if (warningElem) {
-          warningElem.innerHTML = error.message;
-        }
-      });
+    requestAddFriend(inputElem.value, true);
   }
 
   function opennewchatsMenu() {
@@ -646,7 +730,7 @@
 
   function confirnewchats() {
     if (debug) {
-      console.log("DEBUG: new chat created");
+      console.log("DEBUG: creating new chat");
     }
 
     const inputElem = document.getElementById(
@@ -654,7 +738,11 @@
     ) as HTMLInputElement | null;
     if (!inputElem) return;
 
-    let newchatusernameinput = inputElem.value;
+    const newchatusernameinput = inputElem.value.trim();
+    if (!newchatusernameinput) return;
+
+    const warningElem = document.getElementById("warning-new-chat");
+    if (warningElem) warningElem.innerHTML = "";
 
     fetch("/api/new_chat", {
       method: "POST",
@@ -664,20 +752,29 @@
         friend_username: newchatusernameinput,
       }),
     })
-      .then((response) => {
-        if (!response.ok) throw new Error("Error creating chat");
-        return response.json();
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          if (data.message && data.message.includes("not your friend")) {
+            requestAddFriend(newchatusernameinput, false);
+            throw new Error(
+              "This user is not your friend yet. A friend request was sent instead.",
+            );
+          }
+          throw new Error(data.message || "Error creating chat");
+        }
+        return data;
       })
       .then(() => {
         closenewchatsMenu();
-        page_load();
+        load_chats();
       })
       .catch((error) => {
-        const warningElem = document.getElementById("warning");
         if (warningElem) {
           warningElem.innerHTML =
             "<h4>This Chat already exists or an error occurred</h4>";
         }
+        console.error("Error in chat creation workflow:", error);
       });
   }
 
@@ -1107,6 +1204,8 @@
   (window as any).openAddFriendMenu = openAddFriendMenu;
   (window as any).closeAddFriendMenu = closeAddFriendMenu;
   (window as any).confirmAddFriend = confirmAddFriend;
+  (window as any).requestAddFriend = requestAddFriend;
+  (window as any).promptAddFriend = promptAddFriend;
   (window as any).opennewchatsMenu = opennewchatsMenu;
   (window as any).closenewchatsMenu = closenewchatsMenu;
   (window as any).confirnewchats = confirnewchats;

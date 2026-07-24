@@ -141,6 +141,14 @@ body.bright-body {
   background-color: #2a3942;
 }
 
+.request-list-item {
+  cursor: default;
+}
+
+.request-list-item:hover {
+  background-color: transparent;
+}
+
 .list-item.bright-list-item:hover,
 .list-item.bright-list-item.bright-active {
   background-color: #f0f2f5;
