@@ -1,6 +1,4 @@
-import enum
 import io
-
 import flask
 from flask import g
 import sqlite3
