@@ -66,7 +66,7 @@
       );
     } catch {
       await fetch("/api/logout", { method: "POST", credentials: "include" });
-      throw new Error("Your encryption keys could not be unlocked.");
+      throw new Error("Your account could not be unlocked.");
     }
     await SeresCrypto.clearIdentities();
     await SeresCrypto.saveIdentity(identity);
@@ -81,7 +81,7 @@
       setWarning("Please enter your username or email and password.");
       return;
     }
-    setBusy(true, "Unlocking your encrypted chats...");
+    setBusy(true, "Logging in...");
     try {
       await loginWith(nameomail, password);
     } catch (error) {
@@ -104,7 +104,7 @@
       return;
     }
 
-    setBusy(true, "Creating your encryption keys...");
+    setBusy(true, "Creating your account...");
     try {
       const kdfSalt = SeresCrypto.newSalt();
       const iterations = SeresCrypto.DEFAULT_ITERATIONS;
@@ -221,7 +221,7 @@
 
     const reason = new URLSearchParams(window.location.search).get("reason");
     if (reason === "keys") {
-      setWarning("Please log in again to unlock your end-to-end encrypted chats on this device.");
+      setWarning("Please log in again on this device.");
     }
 
     const toggleBtn = document.createElement("button");

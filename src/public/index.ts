@@ -664,10 +664,10 @@
 
   function emptyState() {
     return h("div", { className: "empty-state" }, [
-      h("div", { className: "empty-state-icon", text: "🔒" }),
+      h("div", { className: "empty-state-icon", text: "💬" }),
       h("h2", { text: "SereS" }),
       h("p", {
-        text: "Pick a chat or start a new one. All messages are end-to-end encrypted — not even the SereS server can read them.",
+        text: "Pick a chat or start a new one.",
       }),
     ]);
   }
