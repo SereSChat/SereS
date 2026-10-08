@@ -2028,3 +2028,34 @@ body.bright-body .cookie-deny {
   background-color: #e9edef;
   color: #111b21;
 }
+
+/* --------------------------------------------------------- language select */
+
+.floating-controls {
+  position: absolute;
+  top: 10px;
+  right: 16px;
+  z-index: 1000;
+  display: flex;
+  gap: 8px;
+}
+
+.floating-controls .theme-toggle-floating {
+  position: static;
+}
+
+.language-select {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #2f3b43;
+  background-color: #2a3942;
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+body.bright-body .language-select {
+  background-color: #ffffff;
+  border-color: #d1d7db;
+  color: #111b21;
+}
