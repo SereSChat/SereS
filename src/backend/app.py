@@ -1,74 +1,331 @@
+import base64
+import functools
+import hashlib
+import hmac
 import io
-import shutil
-import flask
-from flask import g
-import sqlite3
-import datetime
-import os
 import json
+import os
+import re
 import secrets
+import sqlite3
+import threading
+import time
+import urllib.parse
 import uuid
-import pyheartbeat
+
 import dotenv
-from PIL import Image
+import flask
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+from flask import g
+from PIL import Image, UnidentifiedImageError
+
+import db
+from legacy_migration import migrate_legacy_files
 
 dotenv.load_dotenv()
 
-heartbeaturl = os.getenv("URL")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.getenv("SERES_DATA_DIR", BASE_DIR)
+USER_DATA = os.path.join(DATA_DIR, "user_data")
+CHATS = os.path.join(DATA_DIR, "chats")
+DB = os.path.join(DATA_DIR, "users.db")
 
-pyheartbeat.setUrl(heartbeaturl)
-pyheartbeat.heartbeat(interval=600, name="uptime-checker")
+SESSION_COOKIE = "sessioncookie"
+SESSION_DAYS = 90
+DEFAULT_KDF_ITERATIONS = 600_000
+MIN_KDF_ITERATIONS = 100_000
+MAX_KDF_ITERATIONS = 5_000_000
+MAX_GROUP_MEMBERS = 50
+MAX_CIPHERTEXT_LEN = 64 * 1024
+MAX_AVATAR_BYTES = 2 * 1024 * 1024
+
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,20}$")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+B64_RE = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
 
 app = flask.Flask(__name__, static_folder="../public", static_url_path="/")
 app.config["DEBUG"] = False
-USER_DATA = os.path.join(os.path.dirname(__file__), "user_data")
-CHATS = os.path.join(os.path.dirname(__file__), "chats")
-DB = os.path.join(os.path.dirname(__file__), "users.db")
+app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
 ph = PasswordHasher(time_cost=4)
+# Used to keep login timing the same for unknown users.
+DUMMY_HASH = ph.hash(secrets.token_hex(16))
 
 
-def init_db():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "CREATE TABLE IF NOT EXISTS users (id VARCHAR(255) PRIMARY KEY, email VARCHAR(255), username VARCHAR(255), passwd TEXT)"
-    )
-    cursor.execute(
-        "CREATE TABLE IF NOT EXISTS sessions (id VARCHAR(255) PRIMARY KEY, cookie VARCHAR(255), user_id VARCHAR(255), expires_at TIMESTAMP, created_at TIMESTAMP)"  # ID = UUID
-    )
-    conn.commit()
-    conn.close()
+# --------------------------------------------------------------------------
+# Infrastructure
+# --------------------------------------------------------------------------
 
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB, detect_types=sqlite3.PARSE_DECLTYPES)
-        g.db.row_factory = sqlite3.Row
+        g.db = db.connect(DB)
     return g.db
-
-
-def get_chat_db(chat_id):
-    chat_db_path = os.path.join(CHATS, chat_id, "history.db")
-    if not os.path.exists(chat_db_path):
-        raise FileNotFoundError(f"Chat database for chat_id {chat_id} does not exist.")
-
-    if "chat_db" not in g:
-        g.chat_db = sqlite3.connect(chat_db_path, detect_types=sqlite3.PARSE_DECLTYPES)
-        g.chat_db.row_factory = sqlite3.Row
-    return g.chat_db
 
 
 @app.teardown_appcontext
 def close_db(exception):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+    conn = g.pop("db", None)
+    if conn is not None:
+        conn.close()
 
-    chat_db = g.pop("chat_db", None)
-    if chat_db is not None:
-        chat_db.close()
+
+def init_app():
+    os.makedirs(USER_DATA, exist_ok=True)
+    conn = db.connect(DB)
+    try:
+        db.init_schema(conn)
+        migrate_legacy_files(conn, USER_DATA, CHATS)
+        db.server_secret(conn)
+    finally:
+        conn.close()
+
+
+def start_heartbeat():
+    url = os.getenv("URL")
+    if not url:
+        return
+    try:
+        import pyheartbeat
+
+        pyheartbeat.setUrl(url)
+        pyheartbeat.heartbeat(interval=600, name="uptime-checker")
+    except Exception as e:  # monitoring must never take the chat down
+        print("heartbeat disabled:", e)
+
+
+class RateLimiter:
+    """Small in-memory sliding window limiter (per process)."""
+
+    def __init__(self):
+        self._hits = {}
+        self._lock = threading.Lock()
+
+    def hit(self, key, limit, window):
+        now = time.monotonic()
+        with self._lock:
+            hits = [t for t in self._hits.get(key, []) if now - t < window]
+            allowed = len(hits) < limit
+            if allowed:
+                hits.append(now)
+            self._hits[key] = hits
+            if len(self._hits) > 50_000:
+                self._hits = {k: v for k, v in self._hits.items() if v and now - v[-1] < 3600}
+            return allowed
+
+
+limiter = RateLimiter()
+
+
+def rate_limited(key, limit, window):
+    if app.config.get("TESTING_DISABLE_RATE_LIMIT"):
+        return False
+    return not limiter.hit(key, limit, window)
+
+
+def client_ip():
+    return flask.request.remote_addr or "?"
+
+
+def error(message, status=400):
+    return {"message": message, "success": False}, status
+
+
+def ok(**data):
+    return {"success": True, **data}, 200
+
+
+def json_body():
+    data = flask.request.get_json(silent=True)
+    if not isinstance(data, dict):
+        flask.abort(flask.make_response(error("Expected a JSON object")))
+    return data
+
+
+def str_field(data, name, max_len=256, required=True):
+    value = data.get(name)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value or len(value) > max_len:
+        flask.abort(flask.make_response(error(f"Missing or invalid '{name}'")))
+    return value
+
+
+def b64_field(data, name, max_len=8192):
+    value = str_field(data, name, max_len)
+    if not B64_RE.match(value):
+        flask.abort(flask.make_response(error(f"Invalid encoding of '{name}'")))
+    return value
+
+
+@app.before_request
+def csrf_protect():
+    if flask.request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    origin = flask.request.headers.get("Origin")
+    if origin:
+        # Compare hosts only, so TLS terminating reverse proxies keep working.
+        allowed = {flask.request.host, flask.request.headers.get("X-Forwarded-Host")}
+        allowed.update(h.strip() for h in os.getenv("SERES_ALLOWED_HOSTS", "").split(",") if h.strip())
+        if urllib.parse.urlsplit(origin).netloc not in allowed:
+            return error("Cross-site request rejected", 403)
+    return None
+
+
+@app.after_request
+def security_headers(response):
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' blob: data:; media-src 'self'; object-src 'self'; "
+        "frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; "
+        "frame-ancestors 'self'",
+    )
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if flask.request.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    if flask.request.is_secure:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return response
+
+
+# --------------------------------------------------------------------------
+# Sessions & users
+# --------------------------------------------------------------------------
+
+
+def hash_token(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_session(user_id):
+    token = secrets.token_urlsafe(32)
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO user_sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?), ?)",
+        (hash_token(token), user_id, f"+{SESSION_DAYS} days", db.now_iso()),
+    )
+    conn.commit()
+    return token
+
+
+def set_session_cookie(response, token):
+    secure = flask.request.is_secure or flask.request.headers.get("X-Forwarded-Proto") == "https"
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_DAYS * 24 * 3600,
+        httponly=True,
+        secure=secure,
+        samesite="Strict",
+        path="/",
+    )
+    # The old frontend stored the username in a readable cookie; remove it.
+    response.delete_cookie("username", path="/")
+
+
+def current_user():
+    if "user" in g:
+        return g.user
+    g.user = None
+    token = flask.request.cookies.get(SESSION_COOKIE)
+    if token:
+        row = (
+            get_db()
+            .execute(
+                """SELECT u.* FROM user_sessions s JOIN users u ON u.id = s.user_id
+                   WHERE s.token_hash = ? AND s.expires_at > ?""",
+                (hash_token(token), db.now_iso()),
+            )
+            .fetchone()
+        )
+        g.user = row
+    return g.user
+
+
+def login_required(view):
+    @functools.wraps(view)
+    def wrapper(*args, **kwargs):
+        if current_user() is None:
+            return error("Not logged in", 401)
+        return view(*args, **kwargs)
+
+    return wrapper
+
+
+def find_user_by_name(username):
+    if not isinstance(username, str) or not username.strip():
+        return None
+    return (
+        get_db()
+        .execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username.strip(),))
+        .fetchone()
+    )
+
+
+def find_user_by_login(nameomail):
+    conn = get_db()
+    if "@" in nameomail:
+        return conn.execute(
+            "SELECT * FROM users WHERE email = ? COLLATE NOCASE", (nameomail,)
+        ).fetchone()
+    return conn.execute(
+        "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (nameomail,)
+    ).fetchone()
+
+
+def public_user(row):
+    return {"id": row["id"], "username": row["username"]}
+
+
+def own_user(row):
+    return {
+        **public_user(row),
+        "email": row["email"],
+        "pub_ecdh": row["pub_ecdh"],
+        "pub_sign": row["pub_sign"],
+        "enc_private": row["enc_private"],
+    }
+
+
+def fake_salt(identifier):
+    secret = db.server_secret(get_db())
+    digest = hmac.new(secret.encode(), identifier.lower().encode(), hashlib.sha256).digest()
+    return base64.b64encode(digest[:16]).decode()
+
+
+def verify_hash(stored, candidate):
+    try:
+        return ph.verify(stored or DUMMY_HASH, candidate) and stored is not None
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
+        return False
+
+
+def validate_key_bundle(data):
+    keys = data.get("keys")
+    if not isinstance(keys, dict):
+        flask.abort(flask.make_response(error("Missing encryption keys")))
+    return {
+        "pub_ecdh": b64_field(keys, "pub_ecdh", 512),
+        "pub_sign": b64_field(keys, "pub_sign", 512),
+        "enc_private": str_field(keys, "enc_private", 8192),
+    }
+
+
+def validate_kdf(data):
+    salt = b64_field(data, "kdf_salt", 64)
+    iterations = data.get("kdf_iterations")
+    if not isinstance(iterations, int) or not MIN_KDF_ITERATIONS <= iterations <= MAX_KDF_ITERATIONS:
+        flask.abort(flask.make_response(error("Invalid kdf_iterations")))
+    return salt, iterations
+
+
+# --------------------------------------------------------------------------
+# Pages & auth
+# --------------------------------------------------------------------------
 
 
 @app.route("/")
@@ -81,745 +338,930 @@ def online():
     return {"message": "im up", "success": True}, 200
 
 
-@app.route("/api/register", methods=["POST"])
-def register():
-    conn = get_db()
-    cursor = conn.cursor()
-
-    req_json = flask.request.get_json()
-
-    if len(req_json["passwd"]) < 8:
-        return {"message": "Password must be at least 8 characters long"}, 400
-
-    hashed_passwd = ph.hash(req_json["passwd"])
-    try:
-        username = req_json["username"]
-        email = req_json["email"]
-    except KeyError:
-        return {"message": "Missing username or email in request body"}, 400
-
-    for char in [
-        "@",
-        ".",
-        "!",
-        "#",
-        "$",
-        "%",
-        "^",
-        "&",
-        "*",
-        "+",
-        "=",
-        "{",
-        "}",
-        "[",
-        "]",
-        "|",
-        "\\",
-        ":",
-        ";",
-        "'",
-        '"',
-        "<",
-        ">",
-    ]:
-        if char in username:
-            return {"message": "Username contains invalid characters"}, 400
-
-    if "@" not in email or "." not in email or len(email) < 4:
-        return {"message": "Email is invalid"}, 400
-
-    if len(username) < 3 or len(username) > 20:
-        return {"message": "Username must be between 3 and 20 characters"}, 400
-
-    if username_available(username):
-        cursor.execute(
-            "INSERT INTO users (id, email, username, passwd) VALUES (?, ?, ?, ?)",
-            (
-                str(uuid.uuid4()),
-                email,
-                username,
-                hashed_passwd,
-            ),
+@app.route("/api/prelogin", methods=["POST"])
+def prelogin():
+    data = json_body()
+    nameomail = str_field(data, "nameomail", 254).strip()
+    if rate_limited(("prelogin", client_ip()), 60, 60):
+        return error("Too many attempts, please wait a minute", 429)
+    user = find_user_by_login(nameomail)
+    if user is None:
+        return ok(kdf_salt=fake_salt(nameomail), kdf_iterations=DEFAULT_KDF_ITERATIONS, legacy=False)
+    if user["auth_version"] == 0 and not user["kdf_salt"]:
+        conn = get_db()
+        conn.execute(
+            "UPDATE users SET kdf_salt = ?, kdf_iterations = ? WHERE id = ?",
+            (base64.b64encode(secrets.token_bytes(16)).decode(), DEFAULT_KDF_ITERATIONS, user["id"]),
         )
         conn.commit()
-        return {"message": "User created successfully!", "success": True}, 200
-    else:
-        return {"message": "Username already taken"}, 400
+        user = find_user_by_login(nameomail)
+    return ok(
+        kdf_salt=user["kdf_salt"],
+        kdf_iterations=user["kdf_iterations"] or DEFAULT_KDF_ITERATIONS,
+        legacy=user["auth_version"] == 0,
+    )
+
+
+@app.route("/api/register", methods=["POST"])
+def register():
+    data = json_body()
+    username = str_field(data, "username", 64).strip()
+    email = str_field(data, "email", 254).strip()
+    auth_hash = b64_field(data, "auth_hash", 128)
+    kdf_salt, kdf_iterations = validate_kdf(data)
+    keys = validate_key_bundle(data)
+
+    if rate_limited(("register", client_ip()), 10, 3600):
+        return error("Too many registrations, please try again later", 429)
+    if not USERNAME_RE.match(username):
+        return error("Username must be 3-20 characters: letters, numbers, '_' or '-'")
+    if not EMAIL_RE.match(email):
+        return error("Email is invalid")
+
+    conn = get_db()
+    if find_user_by_name(username):
+        return error("Username already taken")
+    if conn.execute("SELECT 1 FROM users WHERE email = ? COLLATE NOCASE", (email,)).fetchone():
+        return error("Email already in use")
+
+    conn.execute(
+        """INSERT INTO users (id, email, username, passwd, auth_version, kdf_salt, kdf_iterations,
+                              pub_ecdh, pub_sign, enc_private, created_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
+        (
+            str(uuid.uuid4()),
+            email,
+            username,
+            ph.hash(auth_hash),
+            kdf_salt,
+            kdf_iterations,
+            keys["pub_ecdh"],
+            keys["pub_sign"],
+            keys["enc_private"],
+            db.now_iso(),
+        ),
+    )
+    conn.commit()
+    return {"message": "User created successfully!", "success": True}, 200
 
 
 @app.route("/api/login", methods=["POST"])
 def login():
+    data = json_body()
+    nameomail = str_field(data, "nameomail", 254).strip()
+    auth_hash = b64_field(data, "auth_hash", 128)
+
+    if rate_limited(("login-ip", client_ip()), 60, 60) or rate_limited(
+        ("login-account", nameomail.lower()), 10, 300
+    ):
+        return error("Too many login attempts, please wait a few minutes", 429)
+
+    user = find_user_by_login(nameomail)
     conn = get_db()
-    cursor = conn.cursor()
-    req_json = flask.request.get_json()
-    try:
-        nameomail = req_json["nameomail"]
-        passwd = req_json["passwd"]
-    except KeyError:
-        return {"message": "Missing nameomail in request body"}, 400
-    if nameomail and passwd:
-        if "@" in nameomail:
-            cursor.execute(
-                "SELECT passwd FROM users WHERE email = ?",
-                (nameomail,),
-            )
-        else:
-            cursor.execute(
-                "SELECT passwd FROM users WHERE username = ?",
-                (nameomail,),
-            )
 
-        passwd = cursor.fetchone()
+    if user is not None and user["auth_version"] == 0:
+        # Account from before end-to-end encryption: check the old password once,
+        # then switch it to the client derived hash and store the new key bundle.
+        legacy_password = data.get("passwd")
+        if not isinstance(legacy_password, str) or not verify_hash(user["passwd"], legacy_password):
+            return error("Login not succesfull")
+        keys = validate_key_bundle(data)
+        if not user["kdf_salt"]:
+            return error("Please retry the login")
+        conn.execute(
+            """UPDATE users SET passwd = ?, auth_version = 1, pub_ecdh = ?, pub_sign = ?, enc_private = ?
+               WHERE id = ?""",
+            (ph.hash(auth_hash), keys["pub_ecdh"], keys["pub_sign"], keys["enc_private"], user["id"]),
+        )
+        conn.commit()
+    elif user is None or not verify_hash(user["passwd"], auth_hash):
+        if user is None:
+            verify_hash(None, auth_hash)
+        return error("Login not succesfull")
 
-        if passwd:
-            try:
-                req_passwd = req_json["passwd"]
-            except KeyError:
-                return {"message": "Missing passwd in request body"}, 400
-            try:
-                if ph.verify(passwd[0], req_passwd):
-                    username, tid = get_username_and_id(cursor, nameomail)
-                    if not username or not tid:
-                        return {"message": "Login not succesfull"}, 400
-                    response = flask.make_response(
-                        {
-                            "message": "Login succesfull!",
-                            "success": True,
-                        }
-                    )
-                    response.set_cookie(
-                        "sessioncookie",
-                        generate_session_cookie(tid),
-                        expires=datetime.datetime.now() + datetime.timedelta(days=365),
-                    )
-                    response.set_cookie(
-                        "username",
-                        username,
-                        expires=datetime.datetime.now() + datetime.timedelta(days=365),
-                    )
-                    return response, 200
-                else:
-                    return {"message": "Login not succesfull"}, 400
-            except VerifyMismatchError:
-                return {"message": "Login not succesfull"}, 400
-        else:
-            return {"message": "Login not succesfull"}, 400
-    else:
-        return {"message": "Login not succesfull, missing Arguments"}, 400
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    response = flask.make_response(
+        {
+            "message": "Login succesfull!",
+            "success": True,
+            "user": own_user(user),
+            "enc_private": user["enc_private"],
+        }
+    )
+    set_session_cookie(response, create_session(user["id"]))
+    return response, 200
 
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
-    if not flask.request.cookies.get("sessioncookie"):
-        return {"message": "Logout not succesfull, no sessioncookie"}, 400
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "DELETE FROM sessions WHERE cookie = ?",
-            (flask.request.cookies.get("sessioncookie"),),
-        )
+    token = flask.request.cookies.get(SESSION_COOKIE)
+    if token:
+        conn = get_db()
+        conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (hash_token(token),))
         conn.commit()
-    except Exception as e:
-        print(e)
-        return {"message": "Logout not succesfull, internal error"}, 400
-    response = flask.make_response(
-        {
-            "message": "Logout succesfull!",
-            "success": True,
-        }
-    )
-    response.set_cookie("sessioncookie", "", expires=datetime.datetime.now())
-    response.set_cookie("username", "", expires=datetime.datetime.now())
-
+    response = flask.make_response({"message": "Logout succesfull!", "success": True})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie("username", path="/")
     return response, 200
+
+
+@app.route("/api/auth_cookie", methods=["POST", "GET"])
+def auth_session_cookie():
+    if current_user() is None:
+        return error("Cookie invalid")
+    return {"message": "Cookie valid", "success": True}, 200
+
+
+@app.route("/api/me")
+@login_required
+def me():
+    user = current_user()
+    return ok(user=own_user(user))
+
+
+@app.route("/api/change_password", methods=["POST"])
+@login_required
+def change_password():
+    data = json_body()
+    user = current_user()
+    old_hash = b64_field(data, "old_auth_hash", 128)
+    new_hash = b64_field(data, "auth_hash", 128)
+    kdf_salt, kdf_iterations = validate_kdf(data)
+    enc_private = str_field(data, "enc_private", 8192)
+    if rate_limited(("change-password", user["id"]), 5, 300):
+        return error("Too many attempts, please wait a few minutes", 429)
+    if not verify_hash(user["passwd"], old_hash):
+        return error("Current password is wrong")
+    conn = get_db()
+    conn.execute(
+        "UPDATE users SET passwd = ?, kdf_salt = ?, kdf_iterations = ?, enc_private = ? WHERE id = ?",
+        (ph.hash(new_hash), kdf_salt, kdf_iterations, enc_private, user["id"]),
+    )
+    token_hash = hash_token(flask.request.cookies.get(SESSION_COOKIE, ""))
+    conn.execute(
+        "DELETE FROM user_sessions WHERE user_id = ? AND token_hash != ?", (user["id"], token_hash)
+    )
+    conn.commit()
+    return {"message": "Password changed", "success": True}, 200
+
+
+@app.route("/api/users/keys")
+@login_required
+def user_keys():
+    ids = [i for i in flask.request.args.get("ids", "").split(",") if i][:100]
+    if not ids:
+        return ok(users=[])
+    placeholders = ",".join("?" * len(ids))
+    rows = get_db().execute(
+        f"SELECT id, username, pub_ecdh, pub_sign FROM users WHERE id IN ({placeholders})", ids
+    )
+    return ok(users=[dict(row) for row in rows])
+
+
+# --------------------------------------------------------------------------
+# Avatars
+# --------------------------------------------------------------------------
+
+
+def avatar_path(user_id):
+    return os.path.join(USER_DATA, user_id, "avatar.png")
+
+
+def send_avatar(user_id):
+    path = avatar_path(user_id)
+    if not os.path.exists(path):
+        return error("No avatar uploaded", 404)
+    response = flask.send_file(path, mimetype="image/png", max_age=300)
+    return response
 
 
 @app.route("/api/get_avatar")
+@login_required
 def get_avatar():
-    sessioncookie = flask.request.cookies.get("sessioncookie")
-    if not sessioncookie:
-        return {"message": "No sessioncookie provided"}, 400
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id FROM sessions WHERE cookie = ?",
-        (sessioncookie,),
+    return send_avatar(current_user()["id"])
+
+
+def can_see_user(viewer_id, other_id):
+    if viewer_id == other_id or are_friends(viewer_id, other_id):
+        return True
+    return (
+        get_db()
+        .execute(
+            """SELECT 1 FROM chat_members a JOIN chat_members b ON a.chat_id = b.chat_id
+               WHERE a.user_id = ? AND b.user_id = ? LIMIT 1""",
+            (viewer_id, other_id),
+        )
+        .fetchone()
+        is not None
     )
-    try:
-        user_id = cursor.fetchone()["user_id"]
-    except Exception as e:
-        print(e)
-        return {"message": "Invalid sessioncookie"}, 400
-    image_path = os.path.join(USER_DATA, user_id, "avatar.png")
-    try:
-        image = Image.open(image_path)
-        io_img = io.BytesIO()
-        image.save(io_img, "PNG")
-        io_img.seek(0)
-    except Exception:
-        return {"message": "No avatar uploaded"}, 400
-    response = flask.send_file(io_img, mimetype="image/png")
-    return response, 200
+
+
+@app.route("/api/users/<username>/avatar")
+@login_required
+def get_user_avatar(username):
+    other = find_user_by_name(username)
+    if other is None or not can_see_user(current_user()["id"], other["id"]):
+        return error("No avatar uploaded", 404)
+    return send_avatar(other["id"])
 
 
 @app.route("/api/upload_avatar", methods=["POST"])
+@login_required
 def upload_avatar():
-    sessioncookie = flask.request.cookies.get("sessioncookie")
-    if not sessioncookie:
-        return {"message": "No sessioncookie provided"}, 400
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id FROM sessions WHERE cookie = ?",
-        (sessioncookie,),
-    )
+    user_id = current_user()["id"]
+    file = flask.request.files.get("avatar_img")
+    if file is None or not file.filename:
+        return error("No selected file")
+    raw = file.read(MAX_AVATAR_BYTES + 1)
+    if len(raw) > MAX_AVATAR_BYTES:
+        return error("File size exceeds 2MB limit")
     try:
-        user_id = cursor.fetchone()["user_id"]
-    except Exception as e:
-        print(e)
-        return {"message": "Invalid sessioncookie"}, 400
-
-    if "avatar_img" not in flask.request.files:
-        return {"message": "No file part"}, 400
-
-    file = flask.request.files["avatar_img"]
-
-    if not file.filename:
-        return {"message": "No selected file"}, 400
-
-    if not file.mimetype == "image/png":
-        return {"message": "Wrong filetype (only support png's)"}, 400
-
-    file.seek(0, 2)
-    fsize = file.tell()
-    file.seek(0)
-
-    if fsize > 5 * 1024 * 1024:
-        return {"message": "File size exceeds 5MB limit"}, 400
-
+        image = Image.open(io.BytesIO(raw))
+        if image.width * image.height > 40_000_000:
+            return error("Image is too large")
+        image = image.convert("RGBA")
+        image.thumbnail((512, 512))
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+        return error("Wrong filetype (png, jpg, gif or webp)")
     os.makedirs(os.path.join(USER_DATA, user_id), exist_ok=True)
-
-    if file:
-        avatarpath = os.path.join(USER_DATA, user_id, "avatar.png")
-        if os.path.exists(avatarpath):
-            os.remove(avatarpath)
-        file.save(avatarpath)
-        return {"message": "Image uploaded successfully", "success": True}, 200
-    return {"message": "Image upload didn't work"}, 400
+    # Re-encoding strips metadata and anything that is not plain pixel data.
+    image.save(avatar_path(user_id), "PNG")
+    return {"message": "Image uploaded successfully", "success": True}, 200
 
 
+# --------------------------------------------------------------------------
+# Friends & blocking
+# --------------------------------------------------------------------------
+
+
+def pair(a, b):
+    return tuple(sorted((a, b)))
+
+
+def are_friends(a, b):
+    return (
+        get_db()
+        .execute("SELECT 1 FROM friendships WHERE user_a = ? AND user_b = ?", pair(a, b))
+        .fetchone()
+        is not None
+    )
+
+
+def is_blocked_between(a, b):
+    return (
+        get_db()
+        .execute(
+            "SELECT 1 FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)",
+            (a, b, b, a),
+        )
+        .fetchone()
+        is not None
+    )
+
+
+def target_user(data):
+    other = find_user_by_name(data.get("username") or data.get("friend_username"))
+    if other is None:
+        flask.abort(flask.make_response(error("User not found", 404)))
+    return other
+
+
+def users_by_query(sql, params):
+    return [public_user(row) for row in get_db().execute(sql, params)]
+
+
+@app.route("/api/friends")
+@login_required
+def list_friends():
+    me_id = current_user()["id"]
+    return ok(
+        friends=users_by_query(
+            """SELECT u.id, u.username FROM friendships f JOIN users u
+               ON u.id = CASE WHEN f.user_a = ? THEN f.user_b ELSE f.user_a END
+               WHERE f.user_a = ? OR f.user_b = ? ORDER BY u.username COLLATE NOCASE""",
+            (me_id, me_id, me_id),
+        ),
+        incoming=users_by_query(
+            """SELECT u.id, u.username FROM friend_requests r JOIN users u ON u.id = r.from_id
+               WHERE r.to_id = ? ORDER BY r.created_at""",
+            (me_id,),
+        ),
+        outgoing=users_by_query(
+            """SELECT u.id, u.username FROM friend_requests r JOIN users u ON u.id = r.to_id
+               WHERE r.from_id = ? ORDER BY r.created_at""",
+            (me_id,),
+        ),
+        blocked=users_by_query(
+            """SELECT u.id, u.username FROM blocks b JOIN users u ON u.id = b.blocked_id
+               WHERE b.blocker_id = ? ORDER BY u.username COLLATE NOCASE""",
+            (me_id,),
+        ),
+    )
+
+
+def make_friends(conn, a, b):
+    conn.execute(
+        "INSERT OR IGNORE INTO friendships (user_a, user_b, created_at) VALUES (?, ?, ?)",
+        (*pair(a, b), db.now_iso()),
+    )
+    conn.execute(
+        "DELETE FROM friend_requests WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)",
+        (a, b, b, a),
+    )
+
+
+@app.route("/api/friends/request", methods=["POST"])
 @app.route("/api/add_friend", methods=["POST"])
-def add_friend():
-    sessioncookie = flask.request.cookies.get("sessioncookie")
-    if not sessioncookie:
-        return {"message": "No sessioncookie provided"}, 400
+@login_required
+def request_friend():
+    me_id = current_user()["id"]
+    other = target_user(json_body())
+    if rate_limited(("friend-request", me_id), 30, 600):
+        return error("Too many friend requests, please wait", 429)
+    if other["id"] == me_id:
+        return error("Cannot add yourself as a friend")
+    if are_friends(me_id, other["id"]):
+        return error("Already Friends")
+    if is_blocked_between(me_id, other["id"]):
+        # Do not reveal who blocked whom.
+        return error("Friend request could not be sent")
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id FROM sessions WHERE cookie = ?",
-        (sessioncookie,),
+    if conn.execute(
+        "SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ?", (other["id"], me_id)
+    ).fetchone():
+        make_friends(conn, me_id, other["id"])
+        conn.commit()
+        return ok(message="Friend added successfully!", status="friends")
+    if conn.execute(
+        "SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ?", (me_id, other["id"])
+    ).fetchone():
+        return error("Already pending request")
+    conn.execute(
+        "INSERT INTO friend_requests (from_id, to_id, created_at) VALUES (?, ?, ?)",
+        (me_id, other["id"], db.now_iso()),
     )
-    try:
-        user_id = cursor.fetchone()["user_id"]
-    except Exception as e:
-        print(e)
-        return {"message": "Invalid sessioncookie"}, 400
-    req_json = flask.request.get_json()
-    try:
-        friend_username = req_json["friend_username"]
-    except KeyError:
-        return {"message": "Missing friend_username in request body"}, 400
-    cursor.execute("SELECT id FROM users WHERE username = ?", (friend_username,))
-    try:
-        friend_id = cursor.fetchone()["id"]
-    except Exception as e:
-        print(e)
-        return {"message": "Friend username not found"}, 400
-    if user_id == friend_id:
-        return {"message": "Cannot add yourself as a friend"}, 400
-
-    if friend_id in get_friends_for_user(user_id):
-        return {"message": "Already Friends"}, 400
-
-    try:
-        with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "r+") as f:
-            pending_list = json.load(f)
-            if friend_id in pending_list["pending"]:
-                for i, j in enumerate(pending_list["pending"]):
-                    if j == friend_id:
-                        del pending_list["pending"][i]
-                        break
-                f.seek(0)
-                json.dump(pending_list, f)
-                f.truncate()
-                os.makedirs(os.path.join(USER_DATA, user_id), exist_ok=True)
-                selfpath = os.path.join(USER_DATA, user_id, "friends.json")
-                friendpath = os.path.join(USER_DATA, friend_id, "friends.json")
-                try:
-                    with open(selfpath, "x") as f:
-                        json.dump({"friends": [friend_id]}, f)
-                except FileExistsError:
-                    with open(selfpath, "r+") as f:
-                        data = json.load(f)
-                        if friend_id in data["friends"]:
-                            return {"message": "Friend already added"}, 400
-                        data["friends"].append(friend_id)
-                        f.seek(0)
-                        json.dump(data, f)
-                        f.truncate()
-
-                try:
-                    with open(friendpath, "x") as f:
-                        json.dump({"friends": [user_id]}, f)
-                except FileExistsError:
-                    with open(friendpath, "r+") as f:
-                        data = json.load(f)
-                        if user_id in data["friends"]:
-                            return {"message": "Friend already added"}, 400
-                        data["friends"].append(user_id)
-                        f.seek(0)
-                        json.dump(data, f)
-                        f.truncate()
-
-                return {"message": "Friend added successfully!", "success": True}, 200
-    except FileNotFoundError:
-        pass
-
-    try:
-        os.makedirs(os.path.join(USER_DATA, friend_id), exist_ok=True)
-        with open(os.path.join(USER_DATA, friend_id, "pending_friends.json"), "x") as f:
-            json.dump({"pending": [user_id]}, f)
-    except FileExistsError:
-        try:
-            with open(
-                os.path.join(USER_DATA, friend_id, "pending_friends.json"), "r"
-            ) as f:
-                pending_list = json.load(f)
-            if user_id not in pending_list["pending"]:
-                pending_list["pending"].append(user_id)
-            else:
-                return {"message": "Already pending request"}
-            with open(
-                os.path.join(USER_DATA, friend_id, "pending_friends.json"), "w"
-            ) as f:
-                json.dump(pending_list, f)
-        except Exception:
-            return {"message": "Internal error"}, 400
-    return {"message": "Requestet sended"}
+    conn.commit()
+    return ok(message="Request sent", status="pending")
 
 
-@app.route("/api/remove_chat", methods=["POST"])
-def remove_chat():
-    user_id = get_id()
-    if not user_id:
-        return {"message": "Invalid sessioncookie"}, 400
-    req_json = flask.request.get_json()
-    try:
-        chat_id = req_json["chat_id"]
-    except Exception:
-        return {"message": "No chat_id provided"}, 400
-    chats_user_is_in = return_chats_for_user(user_id)
-    if chat_id not in chats_user_is_in:
-        return {"message": "Chat doesnt exist"}, 400
-
-    shutil.rmtree(os.path.join(CHATS, chat_id))
-    return {"message": "Chat deleted successfully", "success": True}, 200
+@app.route("/api/friends/accept", methods=["POST"])
+@login_required
+def accept_friend():
+    me_id = current_user()["id"]
+    other = target_user(json_body())
+    conn = get_db()
+    if not conn.execute(
+        "SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ?", (other["id"], me_id)
+    ).fetchone():
+        return error("Request doesnt exist")
+    make_friends(conn, me_id, other["id"])
+    conn.commit()
+    return ok(message="Friend added successfully!")
 
 
+@app.route("/api/friends/decline", methods=["POST"])
 @app.route("/api/discard_request", methods=["POST"])
-def discard_request():
-    user_id = get_id()
+@login_required
+def decline_friend():
+    me_id = current_user()["id"]
+    other = target_user(json_body())
     conn = get_db()
-    cursor = conn.cursor()
-
-    if not user_id:
-        return {"message": "Invalid user_id"}, 400
-    req_json = flask.request.get_json()
-    try:
-        discarding_req = req_json["username"]
-    except KeyError:
-        return {"message": "No username provided"}, 400
-    try:
-        with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "r+") as f:
-            deleted_one = False
-            pendings = json.load(f)
-            try:
-                pending_reqs = pendings["pending"]
-            except Exception:
-                return {"message": "No pending friend requests", "success": True}, 200
-            for i, req in enumerate(pending_reqs):
-                un = get_username_by_id(cursor, req)
-                if un == discarding_req:
-                    deleted_one = True
-                    del pendings["pending"][i]
-                    break
-            if not deleted_one:
-                return {"message": "Request doesnt exist"}, 400
-            f.seek(0)
-            json.dump(pending_reqs, f)
-            f.truncate()
-
-    except FileNotFoundError:
-        return {"message": "Request doesnt exist"}, 400
-
-    return {"message": "successfully deleted the request", "success": True}, 200
-
-
-@app.route("/api/block_user", methods=["POST"])
-def block_user():
-    # TODO: Implement
-    return {"message": "Not implemented yet... sowwyy.."}, 400
-
-
-@app.route("/api/pending_friends")
-def pending_friend():
-    sessioncookie = flask.request.cookies.get("sessioncookie")
-    if not sessioncookie:
-        return {"message": "No sessioncookie provided"}, 400
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id FROM sessions WHERE cookie = ?",
-        (sessioncookie,),
+    cur = conn.execute(
+        "DELETE FROM friend_requests WHERE from_id = ? AND to_id = ?", (other["id"], me_id)
     )
-    try:
-        user_id = cursor.fetchone()["user_id"]
-    except Exception as e:
-        print(e)
-        return {"message": "Invalid sessioncookie"}, 400
-    try:
-        with open(os.path.join(USER_DATA, user_id, "pending_friends.json"), "r") as f:
-            pendings = json.load(f)
-            try:
-                pending_reqs = pendings["pending"]
-            except Exception:
-                return {"message": "No pending friend requests", "success": True}, 200
-            ret_obj = []
-            for req in pending_reqs:
-                ret_obj.append(get_username_by_id(cursor, req))
-            return {
-                "message": "Found some, here they are",
-                "success": True,
-                "pending_friends": ret_obj,
-            }
-    except FileNotFoundError:
-        return {"message": "No pending friend requests", "success": True}, 200
+    conn.commit()
+    if cur.rowcount == 0:
+        return error("Request doesnt exist")
+    return ok(message="successfully deleted the request")
+
+
+@app.route("/api/friends/cancel", methods=["POST"])
+@login_required
+def cancel_friend_request():
+    me_id = current_user()["id"]
+    other = target_user(json_body())
+    conn = get_db()
+    conn.execute("DELETE FROM friend_requests WHERE from_id = ? AND to_id = ?", (me_id, other["id"]))
+    conn.commit()
+    return ok(message="Request cancelled")
+
+
+@app.route("/api/friends/remove", methods=["POST"])
+@login_required
+def remove_friend():
+    me_id = current_user()["id"]
+    other = target_user(json_body())
+    conn = get_db()
+    conn.execute("DELETE FROM friendships WHERE user_a = ? AND user_b = ?", pair(me_id, other["id"]))
+    conn.commit()
+    return ok(message="Friend removed")
+
+
+@app.route("/api/block", methods=["POST"])
+@app.route("/api/block_user", methods=["POST"])
+@login_required
+def block_user():
+    me_id = current_user()["id"]
+    other = target_user(json_body())
+    if other["id"] == me_id:
+        return error("Cannot block yourself")
+    conn = get_db()
+    conn.execute(
+        "INSERT OR IGNORE INTO blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)",
+        (me_id, other["id"], db.now_iso()),
+    )
+    conn.execute("DELETE FROM friendships WHERE user_a = ? AND user_b = ?", pair(me_id, other["id"]))
+    conn.execute(
+        "DELETE FROM friend_requests WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)",
+        (me_id, other["id"], other["id"], me_id),
+    )
+    conn.commit()
+    return ok(message="User blocked")
+
+
+@app.route("/api/unblock", methods=["POST"])
+@login_required
+def unblock_user():
+    me_id = current_user()["id"]
+    other = target_user(json_body())
+    conn = get_db()
+    conn.execute("DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?", (me_id, other["id"]))
+    conn.commit()
+    return ok(message="User unblocked")
+
+
+# --------------------------------------------------------------------------
+# Chats
+# --------------------------------------------------------------------------
+
+
+def membership(chat_id, user_id):
+    return (
+        get_db()
+        .execute(
+            """SELECT c.*, m.role, m.joined_seq, m.cleared_seq, m.last_read_seq, m.hidden
+               FROM chats c JOIN chat_members m ON m.chat_id = c.id
+               WHERE c.id = ? AND m.user_id = ?""",
+            (chat_id, user_id),
+        )
+        .fetchone()
+    )
+
+
+def require_membership(chat_id):
+    chat = membership(chat_id, current_user()["id"])
+    if chat is None:
+        flask.abort(flask.make_response(error("Chat not found", 404)))
+    return chat
+
+
+def chat_members(chat_id):
+    return get_db().execute(
+        """SELECT u.id, u.username, u.pub_ecdh, u.pub_sign, m.role
+           FROM chat_members m JOIN users u ON u.id = m.user_id
+           WHERE m.chat_id = ? ORDER BY m.joined_at, u.username COLLATE NOCASE""",
+        (chat_id,),
+    ).fetchall()
+
+
+def max_seq(conn, chat_id):
+    return conn.execute(
+        "SELECT COALESCE(MAX(seq), 0) AS s FROM messages WHERE chat_id = ?", (chat_id,)
+    ).fetchone()["s"]
+
+
+def serialize_message(row):
+    payload = None
+    if not row["deleted"] and row["payload"]:
+        try:
+            payload = json.loads(row["payload"])
+        except ValueError:
+            payload = None
+    return {
+        "seq": row["seq"],
+        "rev": row["rev"],
+        "id": row["id"],
+        "sender_id": row["sender_id"],
+        "sender": row["sender"],
+        "kind": row["kind"],
+        "payload": payload,
+        "created_at": row["created_at"],
+        "deleted": bool(row["deleted"]),
+    }
+
+
+MESSAGE_SELECT = """SELECT m.*, u.username AS sender FROM messages m
+                    LEFT JOIN users u ON u.id = m.sender_id"""
+
+
+def add_system_message(conn, chat_id, event, **details):
+    rev = db.next_rev(conn)
+    conn.execute(
+        "INSERT INTO messages (id, chat_id, sender_id, kind, payload, created_at, rev) VALUES (?, ?, NULL, 'system', ?, ?, ?)",
+        (str(uuid.uuid4()), chat_id, json.dumps({"event": event, **details}), db.now_iso(), rev),
+    )
+    conn.execute("UPDATE chats SET last_activity = ? WHERE id = ?", (db.now_iso(), chat_id))
+
+
+def add_member(conn, chat_id, user_id, role="member"):
+    conn.execute(
+        """INSERT INTO chat_members (chat_id, user_id, role, joined_at, joined_seq, cleared_seq, last_read_seq)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (chat_id, user_id, role, db.now_iso(), max_seq(conn, chat_id), 0, max_seq(conn, chat_id)),
+    )
+
+
+def chat_summary(chat, me_id):
+    conn = get_db()
+    floor = max(chat["joined_seq"], chat["cleared_seq"])
+    last = conn.execute(
+        MESSAGE_SELECT + " WHERE m.chat_id = ? AND m.seq > ? ORDER BY m.seq DESC LIMIT 1",
+        (chat["id"], floor),
+    ).fetchone()
+    unread = conn.execute(
+        """SELECT COUNT(*) AS c FROM messages WHERE chat_id = ? AND seq > ? AND deleted = 0
+           AND kind != 'system' AND (sender_id IS NULL OR sender_id != ?)""",
+        (chat["id"], max(floor, chat["last_read_seq"]), me_id),
+    ).fetchone()["c"]
+    members = chat_members(chat["id"])
+    summary = {
+        "id": chat["id"],
+        "chat": chat["id"],
+        "type": chat["type"],
+        "name": chat["name"],
+        "role": chat["role"],
+        "member_count": len(members),
+        "last_message": serialize_message(last) if last else None,
+        "unread": unread,
+        "last_activity": chat["last_activity"],
+    }
+    if chat["type"] == "dm":
+        others = [m for m in members if m["id"] != me_id]
+        other = others[0] if others else None
+        summary["other_user"] = other["username"] if other else "Unknown User"
+        summary["other_user_id"] = other["id"] if other else None
+        summary["name"] = summary["other_user"]
+        summary["blocked"] = bool(other) and is_blocked_between(me_id, other["id"])
+    return summary
+
+
+@app.route("/api/chats")
+@app.route("/api/load_chats")
+@login_required
+def list_chats():
+    me_id = current_user()["id"]
+    rows = get_db().execute(
+        """SELECT c.*, m.role, m.joined_seq, m.cleared_seq, m.last_read_seq, m.hidden
+           FROM chats c JOIN chat_members m ON m.chat_id = c.id
+           WHERE m.user_id = ? AND m.hidden = 0 ORDER BY c.last_activity DESC""",
+        (me_id,),
+    ).fetchall()
+    return ok(chats=[chat_summary(row, me_id) for row in rows])
+
+
+def open_dm(me_id, other):
+    if other["id"] == me_id:
+        return error("Cannot create chat with yourself")
+    if is_blocked_between(me_id, other["id"]):
+        return error("Cannot create chat with this user")
+    a, b = pair(me_id, other["id"])
+    conn = get_db()
+    existing = conn.execute("SELECT id FROM chats WHERE dm_key = ?", (f"{a}:{b}",)).fetchone()
+    if existing:
+        mine = membership(existing["id"], me_id)
+        if mine is None:
+            add_member(conn, existing["id"], me_id)
+        else:
+            conn.execute(
+                "UPDATE chat_members SET hidden = 0 WHERE chat_id = ? AND user_id = ?",
+                (existing["id"], me_id),
+            )
+        conn.commit()
+        return ok(chat_id=existing["id"], message="Chat already exists", existing=True)
+    if not are_friends(me_id, other["id"]):
+        return error("Cannot create chat with a user who is not your friend")
+    chat_id = str(uuid.uuid4())
+    now = db.now_iso()
+    conn.execute(
+        "INSERT INTO chats (id, type, name, owner_id, dm_key, created_at, last_activity) VALUES (?, 'dm', NULL, NULL, ?, ?, ?)",
+        (chat_id, f"{a}:{b}", now, now),
+    )
+    add_member(conn, chat_id, me_id)
+    add_member(conn, chat_id, other["id"])
+    conn.commit()
+    return ok(chat_id=chat_id, message="Chat created successfully!")
+
+
+def validate_group_name(value):
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > 64:
+        flask.abort(flask.make_response(error("Group name must be 1-64 characters")))
+    return value.strip()
+
+
+@app.route("/api/chats", methods=["POST"])
+@login_required
+def create_chat():
+    data = json_body()
+    me = current_user()
+    if data.get("type", "dm") == "dm":
+        return open_dm(me["id"], target_user(data))
+
+    name = validate_group_name(data.get("name"))
+    usernames = data.get("usernames")
+    if not isinstance(usernames, list) or not usernames:
+        return error("Pick at least one friend for the group")
+    members = {}
+    for username in usernames:
+        other = find_user_by_name(username)
+        if other is None or not are_friends(me["id"], other["id"]):
+            return error(f"{username} is not your friend")
+        members[other["id"]] = other
+    members.pop(me["id"], None)
+    if not members or len(members) + 1 > MAX_GROUP_MEMBERS:
+        return error(f"A group needs 2-{MAX_GROUP_MEMBERS} members")
+
+    conn = get_db()
+    chat_id = str(uuid.uuid4())
+    now = db.now_iso()
+    conn.execute(
+        "INSERT INTO chats (id, type, name, owner_id, dm_key, created_at, last_activity) VALUES (?, 'group', ?, ?, NULL, ?, ?)",
+        (chat_id, name, me["id"], now, now),
+    )
+    add_member(conn, chat_id, me["id"], "owner")
+    for user_id in members:
+        add_member(conn, chat_id, user_id)
+    add_system_message(conn, chat_id, "created", actor=me["username"], name=name)
+    conn.commit()
+    return ok(chat_id=chat_id, message="Group created successfully!")
 
 
 @app.route("/api/new_chat", methods=["POST"])
-def new_chat():
-    sessioncookie = flask.request.cookies.get("sessioncookie")
-    if not sessioncookie:
-        return {"message": "No sessioncookie provided"}, 400
+@login_required
+def new_chat_legacy():
+    return open_dm(current_user()["id"], target_user(json_body()))
+
+
+@app.route("/api/chats/<chat_id>")
+@login_required
+def chat_details(chat_id):
+    chat = require_membership(chat_id)
+    me_id = current_user()["id"]
+    summary = chat_summary(chat, me_id)
+    summary["members"] = [dict(row) for row in chat_members(chat_id)]
+    summary["owner_id"] = chat["owner_id"]
+    return ok(chat=summary)
+
+
+@app.route("/api/chats/<chat_id>/messages")
+@login_required
+def get_chat_messages(chat_id):
+    chat = require_membership(chat_id)
+    floor = max(chat["joined_seq"], chat["cleared_seq"])
+    args = flask.request.args
+    limit = min(max(args.get("limit", 50, type=int), 1), 200)
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id FROM sessions WHERE cookie = ?",
-        (sessioncookie,),
-    )
+    if args.get("since_rev") is not None:
+        rows = conn.execute(
+            MESSAGE_SELECT + " WHERE m.chat_id = ? AND m.seq > ? AND m.rev > ? ORDER BY m.rev ASC LIMIT ?",
+            (chat_id, floor, args.get("since_rev", 0, type=int), limit),
+        ).fetchall()
+    else:
+        before = args.get("before_seq", type=int)
+        rows = conn.execute(
+            MESSAGE_SELECT
+            + " WHERE m.chat_id = ? AND m.seq > ? AND m.seq < ? ORDER BY m.seq DESC LIMIT ?",
+            (chat_id, floor, before if before else 2**62, limit),
+        ).fetchall()[::-1]
+    return ok(messages=[serialize_message(row) for row in rows], has_more=len(rows) == limit)
+
+
+@app.route("/api/get_messages")
+@login_required
+def get_messages_legacy():
+    return get_chat_messages(flask.request.args.get("chat_id", ""))
+
+
+def validate_envelope(payload, member_ids):
+    if not isinstance(payload, dict) or payload.get("v") != 1:
+        return "Unsupported message format"
+    for field, max_len in (("iv", 64), ("sig", 256), ("ct", MAX_CIPHERTEXT_LEN)):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value or len(value) > max_len or not B64_RE.match(value):
+            return f"Invalid '{field}'"
+    keys = payload.get("keys")
+    if not isinstance(keys, dict) or set(keys) != set(member_ids):
+        return "Message must be encrypted for exactly the current chat members"
+    for wrapped in keys.values():
+        if not isinstance(wrapped, dict):
+            return "Invalid key"
+        for field in ("iv", "k"):
+            value = wrapped.get(field)
+            if not isinstance(value, str) or len(value) > 128 or not B64_RE.match(value):
+                return "Invalid key"
+    if set(payload) - {"v", "iv", "ct", "sig", "keys"}:
+        return "Unknown fields in message"
+    return None
+
+
+@app.route("/api/chats/<chat_id>/messages", methods=["POST"])
+@login_required
+def post_message(chat_id):
+    me_id = current_user()["id"]
+    chat = require_membership(chat_id)
+    data = json_body()
+    message_id = str_field(data, "id", 64)
     try:
-        user_id = cursor.fetchone()["user_id"]
-    except Exception as e:
-        print(e)
-        return {"message": "Invalid sessioncookie"}, 400
-    req_json = flask.request.get_json()
-    try:
-        friend_username = req_json["friend_username"]
-    except KeyError:
-        return {"message": "Missing friend_username in request body"}, 400
-    cursor.execute("SELECT id FROM users WHERE username = ?", (friend_username,))
-    try:
-        friend_id = cursor.fetchone()["id"]
-    except Exception as e:
-        print(e)
-        return {"message": "Friend username not found"}, 400
+        uuid.UUID(message_id)
+    except ValueError:
+        return error("Invalid message id")
+    if rate_limited(("send", me_id), 30, 10):
+        return error("You are sending messages too fast", 429)
 
-    if user_id == friend_id:
-        return {"message": "Cannot create chat with yourself"}, 400
+    members = chat_members(chat_id)
+    if chat["type"] == "dm":
+        others = [m["id"] for m in members if m["id"] != me_id]
+        if others and is_blocked_between(me_id, others[0]):
+            return error("You can't send messages to this chat", 403)
+    problem = validate_envelope(data.get("payload"), [m["id"] for m in members])
+    if problem:
+        return error(problem, 409 if "members" in problem else 400)
 
-    if friend_id not in get_friends_for_user(user_id):
-        return {"message": "Cannot create chat with a user who is not your friend"}, 400
-
-    chat_id = str(uuid.uuid4())
-
-    chats = return_chats_for_user(user_id)
-    for chat in chats:
-        with open(os.path.join(CHATS, chat, "users.json"), "r") as f:
-            data = json.load(f)
-            if friend_id in data["users"]:
-                return {"message": "Chat already exists"}, 400
-    try:
-        os.makedirs(os.path.join(CHATS, chat_id), exist_ok=False)
-    except FileExistsError:
-        while True:
-            chat_id = str(uuid.uuid4())
-            try:
-                os.makedirs(os.path.join(CHATS, chat_id), exist_ok=False)
-                break
-            except FileExistsError:
-                continue
-    with open(os.path.join(CHATS, chat_id, "users.json"), "w") as f:
-        json.dump({"users": [user_id, friend_id]}, f)
-    with open(os.path.join(CHATS, chat_id, "history.db"), "w") as f:
-        pass
-    chat_cursor = get_chat_db(chat_id).cursor()
-    chat_cursor.execute(
-        "CREATE TABLE IF NOT EXISTS messages (id VARCHAR(255) PRIMARY KEY, sender_id VARCHAR(255), content TEXT, timestamp TIMESTAMP)"
-    )
-    chat_cursor.connection.commit()
-    with open(os.path.join(CHATS, chat_id, "cache.txt"), "w") as f:
-        pass
-    return {"message": "Chat created successfully!", "success": True}, 200
-
-
-def get_id():
-    sessioncookie = flask.request.cookies.get("sessioncookie")
-    if not sessioncookie:
-        return False
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id FROM sessions WHERE cookie = ?",
-        (sessioncookie,),
-    )
     try:
-        user_id = cursor.fetchone()["user_id"]
-    except Exception as e:
-        print(e)
-        return False
-    return user_id
-
-
-def get_friends_for_user(user_id):
-    try:
-        with open(os.path.join(USER_DATA, user_id, "friends.json"), "r") as f:
-            data = json.load(f)
-            return data["friends"]
-    except FileNotFoundError:
-        return []
-
-
-def return_chats_for_user(user_id):
-    chats = []
-    for chat in os.listdir(CHATS):
-        try:
-            with open(os.path.join(CHATS, chat, "users.json"), "r") as f:
-                data = json.load(f)
-                if user_id in data["users"]:
-                    chats.append(chat)
-        except Exception as e:
-            print(e)
-            continue
-    return chats
-
-
-@app.route("/api/load_chats")
-def load_chats():
-    sessioncookie = flask.request.cookies.get("sessioncookie")
-    if not sessioncookie:
-        return {"message": "No sessioncookie provided"}, 400
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id FROM sessions WHERE cookie = ?",
-        (sessioncookie,),
-    )
-    try:
-        user_id = cursor.fetchone()["user_id"]
-    except Exception as e:
-        print(e)
-        return {"message": "Invalid sessioncookie"}, 400
-    chats = return_chats_for_user(user_id)
-    return_objects = []
-    for chat in chats:
-        with open(os.path.join(CHATS, chat, "users.json"), "r") as f:
-            data = json.load(f)
-            other_user_id = [uid for uid in data["users"] if uid != user_id][0]
-            cursor.execute("SELECT username FROM users WHERE id = ?", (other_user_id,))
-            try:
-                other_username = cursor.fetchone()["username"]
-            except Exception as e:
-                print(e)
-                other_username = "Unknown User"
-        with open(os.path.join(CHATS, chat, "cache.txt"), "r") as f:
-            last_message = f.read()
-        return_objects.append(
-            {"chat": chat, "other_user": other_username, "last_message": last_message}
-        )
-
-    return {"chats": return_objects, "success": True}, 200
+        with db.write_transaction(conn):
+            rev = db.next_rev(conn)
+            cur = conn.execute(
+                "INSERT INTO messages (id, chat_id, sender_id, kind, payload, created_at, rev) VALUES (?, ?, ?, 'e2e', ?, ?, ?)",
+                (message_id, chat_id, me_id, json.dumps(data["payload"]), db.now_iso(), rev),
+            )
+            conn.execute("UPDATE chats SET last_activity = ? WHERE id = ?", (db.now_iso(), chat_id))
+            conn.execute("UPDATE chat_members SET hidden = 0 WHERE chat_id = ?", (chat_id,))
+            conn.execute(
+                "UPDATE chat_members SET last_read_seq = ? WHERE chat_id = ? AND user_id = ?",
+                (cur.lastrowid, chat_id, me_id),
+            )
+    except sqlite3.IntegrityError:
+        return error("Duplicate message id", 409)
+    return ok(message="Message sent successfully!", seq=cur.lastrowid, rev=rev)
 
 
 @app.route("/api/send_message", methods=["POST"])
-def send_message():
-    sessioncookie = flask.request.cookies.get("sessioncookie")
-    if not sessioncookie:
-        return {"message": "No sessioncookie provided"}, 400
+@login_required
+def send_message_legacy():
+    return error("This client is outdated. Please reload the page to use encrypted messaging.", 410)
+
+
+@app.route("/api/chats/<chat_id>/messages/<message_id>/delete", methods=["POST"])
+@login_required
+def delete_message(chat_id, message_id):
+    require_membership(chat_id)
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id FROM sessions WHERE cookie = ?",
-        (sessioncookie,),
-    )
-    try:
-        user_id = cursor.fetchone()["user_id"]
-    except Exception as e:
-        print(e)
-        return {"message": "Invalid sessioncookie"}, 400
-    reqjson = flask.request.get_json()
-    try:
-        chat_id = reqjson["chat_id"]
-        content = reqjson["content"]
-    except KeyError:
-        return {"message": "Missing chat_id or content in request body"}, 400
-    chats = return_chats_for_user(user_id)
-    if chat_id not in chats:
-        return {"message": "Invalid chat_id"}, 400
-    try:
-        chat_cursor = get_chat_db(chat_id).cursor()
-    except Exception as e:
-        print(e)
-        return {"message": "Invalid chat_id"}, 400
-    chat_cursor.execute(
-        "INSERT INTO messages (id, sender_id, content, timestamp) VALUES (?, ?, ?, datetime('now'))",
-        (
-            str(uuid.uuid4()),
-            user_id,
-            content,
-        ),
-    )
-    chat_cursor.connection.commit()
-    with open(os.path.join(CHATS, chat_id, "cache.txt"), "w") as f:
-        f.write(content)
-    return {"message": "Message sent successfully!", "success": True}, 200
-
-
-@app.route("/api/get_messages", methods=["GET"])
-def get_messages():
-    sessioncookie = flask.request.cookies.get("sessioncookie")
-    if not sessioncookie:
-        return {"message": "No sessioncookie provided"}, 400
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id FROM sessions WHERE cookie = ?",
-        (sessioncookie,),
-    )
-    try:
-        user_id = cursor.fetchone()["user_id"]
-    except Exception as e:
-        print(e)
-        return {"message": "Invalid sessioncookie"}, 400
-    chat_id = flask.request.args.get("chat_id")
-    chats = return_chats_for_user(user_id)
-    if chat_id not in chats:
-        return {"message": "Invalid chat_id"}, 400
-    try:
-        chat_cursor = get_chat_db(chat_id).cursor()
-    except Exception as e:
-        print(e)
-        return {"message": "Invalid chat_id"}, 400
-    chat_cursor.execute(
-        "SELECT sender_id, content, timestamp FROM messages ORDER BY timestamp ASC"
-    )
-
-    messages = chat_cursor.fetchall()
-    message_list = []
-    for message in messages:
-        message_list.append(
-            {
-                "sender": get_username_by_id(cursor, message["sender_id"]),
-                "content": message["content"],
-                "timestamp": message["timestamp"],
-            }
+    with db.write_transaction(conn):
+        cur = conn.execute(
+            "UPDATE messages SET deleted = 1, payload = NULL, rev = ? WHERE id = ? AND chat_id = ? AND sender_id = ? AND deleted = 0",
+            (db.next_rev(conn), message_id, chat_id, current_user()["id"]),
         )
-    return {"messages": message_list, "success": True}, 200
+    if cur.rowcount == 0:
+        return error("Message not found", 404)
+    return ok(message="Message deleted")
 
 
-def get_username_by_id(cursor, id):
-    cursor.execute("SELECT username FROM users WHERE id = ?", (id,))
-    try:
-        data = cursor.fetchone()["username"]
-    except Exception as e:
-        print(e)
-        return None
-    return data if data else None
-
-
-def get_username_and_id(cursor, nameomail):
-    if "@" in nameomail:
-        cursor.execute("SELECT username, id FROM users WHERE email = ?", (nameomail,))
-        data = cursor.fetchone()
-        try:
-            username = data["username"]
-            tid = data["id"]
-        except Exception as e:
-            print(e)
-            return None, None
-
-    else:
-        cursor.execute(
-            "SELECT username, id FROM users WHERE username = ?", (nameomail,)
-        )
-        data = cursor.fetchone()
-        try:
-            username = data["username"]
-            tid = data["id"]
-        except Exception as e:
-            print(e)
-            return None, None
-
-    return username, tid
-
-
-def generate_session_cookie(user_id):
+@app.route("/api/chats/<chat_id>/read", methods=["POST"])
+@login_required
+def mark_read(chat_id):
+    require_membership(chat_id)
+    seq = json_body().get("seq")
+    if not isinstance(seq, int):
+        return error("Invalid seq")
     conn = get_db()
-    cookie = str(secrets.token_urlsafe(16))
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO sessions (id, cookie, user_id, expires_at, created_at) VALUES (?, ?, ?, datetime('now', '+1 year'), datetime('now'))",
-        (
-            str(uuid.uuid4()),
-            cookie,
-            user_id,
-        ),
+    conn.execute(
+        "UPDATE chat_members SET last_read_seq = MAX(last_read_seq, MIN(?, ?)) WHERE chat_id = ? AND user_id = ?",
+        (seq, max_seq(conn, chat_id), chat_id, current_user()["id"]),
     )
     conn.commit()
-    return cookie
+    return ok()
 
 
-@app.route("/api/auth_cookie", methods=["POST"])
-def auth_session_cookie():
+def require_group(chat, owner_only=False):
+    if chat["type"] != "group":
+        flask.abort(flask.make_response(error("Only possible in groups")))
+    if owner_only and chat["role"] != "owner":
+        flask.abort(flask.make_response(error("Only the group owner can do that", 403)))
+
+
+@app.route("/api/chats/<chat_id>/members", methods=["POST"])
+@login_required
+def add_group_member(chat_id):
+    me = current_user()
+    chat = require_membership(chat_id)
+    require_group(chat)
+    other = target_user(json_body())
+    if not are_friends(me["id"], other["id"]):
+        return error("You can only add your friends")
+    if membership(chat_id, other["id"]):
+        return error("Already in the group")
     conn = get_db()
-    cursor = conn.cursor()
-    sessioncookie = flask.request.cookies.get("sessioncookie")
-    cursor.execute(
-        "SELECT expires_at FROM sessions WHERE cookie = ?",
-        (sessioncookie,),
-    )
-    try:
-        expire_date = cursor.fetchone()["expires_at"]
-        print(expire_date)
-    except Exception:
-        return {"message": "Cookie invalid"}, 400
-    if datetime.datetime.now() < expire_date:
-        return {"message": "Cookie valid", "success": True}, 200
-    else:
-        return {"message": "Cookie expired"}, 400
+    if len(chat_members(chat_id)) >= MAX_GROUP_MEMBERS:
+        return error("The group is full")
+    with db.write_transaction(conn):
+        add_member(conn, chat_id, other["id"])
+        add_system_message(conn, chat_id, "added", actor=me["username"], target=other["username"])
+    return ok(message="Member added")
 
 
-def username_available(username: str) -> bool:
+def leave_chat(conn, chat, user):
+    chat_id = chat["id"]
+    conn.execute("DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user["id"]))
+    remaining = chat_members(chat_id)
+    if not remaining:
+        conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+        conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+        return
+    if chat["owner_id"] == user["id"]:
+        new_owner = remaining[0]
+        conn.execute("UPDATE chats SET owner_id = ? WHERE id = ?", (new_owner["id"], chat_id))
+        conn.execute(
+            "UPDATE chat_members SET role = 'owner' WHERE chat_id = ? AND user_id = ?",
+            (chat_id, new_owner["id"]),
+        )
+    add_system_message(conn, chat_id, "left", actor=user["username"])
+
+
+@app.route("/api/chats/<chat_id>/members/remove", methods=["POST"])
+@login_required
+def remove_group_member(chat_id):
+    me = current_user()
+    chat = require_membership(chat_id)
+    require_group(chat, owner_only=True)
+    other = target_user(json_body())
+    if other["id"] == me["id"]:
+        return error("Use 'leave group' instead")
+    if not membership(chat_id, other["id"]):
+        return error("Not a member")
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM users WHERE username = ?", (username,))
-    return cursor.fetchone() is None
+    with db.write_transaction(conn):
+        conn.execute("DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, other["id"]))
+        add_system_message(conn, chat_id, "removed", actor=me["username"], target=other["username"])
+    return ok(message="Member removed")
 
 
-with app.app_context():
-    init_db()
+@app.route("/api/chats/<chat_id>/rename", methods=["POST"])
+@login_required
+def rename_group(chat_id):
+    me = current_user()
+    chat = require_membership(chat_id)
+    require_group(chat, owner_only=True)
+    name = validate_group_name(json_body().get("name"))
+    conn = get_db()
+    with db.write_transaction(conn):
+        conn.execute("UPDATE chats SET name = ? WHERE id = ?", (name, chat_id))
+        add_system_message(conn, chat_id, "renamed", actor=me["username"], name=name)
+    return ok(message="Group renamed")
+
+
+@app.route("/api/chats/<chat_id>/leave", methods=["POST"])
+@app.route("/api/chats/<chat_id>/delete", methods=["POST"])
+@login_required
+def delete_chat(chat_id):
+    me = current_user()
+    chat = require_membership(chat_id)
+    conn = get_db()
+    with db.write_transaction(conn):
+        if chat["type"] == "group":
+            leave_chat(conn, chat, me)
+        else:
+            # Like WhatsApp: deleting a direct chat only clears it for yourself.
+            conn.execute(
+                "UPDATE chat_members SET hidden = 1, cleared_seq = ? WHERE chat_id = ? AND user_id = ?",
+                (max_seq(conn, chat_id), chat_id, me["id"]),
+            )
+    return ok(message="Chat deleted successfully")
+
+
+@app.route("/api/remove_chat", methods=["POST"])
+@login_required
+def remove_chat_legacy():
+    return delete_chat(str_field(json_body(), "chat_id", 64))
+
+
+@app.route("/api/pending_friends")
+@login_required
+def pending_friends_legacy():
+    me_id = current_user()["id"]
+    names = [
+        row["username"]
+        for row in get_db().execute(
+            "SELECT u.username FROM friend_requests r JOIN users u ON u.id = r.from_id WHERE r.to_id = ?",
+            (me_id,),
+        )
+    ]
+    return ok(pending_friends=names)
+
+
+init_app()
+start_heartbeat()
 
 if __name__ == "__main__":
-    app.config["DEBUG"] = True
-    app.run(host="0.0.0.0", port=5000)
+    # Never enable the Werkzeug debugger on a public interface by default.
+    app.config["DEBUG"] = os.getenv("SERES_DEBUG") == "1"
+    app.run(host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "5000")), threaded=True)

@@ -1,240 +1,236 @@
 (() => {
-  function login() {
-    const email = (document.getElementById("email") as HTMLInputElement).value;
-    const password = (document.getElementById("password") as HTMLInputElement)
-      .value;
+  const t = SeresI18n.t;
+  let mode: "login" | "register" = "login";
+  let busy = false;
 
-    fetch("/api/login", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ nameomail: email, passwd: password }),
-    })
-      .then((response) => response.json())
-      .then((data) => {
-        if (data.success) {
-          window.location.href = "index.html?login=true";
-        } else {
-          document.getElementById("warning")!.innerHTML =
-            "<h4>Login failed, check your credentials.</h4>";
-        }
-      })
-      .catch((error) => {
-        document.getElementById("warning")!.innerHTML =
-          "<h4>Server unreachable. Please try again later.</h4>";
-      });
+  function el<T extends HTMLElement = HTMLElement>(id: string): T {
+    return document.getElementById(id) as T;
   }
 
-  function register_redirect() {
-    const login_button = document.getElementById("login") as HTMLButtonElement;
-    const main_button = document.getElementById(
-      "register_redirect",
-    ) as HTMLButtonElement;
-    const username_input = document.getElementById(
-      "username",
-    ) as HTMLInputElement;
+  function setWarning(message: string) {
+    el("warning").textContent = message;
+  }
 
-    document.getElementById("ahaa")!.innerHTML =
-      '<a onclick="gotologin()">Already have an account?</a>';
+  function setBusy(value: boolean, label?: string) {
+    busy = value;
+    el<HTMLButtonElement>("login").disabled = value;
+    el<HTMLButtonElement>("register_redirect").disabled =
+      value || (mode === "register" && !el<HTMLInputElement>("tos-checkbox").checked);
+    if (label !== undefined) setWarning(label);
+  }
 
-    main_button.textContent = "Register";
-    main_button.setAttribute("onclick", "register()");
-    main_button.className = "action-button";
+  async function postJson(url: string, body: object) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      credentials: "include",
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    return { ok: response.ok && data.success, status: response.status, data };
+  }
 
-    document.getElementById("landr")!.innerHTML = "<div>Register</div>";
+  /** Logs in, unlocks the private keys locally and stores them for this browser. */
+  async function loginWith(nameomail: string, password: string) {
+    const pre = await postJson("/api/prelogin", { nameomail });
+    if (!pre.ok) throw new Error(pre.data.message || t("login.failed"));
 
-    login_button.style.display = "none";
-    username_input.style.display = "block";
+    const { authHash, wrapKey } = await SeresCrypto.deriveAccountKeys(
+      password,
+      pre.data.kdf_salt,
+      pre.data.kdf_iterations,
+    );
+    const body: Record<string, unknown> = { nameomail, auth_hash: authHash };
+    if (pre.data.legacy) {
+      // Account from before end-to-end encryption: upgrade it on this login.
+      body.passwd = password;
+      body.keys = await SeresCrypto.createKeyBundle(wrapKey);
+    }
 
-    document.getElementById("tos-container")!.style.display = "flex";
-    main_button.disabled = !(
-      document.getElementById("tos-checkbox") as HTMLInputElement
-    ).checked;
+    const res = await postJson("/api/login", body);
+    if (!res.ok) {
+      throw new Error(
+        res.status === 429
+          ? res.data.message
+          : t("login.failedCredentials"),
+      );
+    }
+    const user = res.data.user;
+    let identity: SeresIdentity;
+    try {
+      identity = await SeresCrypto.unlockIdentity(
+        user.id,
+        user.enc_private,
+        wrapKey,
+        user.pub_ecdh,
+        user.pub_sign,
+      );
+    } catch {
+      await fetch("/api/logout", { method: "POST", credentials: "include" });
+      throw new Error(t("login.unlockFailed"));
+    }
+    await SeresCrypto.clearIdentities();
+    await SeresCrypto.saveIdentity(identity);
+    window.location.href = "index.html?login=true";
+  }
 
-    const passwordInput = document.getElementById(
-      "password",
-    ) as HTMLInputElement | null;
-    if (passwordInput) {
-      passwordInput.placeholder = "Password (minimum 8 characters)";
+  async function login() {
+    if (busy) return;
+    const nameomail = el<HTMLInputElement>("email").value.trim();
+    const password = el<HTMLInputElement>("password").value;
+    if (!nameomail || !password) {
+      setWarning(t("login.missingFields"));
+      return;
+    }
+    setBusy(true, t("login.loggingIn"));
+    try {
+      await loginWith(nameomail, password);
+    } catch (error) {
+      setBusy(false, error instanceof Error ? error.message : t("common.unreachable"));
     }
   }
 
-  function register() {
-    const warningElement = document.getElementById("warning");
-    const username = (document.getElementById("username") as HTMLInputElement)
-      .value;
-    const email = (document.getElementById("email") as HTMLInputElement).value;
-    const password = (document.getElementById("password") as HTMLInputElement)
-      .value;
+  async function register() {
+    if (busy) return;
+    const username = el<HTMLInputElement>("username").value.trim();
+    const email = el<HTMLInputElement>("email").value.trim();
+    const password = el<HTMLInputElement>("password").value;
 
-    interface BackendResponse {
-      success: boolean;
-      message: string;
+    if (!/^[A-Za-z0-9_-]{3,20}$/.test(username)) {
+      setWarning(t("login.invalidUsername"));
+      return;
+    }
+    if (password.length < 8) {
+      setWarning(t("login.passwordTooShort"));
+      return;
     }
 
-    fetch("/api/register", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        accept: "application/json",
-      },
-      body: JSON.stringify({
+    setBusy(true, t("login.creating"));
+    try {
+      const kdfSalt = SeresCrypto.newSalt();
+      const iterations = SeresCrypto.DEFAULT_ITERATIONS;
+      const { authHash, wrapKey } = await SeresCrypto.deriveAccountKeys(
+        password,
+        kdfSalt,
+        iterations,
+      );
+      const keys = await SeresCrypto.createKeyBundle(wrapKey);
+      const res = await postJson("/api/register", {
         username,
         email,
-        passwd: password,
-      }),
-    })
-      .then((response) => response.json() as Promise<BackendResponse>)
-      .then((data) => {
-        if (data.success) {
-          console.log("Account created");
-          alert("Account created successfully! You can now log in.");
-          window.location.reload();
-        } else if (warningElement) {
-          warningElement.textContent =
-            data.message || "An Error occurred during registration.";
-        }
-      })
-      .catch((error) => {
-        if (warningElement) {
-          warningElement.textContent =
-            error instanceof Error
-              ? error.message
-              : "An Error occurred during registration.";
-        }
+        auth_hash: authHash,
+        kdf_salt: kdfSalt,
+        kdf_iterations: iterations,
+        keys,
       });
-  }
-
-  function gotologin() {
-    const login_button = document.getElementById("login") as HTMLButtonElement;
-    const main_button = document.getElementById(
-      "register_redirect",
-    ) as HTMLButtonElement;
-    const username_input = document.getElementById(
-      "username",
-    ) as HTMLInputElement;
-
-    document.getElementById("ahaa")!.innerHTML = "";
-
-    main_button.textContent = "Register";
-    main_button.setAttribute("onclick", "register_redirect()");
-    main_button.className = "";
-
-    document.getElementById("landr")!.innerHTML = "<div>Login</div>";
-
-    login_button.style.display = "block";
-    username_input.style.display = "none";
-
-    document.getElementById("tos-container")!.style.display = "none";
-    main_button.disabled = false;
-
-    const passwordInput = document.getElementById(
-      "password",
-    ) as HTMLInputElement | null;
-    if (passwordInput) {
-      passwordInput.placeholder = "Password";
+      if (!res.ok) {
+        setBusy(false, res.data.message || t("login.registerFailed"));
+        return;
+      }
+      setWarning(t("login.created"));
+      await loginWith(username, password);
+    } catch (error) {
+      setBusy(false, error instanceof Error ? error.message : t("login.registerFailed"));
     }
   }
 
-  function toggleRegisterButton() {
-    const checkbox = document.getElementById(
-      "tos-checkbox",
-    ) as HTMLInputElement;
-    const registerBtn = document.getElementById(
-      "register_redirect",
-    ) as HTMLButtonElement;
-    registerBtn.disabled = !checkbox.checked;
-  }
+  function showMode(next: "login" | "register") {
+    mode = next;
+    const isRegister = next === "register";
+    const loginButton = el<HTMLButtonElement>("login");
+    const mainButton = el<HTMLButtonElement>("register_redirect");
 
-  function openToS() {
-    document.getElementById("tos-modal")!.style.display = "flex";
-  }
+    el("landr").textContent = t(isRegister ? "login.registerTitle" : "login.title");
+    el("username").style.display = isRegister ? "block" : "none";
+    el("tos-container").style.display = isRegister ? "flex" : "none";
+    loginButton.style.display = isRegister ? "none" : "block";
+    mainButton.className = isRegister ? "action-button" : "";
+    mainButton.disabled = isRegister && !el<HTMLInputElement>("tos-checkbox").checked;
+    el<HTMLInputElement>("email").placeholder = t(isRegister ? "login.email" : "login.usernameOrEmail");
+    el<HTMLInputElement>("password").placeholder = t(isRegister ? "login.passwordNew" : "login.password");
 
-  function closeToS() {
-    document.getElementById("tos-modal")!.style.display = "none";
-  }
-
-  window.onclick = function (event: MouseEvent) {
-    const modal = document.getElementById("tos-modal");
-    if (modal && event.target === modal) {
-      modal.style.display = "none";
+    const switchLink = el("ahaa");
+    switchLink.textContent = "";
+    if (isRegister) {
+      const link = document.createElement("a");
+      link.textContent = t("login.haveAccount");
+      link.href = "#";
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        showMode("login");
+      });
+      switchLink.appendChild(link);
     }
-  };
-
-  function getCookie(name: string) {
-    let matches = document.cookie.match(
-      new RegExp(
-        "(?:^|; )" +
-          name.replace(/([\.$?*|{}\(\)\[\]\\\/\+^])/g, "\\$1") +
-          "=([^;]*)",
-      ),
-    );
-    return matches ? decodeURIComponent(matches[1]) : undefined;
+    setWarning("");
   }
 
   function applyLoginTheme() {
-    const isBright = getCookie("theme") === "bright";
-
+    const isBright = SeresI18n.getCookie("theme") === "bright";
     document.body.classList.toggle("bright-body", isBright);
-
-    const loginBox = document.querySelector(".login");
-    if (loginBox) loginBox.classList.toggle("bright-login", isBright);
-
-    const landr = document.querySelector(".landr");
-    if (landr) landr.classList.toggle("bright-landr", isBright);
-
-    const loginF = document.querySelector(".login-f");
-    if (loginF) loginF.classList.toggle("bright-login-f", isBright);
-
-    const ahaa = document.querySelector("#ahaa");
-    if (ahaa) ahaa.classList.toggle("bright-ahaa", isBright);
-
-    const tosContainer = document.querySelector(".tos-container");
-    if (tosContainer)
-      tosContainer.classList.toggle("bright-tos-container", isBright);
+    document.querySelector(".login")?.classList.toggle("bright-login", isBright);
+    document.querySelector(".landr")?.classList.toggle("bright-landr", isBright);
+    document.querySelector(".login-f")?.classList.toggle("bright-login-f", isBright);
+    document.querySelector("#ahaa")?.classList.toggle("bright-ahaa", isBright);
+    document
+      .querySelector(".tos-container")
+      ?.classList.toggle("bright-tos-container", isBright);
   }
 
   function toggleLoginTheme() {
-    const currentTheme = getCookie("theme");
-    const newTheme = currentTheme === "bright" ? "dark" : "bright";
-    document.cookie = "theme=" + newTheme + "; path=/; max-age=31536000";
+    const newTheme = SeresI18n.getCookie("theme") === "bright" ? "dark" : "bright";
+    SeresI18n.setPreference("theme", newTheme);
     applyLoginTheme();
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    const username_input = document.getElementById("username");
-    if (username_input) {
-      username_input.style.display = "none";
+    SeresI18n.apply();
+    showMode("login");
+
+    el("login").addEventListener("click", login);
+    el("register_redirect").addEventListener("click", () => {
+      if (mode === "register") register();
+      else showMode("register");
+    });
+    el("tos-checkbox").addEventListener("change", () => {
+      el<HTMLButtonElement>("register_redirect").disabled =
+        busy || !el<HTMLInputElement>("tos-checkbox").checked;
+    });
+    el("tos-link").addEventListener("click", (event) => {
+      event.preventDefault();
+      el("tos-modal").style.display = "flex";
+    });
+    el("tos-close").addEventListener("click", () => {
+      el("tos-modal").style.display = "none";
+    });
+    el("tos-modal").addEventListener("click", (event) => {
+      if (event.target === el("tos-modal")) el("tos-modal").style.display = "none";
+    });
+    el("password").addEventListener("keydown", (event) => {
+      if ((event as KeyboardEvent).key === "Enter") {
+        if (mode === "register") register();
+        else login();
+      }
+    });
+
+    const reason = new URLSearchParams(window.location.search).get("reason");
+    if (reason === "keys") {
+      setWarning(t("login.reloginKeys"));
     }
 
     const toggleBtn = document.createElement("button");
-    toggleBtn.innerText = "🌓 Mode";
-    toggleBtn.style.position = "absolute";
-    toggleBtn.style.top = "10px";
-    toggleBtn.style.right = "16px";
-    toggleBtn.style.zIndex = "1000";
-    toggleBtn.style.padding = "8px 14px";
-    toggleBtn.style.borderRadius = "6px";
-    toggleBtn.style.cursor = "pointer";
-    toggleBtn.style.fontWeight = "600";
-    toggleBtn.style.border = "1px solid #2f3b43";
-    toggleBtn.style.backgroundColor = "#2a3942";
-    toggleBtn.style.color = "#ffffff";
-
+    toggleBtn.className = "theme-toggle-floating";
+    toggleBtn.type = "button";
+    toggleBtn.dataset.i18n = "common.themeToggle";
+    toggleBtn.textContent = t("common.themeToggle");
     toggleBtn.addEventListener("click", toggleLoginTheme);
-    document.body.appendChild(toggleBtn);
+
+    // Switching the language re-renders the texts that depend on the mode.
+    const languageSelect = SeresI18n.languageSelect(() => showMode(mode));
+    const controls = document.createElement("div");
+    controls.className = "floating-controls";
+    controls.append(languageSelect, toggleBtn);
+    document.body.appendChild(controls);
 
     applyLoginTheme();
   });
-
-  (window as any).login = login;
-  (window as any).register_redirect = register_redirect;
-  (window as any).register = register;
-  (window as any).gotologin = gotologin;
-  (window as any).toggleRegisterButton = toggleRegisterButton;
-  (window as any).openToS = openToS;
-  (window as any).closeToS = closeToS;
-  (window as any).toggleLoginTheme = toggleLoginTheme;
 })();
