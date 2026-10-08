@@ -5,37 +5,37 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SereS</title>
     <link rel="icon" type="image/png" href="assets/favicon.png" />
-    <link rel="stylesheet" href="style.css">
-</head>
-<body>
-    <div id=""></div>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
     <div class="login">
-        <div id="landr" class="landr">Login</div>
-        <div class="login-f">
-            <div class="input">
-                <input type="text" id="username" placeholder="Username (minimum 3 characters)">
-                <input type="text" id="email" placeholder="Email">
-                <input type="password" id="password" placeholder="Password">
-            </div>
-            <div class="tos-container" id="tos-container" style="display: none;">
-                <input type="checkbox" id="tos-checkbox" onchange="toggleRegisterButton()">
-                <label for="tos-checkbox">I have read and agree to the <a href="#" onclick="openToS(); return false;">Terms of Service</a></label>
-            </div>
-            <div id="tos-modal" class="modal">
-                <div class="modal-content">
-                    <span class="close-btn" onclick="closeToS()">&times;</span>
-                    <h2>Terms of Service</h2>
-                    <embed src="assets/tos.pdf" type="application/pdf" />
-                </div>
-            </div>
-            <p style="color:red" id="warning"></p>
-            <button onclick="login()" id="login">Login</button>
-            <button onclick="register_redirect()" id="register_redirect">Register</button>
-            <a id="ahaa"></a>
+      <div id="landr" class="landr">Login</div>
+      <div class="login-f">
+        <div class="input">
+          <input type="text" id="username" placeholder="Username (3-20 characters)" autocomplete="username" maxlength="20" />
+          <input type="text" id="email" placeholder="Username or Email" autocomplete="email" />
+          <input type="password" id="password" placeholder="Password" autocomplete="current-password" />
         </div>
+        <div class="tos-container" id="tos-container" style="display: none">
+          <input type="checkbox" id="tos-checkbox" />
+          <label for="tos-checkbox">I have read and agree to the <a href="#" id="tos-link">Terms of Service</a></label>
+        </div>
+        <div id="tos-modal" class="modal">
+          <div class="modal-content">
+            <span class="close-btn" id="tos-close">&times;</span>
+            <h2>Terms of Service</h2>
+            <embed src="assets/tos.pdf" type="application/pdf" />
+          </div>
+        </div>
+        <p class="login-warning" id="warning" role="status"></p>
+        <button type="button" id="login">Login</button>
+        <button type="button" id="register_redirect">Register</button>
+        <a id="ahaa"></a>
+        <p class="e2e-hint">🔒 Your chats are end-to-end encrypted: only you and the people you talk to can read them.</p>
       </div>
     </div>
-    
+
+    <script src="crypto.js"></script>
     <script src="login.js"></script>
-</body>
+  </body>
 </html>

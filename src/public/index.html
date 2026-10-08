@@ -7,29 +7,9 @@
     <link rel="icon" type="image/png" href="assets/favicon.png" />
     <link rel="stylesheet" href="style.css" />
   </head>
-  <body onload="page_load()">
-    <div
-      id="intro-layer"
-      style="
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100vw;
-        height: 100vh;
-        background: #000;
-        z-index: 9999;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        transition: opacity 0.5s ease;
-      "
-    >
-      <video
-        id="intro-video"
-        style="width: 100%; height: 100%; object-fit: contain"
-        muted
-        playsinline
-      >
+  <body>
+    <div id="intro-layer" class="intro-layer">
+      <video id="intro-video" class="intro-video" muted playsinline>
         <source src="assets/animation.mp4" type="video/mp4" />
         <source src="assets/animation.mov" type="video/quicktime" />
       </video>
@@ -38,216 +18,198 @@
     <div class="sidebar">
       <div class="sidebar-header">
         <span>SereS</span>
-        <button
-          class="add-friend-main-button"
-          type="button"
-          onclick="openAddFriendMenu()"
-        >
+        <button class="add-friend-main-button" type="button" id="btn-add-friend">
           <h6>Add Friend</h6>
         </button>
-        <div class="mobile-welcome">
-          Welcome <span id="mobile-username">Loading...</span>
-        </div>
-        <div class="sidebar-header"></div>
+      </div>
+      <div class="mobile-welcome">
+        Welcome <span id="mobile-username">Loading...</span>
       </div>
 
       <div class="list-container">
         <div class="list-view-switcher" role="tablist" aria-label="Sidebar views">
-          <button id="chats-toggle" class="list-view-toggle active" type="button" data-view="chats" onclick="switchListViewc()">
-            Chats
+          <button class="list-view-toggle active" type="button" data-view="chats">
+            Chats <span class="tab-badge" id="chats-badge"></span>
           </button>
-          <button id="requests-toggle" class="list-view-toggle" type="button" data-view="requests" onclick="switchListViewr()">
-            Requests
+          <button class="list-view-toggle" type="button" data-view="friends">Friends</button>
+          <button class="list-view-toggle" type="button" data-view="requests">
+            Requests <span class="tab-badge" id="requests-badge"></span>
           </button>
         </div>
 
-        <div class="section-title chat-section-header" id="direct-messages">
-          <span>Direct Messages</span>
-          <button class="add-dm-button" type="button" onclick="opennewchatsMenu()">+</button>
+        <div class="section-title chat-section-header" id="chats-header">
+          <span>Direct Messages &amp; Groups</span>
+          <span class="section-actions">
+            <button class="add-dm-button" type="button" id="btn-new-dm" title="New direct message">+</button>
+            <button class="add-dm-button" type="button" id="btn-new-group" title="New group">#</button>
+          </span>
+        </div>
+        <div class="list-search-wrap">
+          <input type="search" id="list-search" class="list-search" placeholder="Search..." autocomplete="off" />
         </div>
 
-        <div id="dm-list" class="list-view-panel active"></div>
-        <div id="requests-list" class="list-view-panel"></div>
+        <div id="dm-list" class="list-view-panel active" data-panel="chats"></div>
+        <div id="friends-list" class="list-view-panel" data-panel="friends"></div>
+        <div id="requests-list" class="list-view-panel" data-panel="requests"></div>
       </div>
 
       <div class="user-menu-container">
-        <div class="user-menu-trigger" onclick="toggleUserMenu()">
-          <div
-            class="avatar"
-            style="background-color: #5865f2"
-            id="user-avatar"
-          >
-            <span id="user-avatar-text">Loading</span>
-            <img
-              id="user-avatar-img"
-              src=""
-              alt="Avatar"
-              style="display: none"
-            />
+        <div class="user-menu-trigger" id="user-menu-trigger">
+          <div class="avatar" id="user-avatar">
+            <span id="user-avatar-text">?</span>
+            <img id="user-avatar-img" src="" alt="Avatar" class="hidden-el" />
           </div>
           <span class="item-name" id="my-username-display">Loading...</span>
         </div>
 
         <div class="user-dropdown modal-hidden" id="user-dropdown-menu">
+          <a href="#" class="dropdown-item" id="menu-settings">⚙️ Settings</a>
           <hr class="dropdown-divider" />
-
-          <a href="#" class="dropdown-item" onclick="openSettings()">
-            ⚙️ Settings
-          </a>
-
-          <hr class="dropdown-divider" />
-
-          <a
-            href="https://discord.gg/vx3vKcp2Kq"
-            class="dropdown-item"
-            target="_blank"
-          >
+          <a href="https://discord.gg/vx3vKcp2Kq" class="dropdown-item" target="_blank" rel="noopener noreferrer">
             <img src="assets/discord.png" alt="Discord Logo" />
             <span>Visit us on Discord</span>
           </a>
-
-          <a
-            href="changelog.html"
-            class="dropdown-item"
-          >
-            <span>📜 Changelog</span>
-          </a>
-
-          <a
-            href="https://github.com/SereSChat/SereS"
-            class="dropdown-item"
-            target="_blank"
-          >
+          <a href="changelog.html" class="dropdown-item"><span>📜 Changelog</span></a>
+          <a href="https://github.com/SereSChat/SereS" class="dropdown-item" target="_blank" rel="noopener noreferrer">
             <img src="assets/github_logo.png" alt="Github Logo" />
             <span>Github Repositories</span>
           </a>
-
           <hr class="dropdown-divider" />
-
-          <a href="#" class="dropdown-item logout-item" onclick="logout()">
-            Logout
-          </a>
-        </div>
-
-        <div class="modal-overlay modal-hidden" id="settings-modal">
-          <div class="modal-box">
-            <h3>⚙️ Settings</h3>
-
-            <p>Upload a new profile picture (Max 1MB):</p>
-
-            <input type="file" id="avatar-upload-input" accept="image/*" />
-
-            <h4 style="color: red" id="settings-warning"></h4>
-
-            <div class="modal-buttons">
-              <button
-                class="modal-btn cancel-btn"
-                type="button"
-                onclick="closeSettingsMenu()"
-              >
-                Cancel
-              </button>
-              <button
-                class="modal-btn confirm-btn"
-                type="button"
-                onclick="saveSettings()"
-              >
-                Save
-              </button>
-            </div>
-          </div>
+          <a href="#" class="dropdown-item logout-item" id="menu-logout">Logout</a>
         </div>
       </div>
     </div>
 
-    <div id="alert" class="alert-box">
-      <span id="alert-text">Server unreachable. Please try again later.</span>
+    <div id="alert" class="alert-box hidden">
+      <span id="alert-text"></span>
     </div>
 
     <div class="main-chat">
       <div class="chat-header">
-        <button class="menu-toggle" type="button" onclick="toggleSidebar()">
+        <button class="menu-toggle" type="button" id="menu-toggle" aria-label="Open sidebar">
           <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
             <path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"></path>
           </svg>
         </button>
-        <span id="current-chat-name">Welcome Loading...</span>
+        <div class="chat-title">
+          <span id="current-chat-name">Welcome</span>
+          <span id="current-chat-sub" class="chat-subtitle"></span>
+        </div>
+        <button class="header-icon-button modal-hidden" type="button" id="chat-info-btn" title="Chat info">ⓘ</button>
       </div>
 
-      <div class="messages-container"></div>
+      <div id="key-warning" class="key-warning modal-hidden"></div>
+
+      <div class="messages-container" id="messages">
+        <div class="empty-state" id="empty-state">
+          <div class="empty-state-icon">🔒</div>
+          <h2>SereS</h2>
+          <p>Pick a chat or start a new one. All messages are end-to-end encrypted &mdash; not even the SereS server can read them.</p>
+        </div>
+      </div>
 
       <div class="input-container modal-hidden" id="chat-input-area">
         <div class="input-box">
-          <input type="text" id="message-input-field" placeholder="Type a message..." />
+          <textarea id="message-input-field" rows="1" maxlength="4000" placeholder="Type an encrypted message..."></textarea>
         </div>
-        <button class="action-button icon-button" type="button" onclick="send_message()">
+        <button class="action-button icon-button" type="button" id="send-btn" aria-label="Send">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
           </svg>
         </button>
       </div>
+    </div>
 
+    <!-- Add friend -->
     <div class="modal-overlay modal-hidden" id="add-friend-modal">
       <div class="modal-box">
         <h3>Add friend</h3>
-        <p>Enter the name of your Friend.</p>
-        <input
-          type="text"
-          id="friends-username-input"
-          placeholder="Enter name"
-        />
-        <h4 style="color: red" id="warning-add-friend"></h4>
+        <p>Enter the username of your friend.</p>
+        <input type="text" id="friends-username-input" placeholder="Username" maxlength="20" />
+        <h4 class="modal-warning" id="warning-add-friend"></h4>
         <div class="modal-buttons">
-          <button
-            class="modal-btn cancel-btn"
-            type="button"
-            onclick="closeAddFriendMenu()"
-          >
-            Cancel
-          </button>
-          <button
-            class="modal-btn confirm-btn"
-            type="button"
-            onclick="confirmAddFriend()"
-          >
-            Add
-          </button>
+          <button class="modal-btn cancel-btn" type="button" data-close-modal>Cancel</button>
+          <button class="modal-btn confirm-btn" type="button" id="confirm-add-friend">Add</button>
         </div>
       </div>
     </div>
 
-    <div class="modal-overlay modal-hidden" id="add-chat-modal">
+    <!-- New direct message -->
+    <div class="modal-overlay modal-hidden" id="new-dm-modal">
       <div class="modal-box">
         <h3>New chat</h3>
-        <p>
-          Enter a name for a DM, or multiple names separated by commas for a
-          group.
-        </p>
-        <input
-          type="text"
-          id="new-chat-username-input"
-          placeholder="Enter name(s)..."
-        />
-        <h4 style="color: red" id="warning-new-chat"></h4>
+        <p>Pick a friend to start an encrypted direct message.</p>
+        <div class="picker-list" id="new-dm-list"></div>
+        <h4 class="modal-warning" id="warning-new-dm"></h4>
         <div class="modal-buttons">
-          <button
-            class="modal-btn cancel-btn"
-            type="button"
-            onclick="closenewchatsMenu()"
-          >
-            Cancel
-          </button>
-          <button
-            class="modal-btn confirm-btn"
-            type="button"
-            onclick="confirnewchats()"
-          >
-            Create
-          </button>
+          <button class="modal-btn cancel-btn" type="button" data-close-modal>Cancel</button>
         </div>
       </div>
     </div>
 
+    <!-- New group -->
+    <div class="modal-overlay modal-hidden" id="new-group-modal">
+      <div class="modal-box">
+        <h3>New group</h3>
+        <input type="text" id="new-group-name" placeholder="Group name" maxlength="64" />
+        <p>Members (only friends can be added):</p>
+        <div class="picker-list" id="new-group-list"></div>
+        <h4 class="modal-warning" id="warning-new-group"></h4>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal>Cancel</button>
+          <button class="modal-btn confirm-btn" type="button" id="confirm-new-group">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chat info -->
+    <div class="modal-overlay modal-hidden" id="chat-info-modal">
+      <div class="modal-box modal-wide">
+        <h3 id="chat-info-title">Chat info</h3>
+        <div id="chat-info-body" class="chat-info-body"></div>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal>Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="modal-overlay modal-hidden" id="settings-modal">
+      <div class="modal-box modal-wide">
+        <h3>⚙️ Settings</h3>
+
+        <div class="settings-section">
+          <p>Profile picture (PNG, JPG, GIF or WebP, max 2MB):</p>
+          <input type="file" id="avatar-upload-input" accept="image/png,image/jpeg,image/gif,image/webp" />
+          <button class="modal-btn secondary-btn" type="button" id="upload-avatar-btn">Upload picture</button>
+        </div>
+
+        <div class="settings-section">
+          <p>App design:</p>
+          <button class="modal-btn secondary-btn" type="button" id="theme-toggle-btn">🌓 Switch Light/Dark Mode</button>
+        </div>
+
+        <div class="settings-section">
+          <p>Your security key fingerprint. Friends can compare it to verify your encryption keys:</p>
+          <code class="fingerprint" id="my-fingerprint">...</code>
+        </div>
+
+        <div class="settings-section">
+          <p>Change password (your encryption keys are re-encrypted on this device):</p>
+          <input type="password" id="old-password" placeholder="Current password" autocomplete="current-password" />
+          <input type="password" id="new-password" placeholder="New password (min. 8 characters)" autocomplete="new-password" />
+          <input type="password" id="new-password-repeat" placeholder="Repeat new password" autocomplete="new-password" />
+          <button class="modal-btn secondary-btn" type="button" id="change-password-btn">Change password</button>
+        </div>
+
+        <h4 class="modal-warning" id="settings-warning"></h4>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal>Close</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="crypto.js"></script>
     <script src="index.js"></script>
   </body>
 </html>

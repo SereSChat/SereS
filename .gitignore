@@ -4,4 +4,6 @@ package-lock.json
 package.json
 users.db
 __pycache__/
-.env
+.envusers.db-wal
+users.db-shm
+.pytest_cache/
