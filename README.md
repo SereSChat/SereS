@@ -1,6 +1,6 @@
 # 💬 SereS
 
-![Beta Status](https://img.shields.io/badge/Status-Web%20Beta-orange.svg)
+[![Beta Status](https://img.shields.io/badge/Status-Web%20Beta-orange.svg)](https://status.seres-chat.com)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white)](https://discord.gg/vx3vKcp2Kq)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
