@@ -1099,7 +1099,7 @@
         const fp = await memberFingerprint(other);
         if (fp) {
           const code = await SeresCrypto.safetyNumber(myFp, fp);
-          body.appendChild(h("p", { text: "Security code. Compare it with the one on your friend's device (in person or over a call). If they match, your chat is protected." }));
+          body.appendChild(h("p", { text: t("info.securityCode") }));
           body.appendChild(h("code", { className: "safety-number", text: code }));
           body.appendChild(verifyToggle(other.id, fp, verified));
         }
@@ -1107,14 +1107,14 @@
         body.appendChild(
           h("div", { className: "info-actions" }, [
             isBlocked
-              ? button("Unblock", "pill-btn", action("unblock", () => post("/api/unblock", { username: other.username })))
+              ? button(t("friends.unblock"), "pill-btn", action("unblock", () => post("/api/unblock", { username: other.username })))
               : button(
-                  "⛔ Block",
+                  t("friends.block"),
                   "pill-btn danger",
-                  action("block", () => post("/api/block", { username: other.username }), `Block ${other.username}?`),
+                  action("block", () => post("/api/block", { username: other.username }), t("friends.blockConfirm", { name: other.username })),
                 ),
             button(
-              "Delete chat",
+              t("info.deleteChat"),
               "pill-btn danger",
               action(
                 "delete",
@@ -1123,7 +1123,7 @@
                   closeAllModals();
                   closeChat();
                 },
-                "Delete this chat for you? The other person keeps their copy.",
+                t("info.deleteChatConfirm"),
               ),
             ),
           ]),
@@ -1136,11 +1136,11 @@
         body.appendChild(
           h("div", { className: "info-row" }, [
             nameInput,
-            button("Rename", "pill-btn", action("rename", () => post(`/api/chats/${encodeURIComponent(details.id)}/rename`, { name: nameInput.value }))),
+            button(t("info.rename"), "pill-btn", action("rename", () => post(`/api/chats/${encodeURIComponent(details.id)}/rename`, { name: nameInput.value }))),
           ]),
         );
       }
-      body.appendChild(h("p", { text: `${members.length} members. Compare security codes to make sure nobody is intercepting the group.` }));
+      body.appendChild(h("p", { text: t("info.groupMembers", { count: members.length }) }));
       for (const member of members) {
         const fp = await memberFingerprint(member);
         const isMe = member.id === me.id;
@@ -1149,19 +1149,19 @@
           h("div", { className: "item-info" }, [
             h("span", {
               className: "item-name",
-              text: (isMe ? "You" : member.username) + (member.role === "owner" ? " · owner" : ""),
+              text: (isMe ? t("msg.you") : member.username) + (member.role === "owner" ? t("info.owner") : ""),
             }),
             h("span", {
               className: "item-status",
-              text: fp ? (isMe ? "Your key: " : "Key: ") + fp.slice(0, 32).replace(/(.{4})/g, "$1 ").trim() : "No encryption key yet",
+              text: fp ? t(isMe ? "info.yourKey" : "info.key") + fp.slice(0, 32).replace(/(.{4})/g, "$1 ").trim() : t("info.noKey"),
             }),
           ]),
         ]);
         if (!isMe && fp) {
           const code = await SeresCrypto.safetyNumber(myFp, fp);
           row.appendChild(
-            button("Code", "request-action-btn more", () => {
-              window.alert(`Security code with ${member.username}:\n\n${code}\n\nCompare it with the code ${member.username} sees for you.`);
+            button(t("info.code"), "request-action-btn more", () => {
+              window.alert(t("info.codeAlert", { name: member.username, code }));
             }),
           );
           row.appendChild(verifyToggle(member.id, fp, verified, true));
@@ -1169,7 +1169,7 @@
         if (isOwner && !isMe) {
           row.appendChild(
             button(
-              "Remove",
+              t("info.remove"),
               "request-action-btn discard",
               action(
                 "remove",
@@ -1177,7 +1177,7 @@
                   await post(`/api/chats/${encodeURIComponent(details.id)}/members/remove`, { username: member.username });
                   await openChatInfo();
                 },
-                `Remove ${member.username} from the group?`,
+                t("info.removeConfirm", { name: member.username }),
               ),
             ),
           );
@@ -1188,12 +1188,12 @@
       const memberIds = new Set(members.map((m) => m.id));
       const addBox = h("div", { className: "picker-list" });
       friendCheckboxes(addBox, memberIds);
-      body.appendChild(h("p", { text: "Add friends to the group (they will only see new messages):" }));
+      body.appendChild(h("p", { text: t("info.addHint") }));
       body.appendChild(addBox);
       body.appendChild(
         h("div", { className: "info-actions" }, [
           button(
-            "Add selected",
+            t("info.addSelected"),
             "pill-btn",
             action("add", async () => {
               for (const username of checkedUsernames(addBox)) {
@@ -1203,7 +1203,7 @@
             }),
           ),
           button(
-            "Leave group",
+            t("info.leave"),
             "pill-btn danger",
             action(
               "leave",
@@ -1212,7 +1212,7 @@
                 closeAllModals();
                 closeChat();
               },
-              "Leave this group?",
+              t("info.leaveConfirm"),
             ),
           ),
         ]),
@@ -1224,7 +1224,7 @@
   function verifyToggle(userId: string, fp: string, verified: Record<string, string>, compact = false) {
     const isVerified = verified[userId] === fp;
     return button(
-      isVerified ? "✔ Verified" : compact ? "Verify" : "Mark as verified",
+      t(isVerified ? "info.verified" : compact ? "info.verify" : "info.markVerified"),
       "pill-btn" + (isVerified ? " verified" : " secondary"),
       () => {
         const store = readStore("verified");
@@ -1257,11 +1257,11 @@
     warning.textContent = "";
     const file = input.files && input.files[0];
     if (!file) {
-      warning.textContent = "Choose a picture first.";
+      warning.textContent = t("settings.chooseFile");
       return;
     }
     if (file.size > 2 * 1024 * 1024) {
-      warning.textContent = "File is too large! Maximum size is 2MB.";
+      warning.textContent = t("settings.fileTooLarge");
       return;
     }
     const form = new FormData();
@@ -1269,11 +1269,11 @@
     try {
       const response = await fetch("/api/upload_avatar", { method: "POST", body: form, credentials: "same-origin" });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.success) throw new Error(data.message || "Upload failed");
+      if (!response.ok || !data.success) throw new Error(data.message || t("settings.uploadFailed"));
       input.value = "";
       avatarState.delete(me.username);
       loadOwnAvatar();
-      showAlert("Avatar updated successfully!");
+      showAlert(t("settings.avatarUpdated"));
     } catch (error) {
       warning.textContent = errorText(error);
     }
@@ -1286,14 +1286,14 @@
     const repeat = ($("new-password-repeat") as HTMLInputElement).value;
     warning.textContent = "";
     if (newPw.length < 8) {
-      warning.textContent = "The new password must be at least 8 characters long.";
+      warning.textContent = t("settings.passwordShort");
       return;
     }
     if (newPw !== repeat) {
-      warning.textContent = "The new passwords don't match.";
+      warning.textContent = t("settings.passwordMismatch");
       return;
     }
-    warning.textContent = "Re-encrypting your keys...";
+    warning.textContent = t("settings.changingPassword");
     try {
       const fresh: Me = (await api("/api/me")).user;
       const pre = await post("/api/prelogin", { nameomail: me.username });
@@ -1304,7 +1304,7 @@
       try {
         encPrivate = await SeresCrypto.rewrapPrivateKeys(fresh.enc_private, oldKeys.wrapKey, newKeys.wrapKey);
       } catch {
-        throw new Error("Current password is wrong");
+        throw new Error(t("settings.wrongPassword"));
       }
       await post("/api/change_password", {
         old_auth_hash: oldKeys.authHash,
@@ -1315,7 +1315,7 @@
       });
       ["old-password", "new-password", "new-password-repeat"].forEach((id) => (($(id) as HTMLInputElement).value = ""));
       warning.textContent = "";
-      showAlert("Password changed. Other devices have been logged out.");
+      showAlert(t("settings.passwordChanged"));
     } catch (error) {
       warning.textContent = errorText(error);
     }
@@ -1361,13 +1361,8 @@
 
   // --------------------------------------------------------------- theme
 
-  function getCookie(name: string) {
-    const match = document.cookie.split("; ").find((part) => part.startsWith(name + "="));
-    return match ? decodeURIComponent(match.slice(name.length + 1)) : undefined;
-  }
-
   function applyTheme() {
-    const isBright = getCookie("theme") === "bright";
+    const isBright = SeresI18n.getCookie("theme") === "bright";
     document.body.classList.toggle("bright-body", isBright);
     const single: [string, string][] = [
       [".sidebar", "bright-sidebar"],
@@ -1397,8 +1392,8 @@
   }
 
   function toggleTheme() {
-    const newTheme = getCookie("theme") === "bright" ? "dark" : "bright";
-    document.cookie = "theme=" + newTheme + "; path=/; max-age=31536000; SameSite=Lax";
+    const newTheme = SeresI18n.getCookie("theme") === "bright" ? "dark" : "bright";
+    SeresI18n.setPreference("theme", newTheme);
     applyTheme();
   }
 
@@ -1471,6 +1466,12 @@
     $("upload-avatar-btn").addEventListener("click", uploadAvatar);
     $("theme-toggle-btn").addEventListener("click", toggleTheme);
     $("change-password-btn").addEventListener("click", changePassword);
+    $("cookie-settings-btn").addEventListener("click", () => {
+      closeAllModals();
+      SeresConsent.show();
+    });
+    // Most texts are rendered from data, so reload to show everything in the new language.
+    $("language-select-slot").appendChild(SeresI18n.languageSelect(() => window.location.reload()));
 
     document.querySelectorAll<HTMLElement>(".list-view-toggle").forEach((btn) => {
       btn.addEventListener("click", () => switchView(btn.dataset.view as "chats" | "friends" | "requests"));
@@ -1532,6 +1533,7 @@
   }
 
   async function boot() {
+    SeresI18n.apply();
     loadAnimation();
     applyTheme();
     try {
@@ -1553,7 +1555,7 @@
 
     $("my-username-display").textContent = me.username;
     $("mobile-username").textContent = me.username;
-    $("current-chat-name").textContent = "Welcome " + me.username;
+    $("current-chat-name").textContent = t("app.welcomeUser", { name: me.username });
     loadOwnAvatar();
     bindEvents();
     switchView("chats");
