@@ -26,6 +26,7 @@
     const shownCache = new Map();
     const avatarState = new Map();
     const MESSAGE_LIMIT = 4000;
+    const t = SeresI18n.t;
     // ------------------------------------------------------------- utilities
     function $(id) {
         return document.getElementById(id);
@@ -69,7 +70,7 @@
         }
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.success === false) {
-            throw new ApiError(data.message || "Request failed", response.status);
+            throw new ApiError(data.message || t("common.requestFailed"), response.status);
         }
         return data;
     }
@@ -89,7 +90,7 @@
         if (error instanceof ApiError)
             return error.message;
         if (error instanceof TypeError)
-            return "Server unreachable. Please try again later.";
+            return t("common.unreachable");
         return error instanceof Error ? error.message : String(error);
     }
     function colorFor(name) {
@@ -125,23 +126,23 @@
         return new Date(iso);
     }
     function formatTime(iso) {
-        return parseTime(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        return parseTime(iso).toLocaleTimeString(SeresI18n.getLanguage(), { hour: "2-digit", minute: "2-digit" });
     }
     function formatDay(date) {
         const today = new Date();
         const yesterday = new Date();
         yesterday.setDate(today.getDate() - 1);
         if (date.toDateString() === today.toDateString())
-            return "Today";
+            return t("chat.today");
         if (date.toDateString() === yesterday.toDateString())
-            return "Yesterday";
-        return date.toLocaleDateString([], { day: "2-digit", month: "2-digit", year: "numeric" });
+            return t("chat.yesterday");
+        return date.toLocaleDateString(SeresI18n.getLanguage(), { day: "2-digit", month: "2-digit", year: "numeric" });
     }
     function formatListTime(iso) {
         const date = parseTime(iso);
         return date.toDateString() === new Date().toDateString()
             ? formatTime(iso)
-            : date.toLocaleDateString([], { day: "2-digit", month: "2-digit" });
+            : date.toLocaleDateString(SeresI18n.getLanguage(), { day: "2-digit", month: "2-digit" });
     }
     /** Text with clickable http(s) links, built without innerHTML. */
     function richText(text) {
@@ -242,15 +243,15 @@
             return "";
         switch (payload.event) {
             case "created":
-                return `${payload.actor} created the group "${payload.name}"`;
             case "added":
-                return `${payload.actor} added ${payload.target}`;
             case "removed":
-                return `${payload.actor} removed ${payload.target}`;
             case "left":
-                return `${payload.actor} left the group`;
             case "renamed":
-                return `${payload.actor} renamed the group to "${payload.name}"`;
+                return t("system." + payload.event, {
+                    actor: payload.actor ?? "",
+                    target: payload.target ?? "",
+                    name: payload.name ?? "",
+                });
             default:
                 return "";
         }
@@ -261,7 +262,7 @@
         if (!shown) {
             shown = (async () => {
                 if (message.deleted)
-                    return { type: "deleted", text: "This message was deleted" };
+                    return { type: "deleted", text: t("msg.deleted") };
                 if (message.kind === "system")
                     return { type: "system", text: systemText(message.payload) };
                 if (message.kind === "legacy")
@@ -276,7 +277,7 @@
                 }
                 catch (error) {
                     console.warn("Could not decrypt message", message.id, error);
-                    return { type: "error", text: "⚠ This message could not be decrypted or verified." };
+                    return { type: "error", text: t("msg.decryptError") };
                 }
             })();
             shownCache.set(cacheKey, shown);
@@ -306,13 +307,13 @@
     }
     function previewText(chat, shown) {
         if (!chat.last_message || !shown)
-            return chat.type === "group" ? `${chat.member_count} members` : "No messages yet";
+            return chat.type === "group" ? t("list.members", { count: chat.member_count }) : t("list.noMessages");
         const message = chat.last_message;
         if (shown.type === "system")
             return shown.text;
-        const prefix = message.sender_id === me.id ? "You: " : chat.type === "group" && message.sender ? message.sender + ": " : "";
+        const prefix = message.sender_id === me.id ? t("list.you") : chat.type === "group" && message.sender ? message.sender + ": " : "";
         if (shown.type === "deleted")
-            return prefix + "🚫 deleted message";
+            return prefix + t("list.deleted");
         return prefix + shown.text.replace(/\s+/g, " ");
     }
     function renderChatList(previews) {
@@ -341,11 +342,11 @@
         });
         if (!list.childElementCount) {
             list.appendChild(h("div", { className: "list-empty" }, [
-                h("p", { text: filter ? "No chats found." : "No chats yet." }),
+                h("p", { text: t(filter ? "list.noChatsFound" : "list.noChats") }),
                 !filter && friends.friends.length
-                    ? button("Start a chat", "pill-btn", () => openNewDmModal())
+                    ? button(t("list.startChat"), "pill-btn", () => openNewDmModal())
                     : !filter
-                        ? button("Add a friend", "pill-btn", () => openModal("add-friend-modal"))
+                        ? button(t("list.addFriend"), "pill-btn", () => openModal("add-friend-modal"))
                         : null,
             ]));
         }
@@ -401,32 +402,32 @@
         const filter = ($("list-search").value || "").toLowerCase();
         const match = (user) => !filter || user.username.toLowerCase().includes(filter);
         list.textContent = "";
-        list.appendChild(sectionTitle(`Friends — ${friends.friends.length}`));
+        list.appendChild(sectionTitle(t("friends.title", { count: friends.friends.length })));
         friends.friends.filter(match).forEach((friend) => {
-            list.appendChild(userRow(friend, "Friend", [
-                button("Message", "request-action-btn accept", () => startDm(friend.username)),
+            list.appendChild(userRow(friend, t("friends.status"), [
+                button(t("friends.message"), "request-action-btn accept", () => startDm(friend.username)),
                 button("⋯", "request-action-btn more", (event) => openUserMenu(friend, event)),
             ]));
         });
         if (!friends.friends.length) {
             list.appendChild(h("div", { className: "list-empty" }, [
-                h("p", { text: "No friends yet." }),
-                button("Add a friend", "pill-btn", () => openModal("add-friend-modal")),
+                h("p", { text: t("friends.none") }),
+                button(t("list.addFriend"), "pill-btn", () => openModal("add-friend-modal")),
             ]));
         }
         if (friends.outgoing.length) {
-            list.appendChild(sectionTitle("Sent requests"));
+            list.appendChild(sectionTitle(t("friends.sent")));
             friends.outgoing.filter(match).forEach((user) => {
-                list.appendChild(userRow(user, "Waiting for answer", [
-                    button("Cancel", "request-action-btn discard", action("cancel", () => post("/api/friends/cancel", { username: user.username }))),
+                list.appendChild(userRow(user, t("friends.waiting"), [
+                    button(t("common.cancel"), "request-action-btn discard", action("cancel", () => post("/api/friends/cancel", { username: user.username }))),
                 ]));
             });
         }
         if (friends.blocked.length) {
-            list.appendChild(sectionTitle("Blocked"));
+            list.appendChild(sectionTitle(t("friends.blocked")));
             friends.blocked.filter(match).forEach((user) => {
-                list.appendChild(userRow(user, "Blocked", [
-                    button("Unblock", "request-action-btn discard", action("unblock", () => post("/api/unblock", { username: user.username }))),
+                list.appendChild(userRow(user, t("friends.blocked"), [
+                    button(t("friends.unblock"), "request-action-btn discard", action("unblock", () => post("/api/unblock", { username: user.username }))),
                 ]));
             });
         }
@@ -435,12 +436,12 @@
     function openUserMenu(user, event) {
         closeFloatingMenus();
         const menu = h("div", { className: "floating-menu" }, [
-            button("💬 Message", "floating-item", () => {
+            button(t("friends.messageMenu"), "floating-item", () => {
                 closeFloatingMenus();
                 startDm(user.username);
             }),
-            button("Remove friend", "floating-item", action("remove", () => post("/api/friends/remove", { username: user.username }), `Remove ${user.username} as a friend?`)),
-            button("⛔ Block", "floating-item danger", action("block", () => post("/api/block", { username: user.username }), `Block ${user.username}? They can't send you requests or direct messages anymore.`)),
+            button(t("friends.remove"), "floating-item", action("remove", () => post("/api/friends/remove", { username: user.username }), t("friends.removeConfirm", { name: user.username }))),
+            button(t("friends.block"), "floating-item danger", action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirmLong", { name: user.username }))),
         ]);
         const rect = event.currentTarget.getBoundingClientRect();
         menu.style.top = Math.min(rect.bottom + 4, window.innerHeight - 140) + "px";
@@ -457,14 +458,14 @@
             list.appendChild(h("div", { className: "list-item request-list-item" }, [
                 h("div", { className: "avatar", text: "!" }),
                 h("div", { className: "item-info" }, [
-                    h("span", { className: "item-name", text: "No pending requests" }),
-                    h("span", { className: "item-status", text: "Friend requests you received will show here." }),
+                    h("span", { className: "item-name", text: t("requests.none") }),
+                    h("span", { className: "item-status", text: t("requests.noneHint") }),
                 ]),
             ]));
         }
         friends.incoming.forEach((user) => {
-            list.appendChild(userRow(user, "Wants to be your friend", [
-                button("Accept", "request-action-btn accept", async () => {
+            list.appendChild(userRow(user, t("requests.wants"), [
+                button(t("requests.accept"), "request-action-btn accept", async () => {
                     try {
                         await post("/api/friends/accept", { username: user.username });
                         await startDm(user.username);
@@ -474,8 +475,8 @@
                     }
                     await refreshAll();
                 }),
-                button("Decline", "request-action-btn discard", action("decline", () => post("/api/friends/decline", { username: user.username }))),
-                button("Block", "request-action-btn more", action("block", () => post("/api/block", { username: user.username }), `Block ${user.username}?`)),
+                button(t("requests.decline"), "request-action-btn discard", action("decline", () => post("/api/friends/decline", { username: user.username }))),
+                button(t("friends.blockShort"), "request-action-btn more", action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirm", { name: user.username }))),
             ]));
         });
         applyTheme();
