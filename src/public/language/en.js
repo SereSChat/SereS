@@ -12,7 +12,7 @@ window.SeresLang.en = {
   "common.themeToggle": "🌓 Mode",
 
   "consent.title": "🍪 Cookies",
-  "consent.text": "SereS uses cookies that are required for logging in. With your consent, we also remember your language and design choice.",
+  "consent.text": "SereS needs a cookie to keep you logged in. If you accept, you stay logged in and your language and design are remembered. If you deny, nothing is saved and you are logged out when you close the browser.",
   "consent.accept": "Accept",
   "consent.deny": "Deny",
 

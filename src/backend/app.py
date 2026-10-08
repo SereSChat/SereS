@@ -32,6 +32,7 @@ CHATS = os.path.join(DATA_DIR, "chats")
 DB = os.path.join(DATA_DIR, "users.db")
 
 SESSION_COOKIE = "sessioncookie"
+CONSENT_COOKIE = "cookie_consent"
 SESSION_DAYS = 90
 DEFAULT_KDF_ITERATIONS = 600_000
 MIN_KDF_ITERATIONS = 100_000
@@ -212,12 +213,19 @@ def create_session(user_id):
     return token
 
 
-def set_session_cookie(response, token):
+def cookies_accepted():
+    return flask.request.cookies.get(CONSENT_COOKIE) == "accepted"
+
+
+def set_session_cookie(response, token, persistent=None):
+    """Without cookie consent the login only lasts until the browser is closed."""
+    if persistent is None:
+        persistent = cookies_accepted()
     secure = flask.request.is_secure or flask.request.headers.get("X-Forwarded-Proto") == "https"
     response.set_cookie(
         SESSION_COOKIE,
         token,
-        max_age=SESSION_DAYS * 24 * 3600,
+        max_age=SESSION_DAYS * 24 * 3600 if persistent else None,
         httponly=True,
         secure=secure,
         samesite="Strict",
@@ -462,6 +470,25 @@ def logout():
     response = flask.make_response({"message": "Logout succesfull!", "success": True})
     response.delete_cookie(SESSION_COOKIE, path="/")
     response.delete_cookie("username", path="/")
+    return response, 200
+
+
+@app.route("/api/cookie_consent", methods=["POST"])
+def cookie_consent():
+    accepted = (flask.request.get_json(silent=True) or {}).get("accepted") is True
+    response = flask.make_response({"success": True, "accepted": accepted})
+    # Remembering the decision itself is necessary, so it is always kept.
+    response.set_cookie(
+        CONSENT_COOKIE,
+        "accepted" if accepted else "denied",
+        max_age=365 * 24 * 3600,
+        samesite="Lax",
+        path="/",
+    )
+    # Re-issue the login cookie so it matches the new decision.
+    token = flask.request.cookies.get(SESSION_COOKIE)
+    if token and current_user() is not None:
+        set_session_cookie(response, token, persistent=accepted)
     return response, 200
 
 

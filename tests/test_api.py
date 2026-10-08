@@ -78,6 +78,25 @@ def test_session_cookie_is_httponly_and_strict(make_client):
     assert client.get("/api/me").json["user"]["username"] == "carol"
 
 
+def session_set_cookie(res):
+    return next(c for c in res.headers.getlist("Set-Cookie") if c.startswith("sessioncookie="))
+
+
+def test_login_cookie_only_persists_with_consent(make_client):
+    client = make_client()
+    pw = register(client, "dave")
+    assert "Max-Age" not in session_set_cookie(login(client, "dave", pw))
+
+    res = client.post("/api/cookie_consent", json={"accepted": True})
+    assert "cookie_consent=accepted" in " ".join(res.headers.getlist("Set-Cookie"))
+    assert "Max-Age" in session_set_cookie(res)
+    assert "Max-Age" in session_set_cookie(login(client, "dave", pw))
+
+    res = client.post("/api/cookie_consent", json={"accepted": False})
+    assert "Max-Age" not in session_set_cookie(res)
+    assert client.get("/api/me").json["user"]["username"] == "dave"
+
+
 def test_security_headers(make_client):
     res = make_client().get("/api/online")
     assert "script-src 'self'" in res.headers["Content-Security-Policy"]

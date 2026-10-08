@@ -165,7 +165,7 @@
   }
 
   function applyLoginTheme() {
-    const isBright = SeresI18n.getCookie("theme") === "bright";
+    const isBright = SeresI18n.getPreference("theme") === "bright";
     document.body.classList.toggle("bright-body", isBright);
     document.querySelector(".login")?.classList.toggle("bright-login", isBright);
     document.querySelector(".landr")?.classList.toggle("bright-landr", isBright);
@@ -177,7 +177,7 @@
   }
 
   function toggleLoginTheme() {
-    const newTheme = SeresI18n.getCookie("theme") === "bright" ? "dark" : "bright";
+    const newTheme = SeresI18n.getPreference("theme") === "bright" ? "dark" : "bright";
     SeresI18n.setPreference("theme", newTheme);
     applyLoginTheme();
   }

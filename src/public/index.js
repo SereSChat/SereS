@@ -1171,7 +1171,7 @@
     }
     // --------------------------------------------------------------- theme
     function applyTheme() {
-        const isBright = SeresI18n.getCookie("theme") === "bright";
+        const isBright = SeresI18n.getPreference("theme") === "bright";
         document.body.classList.toggle("bright-body", isBright);
         const single = [
             [".sidebar", "bright-sidebar"],
@@ -1198,9 +1198,23 @@
         many.forEach(([selector, cls]) => document.querySelectorAll(selector).forEach((el) => el.classList.toggle(cls, isBright)));
     }
     function toggleTheme() {
-        const newTheme = SeresI18n.getCookie("theme") === "bright" ? "dark" : "bright";
+        const newTheme = SeresI18n.getPreference("theme") === "bright" ? "dark" : "bright";
         SeresI18n.setPreference("theme", newTheme);
         applyTheme();
+    }
+    /** Renders all generated texts again after the language was switched. */
+    function rerenderLanguage() {
+        shownCache.clear();
+        chatsSignature = "";
+        friendsSignature = "";
+        if (current) {
+            refreshCurrentDetails().catch(() => { });
+            renderMessages({}).catch(() => { });
+        }
+        else {
+            closeChat();
+        }
+        refreshAll();
     }
     // --------------------------------------------------------------- intro
     function loadAnimation() {
@@ -1275,8 +1289,7 @@
             closeAllModals();
             SeresConsent.show();
         });
-        // Most texts are rendered from data, so reload to show everything in the new language.
-        $("language-select-slot").appendChild(SeresI18n.languageSelect(() => window.location.reload()));
+        $("language-select-slot").appendChild(SeresI18n.languageSelect(rerenderLanguage));
         document.querySelectorAll(".list-view-toggle").forEach((btn) => {
             btn.addEventListener("click", () => switchView(btn.dataset.view));
         });
@@ -1335,6 +1348,9 @@
     }
     async function boot() {
         SeresI18n.apply();
+        $("my-username-display").textContent = t("common.loading");
+        $("mobile-username").textContent = t("common.loading");
+        $("current-chat-name").textContent = t("app.welcome");
         loadAnimation();
         applyTheme();
         try {
