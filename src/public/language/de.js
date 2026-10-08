@@ -12,7 +12,7 @@ window.SeresLang.de = {
   "common.themeToggle": "🌓 Modus",
 
   "consent.title": "🍪 Cookies",
-  "consent.text": "SereS verwendet Cookies, die für die Anmeldung notwendig sind. Mit deiner Zustimmung merken wir uns außerdem deine Sprache und dein Design.",
+  "consent.text": "SereS benötigt einen Cookie, damit du angemeldet bleibst. Wenn du akzeptierst, bleibst du angemeldet und deine Sprache und dein Design werden gespeichert. Wenn du ablehnst, wird nichts gespeichert und du wirst beim Schließen des Browsers abgemeldet.",
   "consent.accept": "Akzeptieren",
   "consent.deny": "Ablehnen",
 
