@@ -25,6 +25,7 @@ window.SeresLang.en = {
   "login.passwordNew": "Password (minimum 8 characters)",
   "login.tosPrefix": "I have read and agree to the ",
   "login.tosLink": "Terms of Service",
+  "login.tosSuffix": "",
   "login.loginButton": "Login",
   "login.registerButton": "Register",
   "login.haveAccount": "Already have an account?",
