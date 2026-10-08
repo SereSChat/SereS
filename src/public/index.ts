@@ -653,7 +653,7 @@
 
   function closeChat() {
     current = null;
-    $("current-chat-name").textContent = "Welcome " + me.username;
+    $("current-chat-name").textContent = t("app.welcomeUser", { name: me.username });
     $("current-chat-sub").textContent = "";
     $("chat-input-area").classList.add("modal-hidden");
     $("chat-info-btn").classList.add("modal-hidden");
@@ -667,9 +667,7 @@
     return h("div", { className: "empty-state" }, [
       h("div", { className: "empty-state-icon", text: "💬" }),
       h("h2", { text: "SereS" }),
-      h("p", {
-        text: "Pick a chat or start a new one.",
-      }),
+      h("p", { text: t("app.emptyState") }),
     ]);
   }
 
@@ -687,10 +685,10 @@
     $("current-chat-name").textContent = details.name;
     $("current-chat-sub").textContent =
       details.type === "group"
-        ? `🔒 ${details.member_count} members · end-to-end encrypted`
+        ? t("chat.groupSub", { count: details.member_count })
         : details.blocked
-          ? "Blocked"
-          : "🔒 end-to-end encrypted";
+          ? t("chat.blocked")
+          : t("chat.dmSub");
     renderKeyWarning();
   }
 
@@ -702,22 +700,22 @@
       const names = current.changedKeys.map((m) => m.username).join(", ");
       box.appendChild(
         h("span", {
-          text: `⚠ The security key of ${names} has changed. This can mean someone is trying to intercept your chat. Compare security codes in the chat info before you continue.`,
+          text: t("chat.keyChanged", { names }),
         }),
       );
       box.appendChild(
-        button("Accept new key", "pill-btn", async () => {
+        button(t("chat.acceptKey"), "pill-btn", async () => {
           if (!current) return;
           await acceptNewKeys(current.changedKeys);
           await refreshCurrentDetails();
         }),
       );
-      box.appendChild(button("Chat info", "pill-btn secondary", () => openChatInfo()));
+      box.appendChild(button(t("app.chatInfo"), "pill-btn secondary", () => openChatInfo()));
     } else if (current.missingKeys.length) {
       const names = current.missingKeys.map((m) => m.username).join(", ");
       box.appendChild(
         h("span", {
-          text: `${names} has not logged in since encryption was introduced. They have to log in once before you can send encrypted messages here.`,
+          text: t("chat.keyMissing", { names }),
         }),
       );
     }
@@ -796,16 +794,14 @@
 
     const fragment = document.createDocumentFragment();
     const banner = h("div", { className: "e2e-banner" }, [
-      h("span", {
-        text: "🔒 Messages are end-to-end encrypted. No one outside of this chat, not even SereS, can read them.",
-      }),
+      h("span", { text: t("chat.banner") }),
     ]);
     banner.addEventListener("click", () => openChatInfo());
     fragment.appendChild(banner);
 
     if (opened.hasMore) {
       fragment.appendChild(
-        button("Load older messages", "pill-btn load-older", () => {
+        button(t("chat.loadOlder"), "pill-btn load-older", () => {
           loadOlder().catch((error) => showAlert(errorText(error)));
         }),
       );
@@ -848,7 +844,7 @@
 
   function messageRow(opened: OpenChat, message: Message, view: Shown, compact: boolean) {
     const own = message.sender_id === me.id;
-    const sender = message.sender || "Unknown";
+    const sender = message.sender || t("msg.unknown");
     const row = h("div", {
       className: "message-row" + (own ? " message-own" : "") + (compact ? " message-compact" : ""),
       attrs: { "data-id": message.id },
@@ -858,15 +854,15 @@
     const wrapper = h("div", { className: "message-content-wrapper" });
     if (!compact) {
       const header = h("div", { className: "message-header" }, [
-        h("span", { className: "message-sender", text: own ? "You" : sender }),
+        h("span", { className: "message-sender", text: own ? t("msg.you") : sender }),
         h("span", { className: "message-timestamp", text: formatTime(message.created_at) }),
       ]);
       if (view.type === "legacy") {
         header.appendChild(
           h("span", {
             className: "message-flag",
-            text: "not encrypted",
-            title: "Sent before end-to-end encryption was introduced",
+            text: t("msg.notEncrypted"),
+            title: t("msg.notEncryptedHint"),
           }),
         );
       }
@@ -880,16 +876,16 @@
     } else {
       textDiv.appendChild(richText(view.text));
     }
-    textDiv.title = parseTime(message.created_at).toLocaleString();
+    textDiv.title = parseTime(message.created_at).toLocaleString(SeresI18n.getLanguage());
     wrapper.appendChild(textDiv);
 
     if (own && !message.deleted && message.kind === "e2e") {
       wrapper.appendChild(
         button(
-          "Delete",
+          t("msg.delete"),
           "message-delete",
           async () => {
-            if (!window.confirm("Delete this message for everyone?")) return;
+            if (!window.confirm(t("msg.deleteConfirm"))) return;
             try {
               await post(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(message.id)}/delete`);
               await syncCurrent();
@@ -897,7 +893,7 @@
               showAlert(errorText(error));
             }
           },
-          "Delete for everyone",
+          t("msg.deleteTitle"),
         ),
       );
     }
@@ -921,7 +917,7 @@
     const text = input.value.trim();
     if (!text || !current || sending) return;
     if (text.length > MESSAGE_LIMIT) {
-      showAlert(`Messages can be at most ${MESSAGE_LIMIT} characters long.`);
+      showAlert(t("msg.tooLong", { limit: MESSAGE_LIMIT }));
       return;
     }
     const opened = current;
@@ -932,11 +928,11 @@
         if (!opened.details || attempt > 0) await refreshCurrentDetails();
         if (current !== opened || !opened.details) return;
         if (opened.changedKeys.length) {
-          showAlert("A security key in this chat changed. Check the warning above before sending.");
+          showAlert(t("msg.keyChanged"));
           return;
         }
         if (opened.missingKeys.length) {
-          showAlert("Some members can't receive encrypted messages yet.");
+          showAlert(t("msg.missingKeys"));
           return;
         }
         const members = (opened.details.members || []).map((m) => ({
@@ -992,7 +988,7 @@
     list.textContent = "";
     $("warning-new-dm").textContent = "";
     if (!friends.friends.length) {
-      list.appendChild(h("p", { text: "You don't have any friends yet. Add a friend first." }));
+      list.appendChild(h("p", { text: t("chat.noFriends") }));
     }
     friends.friends.forEach((friend) => {
       const row = h("div", { className: "picker-item" }, [
@@ -1009,7 +1005,7 @@
     container.textContent = "";
     const available = friends.friends.filter((friend) => !exclude.has(friend.id));
     if (!available.length) {
-      container.appendChild(h("p", { text: "No friends available to add." }));
+      container.appendChild(h("p", { text: t("chat.noFriendsToAdd") }));
     }
     available.forEach((friend) => {
       const checkbox = h("input", { attrs: { type: "checkbox", value: friend.username } });
@@ -1039,11 +1035,11 @@
     const usernames = checkedUsernames($("new-group-list"));
     const warning = $("warning-new-group");
     if (!name) {
-      warning.textContent = "Please enter a group name.";
+      warning.textContent = t("chat.groupNameMissing");
       return;
     }
     if (!usernames.length) {
-      warning.textContent = "Pick at least one friend.";
+      warning.textContent = t("chat.pickFriend");
       return;
     }
     try {
@@ -1068,7 +1064,7 @@
       const data = await post("/api/friends/request", { username });
       input.value = "";
       closeAllModals();
-      showAlert(data.status === "friends" ? `You and ${username} are now friends!` : `Friend request sent to ${username}.`);
+      showAlert(t(data.status === "friends" ? "friends.nowFriends" : "friends.requestSent", { name: username }));
       await refreshAll();
     } catch (error) {
       warning.textContent = errorText(error);
