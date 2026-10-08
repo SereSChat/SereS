@@ -9,32 +9,40 @@
   </head>
   <body>
     <div class="login">
-      <div id="landr" class="landr">Login</div>
+      <div id="landr" class="landr" data-i18n="login.title">Login</div>
       <div class="login-f">
         <div class="input">
-          <input type="text" id="username" placeholder="Username (3-20 characters)" autocomplete="username" maxlength="20" />
+          <input type="text" id="username" placeholder="Username (3-20 characters)" data-i18n-placeholder="login.username" autocomplete="username" maxlength="20" />
           <input type="text" id="email" placeholder="Username or Email" autocomplete="email" />
           <input type="password" id="password" placeholder="Password" autocomplete="current-password" />
         </div>
         <div class="tos-container" id="tos-container" style="display: none">
           <input type="checkbox" id="tos-checkbox" />
-          <label for="tos-checkbox">I have read and agree to the <a href="#" id="tos-link">Terms of Service</a></label>
+          <label for="tos-checkbox"
+            ><span data-i18n="login.tosPrefix">I have read and agree to the </span
+            ><a href="#" id="tos-link" data-i18n="login.tosLink">Terms of Service</a
+            ><span data-i18n="login.tosSuffix"></span
+          ></label>
         </div>
         <div id="tos-modal" class="modal">
           <div class="modal-content">
             <span class="close-btn" id="tos-close">&times;</span>
-            <h2>Terms of Service</h2>
+            <h2 data-i18n="login.tosLink">Terms of Service</h2>
             <embed src="assets/tos.pdf" type="application/pdf" />
           </div>
         </div>
         <p class="login-warning" id="warning" role="status"></p>
-        <button type="button" id="login">Login</button>
-        <button type="button" id="register_redirect">Register</button>
+        <button type="button" id="login" data-i18n="login.loginButton">Login</button>
+        <button type="button" id="register_redirect" data-i18n="login.registerButton">Register</button>
         <a id="ahaa"></a>
-        <p class="e2e-hint">🔒 Your chats are end-to-end encrypted: only you and the people you talk to can read them.</p>
       </div>
     </div>
 
+    <script src="language/en.js"></script>
+    <script src="language/de.js"></script>
+    <script src="language/fr.js"></script>
+    <script src="i18n.js"></script>
+    <script src="consent.js"></script>
     <script src="crypto.js"></script>
     <script src="login.js"></script>
   </body>

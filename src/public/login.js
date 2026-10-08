@@ -1,5 +1,6 @@
 "use strict";
 (() => {
+    const t = SeresI18n.t;
     let mode = "login";
     let busy = false;
     function el(id) {
@@ -30,7 +31,7 @@
     async function loginWith(nameomail, password) {
         const pre = await postJson("/api/prelogin", { nameomail });
         if (!pre.ok)
-            throw new Error(pre.data.message || "Login failed");
+            throw new Error(pre.data.message || t("login.failed"));
         const { authHash, wrapKey } = await SeresCrypto.deriveAccountKeys(password, pre.data.kdf_salt, pre.data.kdf_iterations);
         const body = { nameomail, auth_hash: authHash };
         if (pre.data.legacy) {
@@ -42,7 +43,7 @@
         if (!res.ok) {
             throw new Error(res.status === 429
                 ? res.data.message
-                : "Login failed, check your credentials.");
+                : t("login.failedCredentials"));
         }
         const user = res.data.user;
         let identity;
@@ -51,7 +52,7 @@
         }
         catch {
             await fetch("/api/logout", { method: "POST", credentials: "include" });
-            throw new Error("Your encryption keys could not be unlocked.");
+            throw new Error(t("login.unlockFailed"));
         }
         await SeresCrypto.clearIdentities();
         await SeresCrypto.saveIdentity(identity);
@@ -63,15 +64,15 @@
         const nameomail = el("email").value.trim();
         const password = el("password").value;
         if (!nameomail || !password) {
-            setWarning("Please enter your username or email and password.");
+            setWarning(t("login.missingFields"));
             return;
         }
-        setBusy(true, "Unlocking your encrypted chats...");
+        setBusy(true, t("login.loggingIn"));
         try {
             await loginWith(nameomail, password);
         }
         catch (error) {
-            setBusy(false, error instanceof Error ? error.message : "Server unreachable. Please try again later.");
+            setBusy(false, error instanceof Error ? error.message : t("common.unreachable"));
         }
     }
     async function register() {
@@ -81,14 +82,14 @@
         const email = el("email").value.trim();
         const password = el("password").value;
         if (!/^[A-Za-z0-9_-]{3,20}$/.test(username)) {
-            setWarning("Username must be 3-20 characters: letters, numbers, '_' or '-'.");
+            setWarning(t("login.invalidUsername"));
             return;
         }
         if (password.length < 8) {
-            setWarning("Password must be at least 8 characters long.");
+            setWarning(t("login.passwordTooShort"));
             return;
         }
-        setBusy(true, "Creating your encryption keys...");
+        setBusy(true, t("login.creating"));
         try {
             const kdfSalt = SeresCrypto.newSalt();
             const iterations = SeresCrypto.DEFAULT_ITERATIONS;
@@ -103,14 +104,14 @@
                 keys,
             });
             if (!res.ok) {
-                setBusy(false, res.data.message || "An Error occurred during registration.");
+                setBusy(false, res.data.message || t("login.registerFailed"));
                 return;
             }
-            setWarning("Account created, logging in...");
+            setWarning(t("login.created"));
             await loginWith(username, password);
         }
         catch (error) {
-            setBusy(false, error instanceof Error ? error.message : "An Error occurred during registration.");
+            setBusy(false, error instanceof Error ? error.message : t("login.registerFailed"));
         }
     }
     function showMode(next) {
@@ -118,21 +119,19 @@
         const isRegister = next === "register";
         const loginButton = el("login");
         const mainButton = el("register_redirect");
-        el("landr").textContent = isRegister ? "Register" : "Login";
+        el("landr").textContent = t(isRegister ? "login.registerTitle" : "login.title");
         el("username").style.display = isRegister ? "block" : "none";
         el("tos-container").style.display = isRegister ? "flex" : "none";
         loginButton.style.display = isRegister ? "none" : "block";
         mainButton.className = isRegister ? "action-button" : "";
         mainButton.disabled = isRegister && !el("tos-checkbox").checked;
-        el("email").placeholder = isRegister ? "Email" : "Username or Email";
-        el("password").placeholder = isRegister
-            ? "Password (minimum 8 characters)"
-            : "Password";
+        el("email").placeholder = t(isRegister ? "login.email" : "login.usernameOrEmail");
+        el("password").placeholder = t(isRegister ? "login.passwordNew" : "login.password");
         const switchLink = el("ahaa");
         switchLink.textContent = "";
         if (isRegister) {
             const link = document.createElement("a");
-            link.textContent = "Already have an account?";
+            link.textContent = t("login.haveAccount");
             link.href = "#";
             link.addEventListener("click", (event) => {
                 event.preventDefault();
@@ -142,14 +141,8 @@
         }
         setWarning("");
     }
-    function getCookie(name) {
-        const match = document.cookie
-            .split("; ")
-            .find((part) => part.startsWith(name + "="));
-        return match ? decodeURIComponent(match.slice(name.length + 1)) : undefined;
-    }
     function applyLoginTheme() {
-        const isBright = getCookie("theme") === "bright";
+        const isBright = SeresI18n.getCookie("theme") === "bright";
         document.body.classList.toggle("bright-body", isBright);
         document.querySelector(".login")?.classList.toggle("bright-login", isBright);
         document.querySelector(".landr")?.classList.toggle("bright-landr", isBright);
@@ -160,11 +153,12 @@
             ?.classList.toggle("bright-tos-container", isBright);
     }
     function toggleLoginTheme() {
-        const newTheme = getCookie("theme") === "bright" ? "dark" : "bright";
-        document.cookie = "theme=" + newTheme + "; path=/; max-age=31536000; SameSite=Lax";
+        const newTheme = SeresI18n.getCookie("theme") === "bright" ? "dark" : "bright";
+        SeresI18n.setPreference("theme", newTheme);
         applyLoginTheme();
     }
     document.addEventListener("DOMContentLoaded", () => {
+        SeresI18n.apply();
         showMode("login");
         el("login").addEventListener("click", login);
         el("register_redirect").addEventListener("click", () => {
@@ -198,14 +192,20 @@
         });
         const reason = new URLSearchParams(window.location.search).get("reason");
         if (reason === "keys") {
-            setWarning("Please log in again to unlock your end-to-end encrypted chats on this device.");
+            setWarning(t("login.reloginKeys"));
         }
         const toggleBtn = document.createElement("button");
         toggleBtn.className = "theme-toggle-floating";
         toggleBtn.type = "button";
-        toggleBtn.innerText = "🌓 Mode";
+        toggleBtn.dataset.i18n = "common.themeToggle";
+        toggleBtn.textContent = t("common.themeToggle");
         toggleBtn.addEventListener("click", toggleLoginTheme);
-        document.body.appendChild(toggleBtn);
+        // Switching the language re-renders the texts that depend on the mode.
+        const languageSelect = SeresI18n.languageSelect(() => showMode(mode));
+        const controls = document.createElement("div");
+        controls.className = "floating-controls";
+        controls.append(languageSelect, toggleBtn);
+        document.body.appendChild(controls);
         applyLoginTheme();
     });
 })();

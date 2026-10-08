@@ -26,6 +26,7 @@
     const shownCache = new Map();
     const avatarState = new Map();
     const MESSAGE_LIMIT = 4000;
+    const t = SeresI18n.t;
     // ------------------------------------------------------------- utilities
     function $(id) {
         return document.getElementById(id);
@@ -69,7 +70,7 @@
         }
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.success === false) {
-            throw new ApiError(data.message || "Request failed", response.status);
+            throw new ApiError(data.message || t("common.requestFailed"), response.status);
         }
         return data;
     }
@@ -89,7 +90,7 @@
         if (error instanceof ApiError)
             return error.message;
         if (error instanceof TypeError)
-            return "Server unreachable. Please try again later.";
+            return t("common.unreachable");
         return error instanceof Error ? error.message : String(error);
     }
     function colorFor(name) {
@@ -125,23 +126,23 @@
         return new Date(iso);
     }
     function formatTime(iso) {
-        return parseTime(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        return parseTime(iso).toLocaleTimeString(SeresI18n.getLanguage(), { hour: "2-digit", minute: "2-digit" });
     }
     function formatDay(date) {
         const today = new Date();
         const yesterday = new Date();
         yesterday.setDate(today.getDate() - 1);
         if (date.toDateString() === today.toDateString())
-            return "Today";
+            return t("chat.today");
         if (date.toDateString() === yesterday.toDateString())
-            return "Yesterday";
-        return date.toLocaleDateString([], { day: "2-digit", month: "2-digit", year: "numeric" });
+            return t("chat.yesterday");
+        return date.toLocaleDateString(SeresI18n.getLanguage(), { day: "2-digit", month: "2-digit", year: "numeric" });
     }
     function formatListTime(iso) {
         const date = parseTime(iso);
         return date.toDateString() === new Date().toDateString()
             ? formatTime(iso)
-            : date.toLocaleDateString([], { day: "2-digit", month: "2-digit" });
+            : date.toLocaleDateString(SeresI18n.getLanguage(), { day: "2-digit", month: "2-digit" });
     }
     /** Text with clickable http(s) links, built without innerHTML. */
     function richText(text) {
@@ -242,15 +243,15 @@
             return "";
         switch (payload.event) {
             case "created":
-                return `${payload.actor} created the group "${payload.name}"`;
             case "added":
-                return `${payload.actor} added ${payload.target}`;
             case "removed":
-                return `${payload.actor} removed ${payload.target}`;
             case "left":
-                return `${payload.actor} left the group`;
             case "renamed":
-                return `${payload.actor} renamed the group to "${payload.name}"`;
+                return t("system." + payload.event, {
+                    actor: payload.actor ?? "",
+                    target: payload.target ?? "",
+                    name: payload.name ?? "",
+                });
             default:
                 return "";
         }
@@ -261,7 +262,7 @@
         if (!shown) {
             shown = (async () => {
                 if (message.deleted)
-                    return { type: "deleted", text: "This message was deleted" };
+                    return { type: "deleted", text: t("msg.deleted") };
                 if (message.kind === "system")
                     return { type: "system", text: systemText(message.payload) };
                 if (message.kind === "legacy")
@@ -276,7 +277,7 @@
                 }
                 catch (error) {
                     console.warn("Could not decrypt message", message.id, error);
-                    return { type: "error", text: "⚠ This message could not be decrypted or verified." };
+                    return { type: "error", text: t("msg.decryptError") };
                 }
             })();
             shownCache.set(cacheKey, shown);
@@ -306,13 +307,13 @@
     }
     function previewText(chat, shown) {
         if (!chat.last_message || !shown)
-            return chat.type === "group" ? `${chat.member_count} members` : "No messages yet";
+            return chat.type === "group" ? t("list.members", { count: chat.member_count }) : t("list.noMessages");
         const message = chat.last_message;
         if (shown.type === "system")
             return shown.text;
-        const prefix = message.sender_id === me.id ? "You: " : chat.type === "group" && message.sender ? message.sender + ": " : "";
+        const prefix = message.sender_id === me.id ? t("list.you") : chat.type === "group" && message.sender ? message.sender + ": " : "";
         if (shown.type === "deleted")
-            return prefix + "🚫 deleted message";
+            return prefix + t("list.deleted");
         return prefix + shown.text.replace(/\s+/g, " ");
     }
     function renderChatList(previews) {
@@ -341,11 +342,11 @@
         });
         if (!list.childElementCount) {
             list.appendChild(h("div", { className: "list-empty" }, [
-                h("p", { text: filter ? "No chats found." : "No chats yet." }),
+                h("p", { text: t(filter ? "list.noChatsFound" : "list.noChats") }),
                 !filter && friends.friends.length
-                    ? button("Start a chat", "pill-btn", () => openNewDmModal())
+                    ? button(t("list.startChat"), "pill-btn", () => openNewDmModal())
                     : !filter
-                        ? button("Add a friend", "pill-btn", () => openModal("add-friend-modal"))
+                        ? button(t("list.addFriend"), "pill-btn", () => openModal("add-friend-modal"))
                         : null,
             ]));
         }
@@ -401,32 +402,32 @@
         const filter = ($("list-search").value || "").toLowerCase();
         const match = (user) => !filter || user.username.toLowerCase().includes(filter);
         list.textContent = "";
-        list.appendChild(sectionTitle(`Friends — ${friends.friends.length}`));
+        list.appendChild(sectionTitle(t("friends.title", { count: friends.friends.length })));
         friends.friends.filter(match).forEach((friend) => {
-            list.appendChild(userRow(friend, "Friend", [
-                button("Message", "request-action-btn accept", () => startDm(friend.username)),
+            list.appendChild(userRow(friend, t("friends.status"), [
+                button(t("friends.message"), "request-action-btn accept", () => startDm(friend.username)),
                 button("⋯", "request-action-btn more", (event) => openUserMenu(friend, event)),
             ]));
         });
         if (!friends.friends.length) {
             list.appendChild(h("div", { className: "list-empty" }, [
-                h("p", { text: "No friends yet." }),
-                button("Add a friend", "pill-btn", () => openModal("add-friend-modal")),
+                h("p", { text: t("friends.none") }),
+                button(t("list.addFriend"), "pill-btn", () => openModal("add-friend-modal")),
             ]));
         }
         if (friends.outgoing.length) {
-            list.appendChild(sectionTitle("Sent requests"));
+            list.appendChild(sectionTitle(t("friends.sent")));
             friends.outgoing.filter(match).forEach((user) => {
-                list.appendChild(userRow(user, "Waiting for answer", [
-                    button("Cancel", "request-action-btn discard", action("cancel", () => post("/api/friends/cancel", { username: user.username }))),
+                list.appendChild(userRow(user, t("friends.waiting"), [
+                    button(t("common.cancel"), "request-action-btn discard", action("cancel", () => post("/api/friends/cancel", { username: user.username }))),
                 ]));
             });
         }
         if (friends.blocked.length) {
-            list.appendChild(sectionTitle("Blocked"));
+            list.appendChild(sectionTitle(t("friends.blocked")));
             friends.blocked.filter(match).forEach((user) => {
-                list.appendChild(userRow(user, "Blocked", [
-                    button("Unblock", "request-action-btn discard", action("unblock", () => post("/api/unblock", { username: user.username }))),
+                list.appendChild(userRow(user, t("friends.blocked"), [
+                    button(t("friends.unblock"), "request-action-btn discard", action("unblock", () => post("/api/unblock", { username: user.username }))),
                 ]));
             });
         }
@@ -435,12 +436,12 @@
     function openUserMenu(user, event) {
         closeFloatingMenus();
         const menu = h("div", { className: "floating-menu" }, [
-            button("💬 Message", "floating-item", () => {
+            button(t("friends.messageMenu"), "floating-item", () => {
                 closeFloatingMenus();
                 startDm(user.username);
             }),
-            button("Remove friend", "floating-item", action("remove", () => post("/api/friends/remove", { username: user.username }), `Remove ${user.username} as a friend?`)),
-            button("⛔ Block", "floating-item danger", action("block", () => post("/api/block", { username: user.username }), `Block ${user.username}? They can't send you requests or direct messages anymore.`)),
+            button(t("friends.remove"), "floating-item", action("remove", () => post("/api/friends/remove", { username: user.username }), t("friends.removeConfirm", { name: user.username }))),
+            button(t("friends.block"), "floating-item danger", action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirmLong", { name: user.username }))),
         ]);
         const rect = event.currentTarget.getBoundingClientRect();
         menu.style.top = Math.min(rect.bottom + 4, window.innerHeight - 140) + "px";
@@ -457,14 +458,14 @@
             list.appendChild(h("div", { className: "list-item request-list-item" }, [
                 h("div", { className: "avatar", text: "!" }),
                 h("div", { className: "item-info" }, [
-                    h("span", { className: "item-name", text: "No pending requests" }),
-                    h("span", { className: "item-status", text: "Friend requests you received will show here." }),
+                    h("span", { className: "item-name", text: t("requests.none") }),
+                    h("span", { className: "item-status", text: t("requests.noneHint") }),
                 ]),
             ]));
         }
         friends.incoming.forEach((user) => {
-            list.appendChild(userRow(user, "Wants to be your friend", [
-                button("Accept", "request-action-btn accept", async () => {
+            list.appendChild(userRow(user, t("requests.wants"), [
+                button(t("requests.accept"), "request-action-btn accept", async () => {
                     try {
                         await post("/api/friends/accept", { username: user.username });
                         await startDm(user.username);
@@ -474,8 +475,8 @@
                     }
                     await refreshAll();
                 }),
-                button("Decline", "request-action-btn discard", action("decline", () => post("/api/friends/decline", { username: user.username }))),
-                button("Block", "request-action-btn more", action("block", () => post("/api/block", { username: user.username }), `Block ${user.username}?`)),
+                button(t("requests.decline"), "request-action-btn discard", action("decline", () => post("/api/friends/decline", { username: user.username }))),
+                button(t("friends.blockShort"), "request-action-btn more", action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirm", { name: user.username }))),
             ]));
         });
         applyTheme();
@@ -533,7 +534,7 @@
     }
     function closeChat() {
         current = null;
-        $("current-chat-name").textContent = "Welcome " + me.username;
+        $("current-chat-name").textContent = t("app.welcomeUser", { name: me.username });
         $("current-chat-sub").textContent = "";
         $("chat-input-area").classList.add("modal-hidden");
         $("chat-info-btn").classList.add("modal-hidden");
@@ -544,11 +545,9 @@
     }
     function emptyState() {
         return h("div", { className: "empty-state" }, [
-            h("div", { className: "empty-state-icon", text: "🔒" }),
+            h("div", { className: "empty-state-icon", text: "💬" }),
             h("h2", { text: "SereS" }),
-            h("p", {
-                text: "Pick a chat or start a new one. All messages are end-to-end encrypted — not even the SereS server can read them.",
-            }),
+            h("p", { text: t("app.emptyState") }),
         ]);
     }
     async function refreshCurrentDetails() {
@@ -568,10 +567,10 @@
         $("current-chat-name").textContent = details.name;
         $("current-chat-sub").textContent =
             details.type === "group"
-                ? `🔒 ${details.member_count} members · end-to-end encrypted`
+                ? t("chat.groupSub", { count: details.member_count })
                 : details.blocked
-                    ? "Blocked"
-                    : "🔒 end-to-end encrypted";
+                    ? t("chat.blocked")
+                    : t("chat.dmSub");
         renderKeyWarning();
     }
     function renderKeyWarning() {
@@ -582,20 +581,20 @@
         if (current.changedKeys.length) {
             const names = current.changedKeys.map((m) => m.username).join(", ");
             box.appendChild(h("span", {
-                text: `⚠ The security key of ${names} has changed. This can mean someone is trying to intercept your chat. Compare security codes in the chat info before you continue.`,
+                text: t("chat.keyChanged", { names }),
             }));
-            box.appendChild(button("Accept new key", "pill-btn", async () => {
+            box.appendChild(button(t("chat.acceptKey"), "pill-btn", async () => {
                 if (!current)
                     return;
                 await acceptNewKeys(current.changedKeys);
                 await refreshCurrentDetails();
             }));
-            box.appendChild(button("Chat info", "pill-btn secondary", () => openChatInfo()));
+            box.appendChild(button(t("app.chatInfo"), "pill-btn secondary", () => openChatInfo()));
         }
         else if (current.missingKeys.length) {
             const names = current.missingKeys.map((m) => m.username).join(", ");
             box.appendChild(h("span", {
-                text: `${names} has not logged in since encryption was introduced. They have to log in once before you can send encrypted messages here.`,
+                text: t("chat.keyMissing", { names }),
             }));
         }
         box.classList.toggle("modal-hidden", !box.childElementCount);
@@ -672,14 +671,12 @@
         const nearBottom = distanceFromBottom < 120;
         const fragment = document.createDocumentFragment();
         const banner = h("div", { className: "e2e-banner" }, [
-            h("span", {
-                text: "🔒 Messages are end-to-end encrypted. No one outside of this chat, not even SereS, can read them.",
-            }),
+            h("span", { text: t("chat.banner") }),
         ]);
         banner.addEventListener("click", () => openChatInfo());
         fragment.appendChild(banner);
         if (opened.hasMore) {
-            fragment.appendChild(button("Load older messages", "pill-btn load-older", () => {
+            fragment.appendChild(button(t("chat.loadOlder"), "pill-btn load-older", () => {
                 loadOlder().catch((error) => showAlert(errorText(error)));
             }));
         }
@@ -717,7 +714,7 @@
     }
     function messageRow(opened, message, view, compact) {
         const own = message.sender_id === me.id;
-        const sender = message.sender || "Unknown";
+        const sender = message.sender || t("msg.unknown");
         const row = h("div", {
             className: "message-row" + (own ? " message-own" : "") + (compact ? " message-compact" : ""),
             attrs: { "data-id": message.id },
@@ -726,14 +723,14 @@
         const wrapper = h("div", { className: "message-content-wrapper" });
         if (!compact) {
             const header = h("div", { className: "message-header" }, [
-                h("span", { className: "message-sender", text: own ? "You" : sender }),
+                h("span", { className: "message-sender", text: own ? t("msg.you") : sender }),
                 h("span", { className: "message-timestamp", text: formatTime(message.created_at) }),
             ]);
             if (view.type === "legacy") {
                 header.appendChild(h("span", {
                     className: "message-flag",
-                    text: "not encrypted",
-                    title: "Sent before end-to-end encryption was introduced",
+                    text: t("msg.notEncrypted"),
+                    title: t("msg.notEncryptedHint"),
                 }));
             }
             wrapper.appendChild(header);
@@ -746,11 +743,11 @@
         else {
             textDiv.appendChild(richText(view.text));
         }
-        textDiv.title = parseTime(message.created_at).toLocaleString();
+        textDiv.title = parseTime(message.created_at).toLocaleString(SeresI18n.getLanguage());
         wrapper.appendChild(textDiv);
         if (own && !message.deleted && message.kind === "e2e") {
-            wrapper.appendChild(button("Delete", "message-delete", async () => {
-                if (!window.confirm("Delete this message for everyone?"))
+            wrapper.appendChild(button(t("msg.delete"), "message-delete", async () => {
+                if (!window.confirm(t("msg.deleteConfirm")))
                     return;
                 try {
                     await post(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(message.id)}/delete`);
@@ -759,7 +756,7 @@
                 catch (error) {
                     showAlert(errorText(error));
                 }
-            }, "Delete for everyone"));
+            }, t("msg.deleteTitle")));
         }
         row.appendChild(wrapper);
         return row;
@@ -780,7 +777,7 @@
         if (!text || !current || sending)
             return;
         if (text.length > MESSAGE_LIMIT) {
-            showAlert(`Messages can be at most ${MESSAGE_LIMIT} characters long.`);
+            showAlert(t("msg.tooLong", { limit: MESSAGE_LIMIT }));
             return;
         }
         const opened = current;
@@ -793,11 +790,11 @@
                 if (current !== opened || !opened.details)
                     return;
                 if (opened.changedKeys.length) {
-                    showAlert("A security key in this chat changed. Check the warning above before sending.");
+                    showAlert(t("msg.keyChanged"));
                     return;
                 }
                 if (opened.missingKeys.length) {
-                    showAlert("Some members can't receive encrypted messages yet.");
+                    showAlert(t("msg.missingKeys"));
                     return;
                 }
                 const members = (opened.details.members || []).map((m) => ({
@@ -854,7 +851,7 @@
         list.textContent = "";
         $("warning-new-dm").textContent = "";
         if (!friends.friends.length) {
-            list.appendChild(h("p", { text: "You don't have any friends yet. Add a friend first." }));
+            list.appendChild(h("p", { text: t("chat.noFriends") }));
         }
         friends.friends.forEach((friend) => {
             const row = h("div", { className: "picker-item" }, [
@@ -870,7 +867,7 @@
         container.textContent = "";
         const available = friends.friends.filter((friend) => !exclude.has(friend.id));
         if (!available.length) {
-            container.appendChild(h("p", { text: "No friends available to add." }));
+            container.appendChild(h("p", { text: t("chat.noFriendsToAdd") }));
         }
         available.forEach((friend) => {
             const checkbox = h("input", { attrs: { type: "checkbox", value: friend.username } });
@@ -895,11 +892,11 @@
         const usernames = checkedUsernames($("new-group-list"));
         const warning = $("warning-new-group");
         if (!name) {
-            warning.textContent = "Please enter a group name.";
+            warning.textContent = t("chat.groupNameMissing");
             return;
         }
         if (!usernames.length) {
-            warning.textContent = "Pick at least one friend.";
+            warning.textContent = t("chat.pickFriend");
             return;
         }
         try {
@@ -925,7 +922,7 @@
             const data = await post("/api/friends/request", { username });
             input.value = "";
             closeAllModals();
-            showAlert(data.status === "friends" ? `You and ${username} are now friends!` : `Friend request sent to ${username}.`);
+            showAlert(t(data.status === "friends" ? "friends.nowFriends" : "friends.requestSent", { name: username }));
             await refreshAll();
         }
         catch (error) {
@@ -960,20 +957,20 @@
                 const fp = await memberFingerprint(other);
                 if (fp) {
                     const code = await SeresCrypto.safetyNumber(myFp, fp);
-                    body.appendChild(h("p", { text: "Security code. Compare it with the one on your friend's device (in person or over a call). If they match, your chat is protected." }));
+                    body.appendChild(h("p", { text: t("info.securityCode") }));
                     body.appendChild(h("code", { className: "safety-number", text: code }));
                     body.appendChild(verifyToggle(other.id, fp, verified));
                 }
                 const isBlocked = friends.blocked.some((b) => b.id === other.id);
                 body.appendChild(h("div", { className: "info-actions" }, [
                     isBlocked
-                        ? button("Unblock", "pill-btn", action("unblock", () => post("/api/unblock", { username: other.username })))
-                        : button("⛔ Block", "pill-btn danger", action("block", () => post("/api/block", { username: other.username }), `Block ${other.username}?`)),
-                    button("Delete chat", "pill-btn danger", action("delete", async () => {
+                        ? button(t("friends.unblock"), "pill-btn", action("unblock", () => post("/api/unblock", { username: other.username })))
+                        : button(t("friends.block"), "pill-btn danger", action("block", () => post("/api/block", { username: other.username }), t("friends.blockConfirm", { name: other.username }))),
+                    button(t("info.deleteChat"), "pill-btn danger", action("delete", async () => {
                         await post(`/api/chats/${encodeURIComponent(details.id)}/delete`);
                         closeAllModals();
                         closeChat();
-                    }, "Delete this chat for you? The other person keeps their copy.")),
+                    }, t("info.deleteChatConfirm"))),
                 ]));
             }
         }
@@ -983,10 +980,10 @@
                 const nameInput = h("input", { attrs: { type: "text", maxlength: "64", value: details.name } });
                 body.appendChild(h("div", { className: "info-row" }, [
                     nameInput,
-                    button("Rename", "pill-btn", action("rename", () => post(`/api/chats/${encodeURIComponent(details.id)}/rename`, { name: nameInput.value }))),
+                    button(t("info.rename"), "pill-btn", action("rename", () => post(`/api/chats/${encodeURIComponent(details.id)}/rename`, { name: nameInput.value }))),
                 ]));
             }
-            body.appendChild(h("p", { text: `${members.length} members. Compare security codes to make sure nobody is intercepting the group.` }));
+            body.appendChild(h("p", { text: t("info.groupMembers", { count: members.length }) }));
             for (const member of members) {
                 const fp = await memberFingerprint(member);
                 const isMe = member.id === me.id;
@@ -995,53 +992,53 @@
                     h("div", { className: "item-info" }, [
                         h("span", {
                             className: "item-name",
-                            text: (isMe ? "You" : member.username) + (member.role === "owner" ? " · owner" : ""),
+                            text: (isMe ? t("msg.you") : member.username) + (member.role === "owner" ? t("info.owner") : ""),
                         }),
                         h("span", {
                             className: "item-status",
-                            text: fp ? (isMe ? "Your key: " : "Key: ") + fp.slice(0, 32).replace(/(.{4})/g, "$1 ").trim() : "No encryption key yet",
+                            text: fp ? t(isMe ? "info.yourKey" : "info.key") + fp.slice(0, 32).replace(/(.{4})/g, "$1 ").trim() : t("info.noKey"),
                         }),
                     ]),
                 ]);
                 if (!isMe && fp) {
                     const code = await SeresCrypto.safetyNumber(myFp, fp);
-                    row.appendChild(button("Code", "request-action-btn more", () => {
-                        window.alert(`Security code with ${member.username}:\n\n${code}\n\nCompare it with the code ${member.username} sees for you.`);
+                    row.appendChild(button(t("info.code"), "request-action-btn more", () => {
+                        window.alert(t("info.codeAlert", { name: member.username, code }));
                     }));
                     row.appendChild(verifyToggle(member.id, fp, verified, true));
                 }
                 if (isOwner && !isMe) {
-                    row.appendChild(button("Remove", "request-action-btn discard", action("remove", async () => {
+                    row.appendChild(button(t("info.remove"), "request-action-btn discard", action("remove", async () => {
                         await post(`/api/chats/${encodeURIComponent(details.id)}/members/remove`, { username: member.username });
                         await openChatInfo();
-                    }, `Remove ${member.username} from the group?`)));
+                    }, t("info.removeConfirm", { name: member.username }))));
                 }
                 body.appendChild(row);
             }
             const memberIds = new Set(members.map((m) => m.id));
             const addBox = h("div", { className: "picker-list" });
             friendCheckboxes(addBox, memberIds);
-            body.appendChild(h("p", { text: "Add friends to the group (they will only see new messages):" }));
+            body.appendChild(h("p", { text: t("info.addHint") }));
             body.appendChild(addBox);
             body.appendChild(h("div", { className: "info-actions" }, [
-                button("Add selected", "pill-btn", action("add", async () => {
+                button(t("info.addSelected"), "pill-btn", action("add", async () => {
                     for (const username of checkedUsernames(addBox)) {
                         await post(`/api/chats/${encodeURIComponent(details.id)}/members`, { username });
                     }
                     await openChatInfo();
                 })),
-                button("Leave group", "pill-btn danger", action("leave", async () => {
+                button(t("info.leave"), "pill-btn danger", action("leave", async () => {
                     await post(`/api/chats/${encodeURIComponent(details.id)}/leave`);
                     closeAllModals();
                     closeChat();
-                }, "Leave this group?")),
+                }, t("info.leaveConfirm"))),
             ]));
         }
         openModal("chat-info-modal");
     }
     function verifyToggle(userId, fp, verified, compact = false) {
         const isVerified = verified[userId] === fp;
-        return button(isVerified ? "✔ Verified" : compact ? "Verify" : "Mark as verified", "pill-btn" + (isVerified ? " verified" : " secondary"), () => {
+        return button(t(isVerified ? "info.verified" : compact ? "info.verify" : "info.markVerified"), "pill-btn" + (isVerified ? " verified" : " secondary"), () => {
             const store = readStore("verified");
             if (store[userId] === fp)
                 delete store[userId];
@@ -1069,11 +1066,11 @@
         warning.textContent = "";
         const file = input.files && input.files[0];
         if (!file) {
-            warning.textContent = "Choose a picture first.";
+            warning.textContent = t("settings.chooseFile");
             return;
         }
         if (file.size > 2 * 1024 * 1024) {
-            warning.textContent = "File is too large! Maximum size is 2MB.";
+            warning.textContent = t("settings.fileTooLarge");
             return;
         }
         const form = new FormData();
@@ -1082,11 +1079,11 @@
             const response = await fetch("/api/upload_avatar", { method: "POST", body: form, credentials: "same-origin" });
             const data = await response.json().catch(() => ({}));
             if (!response.ok || !data.success)
-                throw new Error(data.message || "Upload failed");
+                throw new Error(data.message || t("settings.uploadFailed"));
             input.value = "";
             avatarState.delete(me.username);
             loadOwnAvatar();
-            showAlert("Avatar updated successfully!");
+            showAlert(t("settings.avatarUpdated"));
         }
         catch (error) {
             warning.textContent = errorText(error);
@@ -1099,14 +1096,14 @@
         const repeat = $("new-password-repeat").value;
         warning.textContent = "";
         if (newPw.length < 8) {
-            warning.textContent = "The new password must be at least 8 characters long.";
+            warning.textContent = t("settings.passwordShort");
             return;
         }
         if (newPw !== repeat) {
-            warning.textContent = "The new passwords don't match.";
+            warning.textContent = t("settings.passwordMismatch");
             return;
         }
-        warning.textContent = "Re-encrypting your keys...";
+        warning.textContent = t("settings.changingPassword");
         try {
             const fresh = (await api("/api/me")).user;
             const pre = await post("/api/prelogin", { nameomail: me.username });
@@ -1118,7 +1115,7 @@
                 encPrivate = await SeresCrypto.rewrapPrivateKeys(fresh.enc_private, oldKeys.wrapKey, newKeys.wrapKey);
             }
             catch {
-                throw new Error("Current password is wrong");
+                throw new Error(t("settings.wrongPassword"));
             }
             await post("/api/change_password", {
                 old_auth_hash: oldKeys.authHash,
@@ -1129,7 +1126,7 @@
             });
             ["old-password", "new-password", "new-password-repeat"].forEach((id) => ($(id).value = ""));
             warning.textContent = "";
-            showAlert("Password changed. Other devices have been logged out.");
+            showAlert(t("settings.passwordChanged"));
         }
         catch (error) {
             warning.textContent = errorText(error);
@@ -1173,12 +1170,8 @@
         }
     }
     // --------------------------------------------------------------- theme
-    function getCookie(name) {
-        const match = document.cookie.split("; ").find((part) => part.startsWith(name + "="));
-        return match ? decodeURIComponent(match.slice(name.length + 1)) : undefined;
-    }
     function applyTheme() {
-        const isBright = getCookie("theme") === "bright";
+        const isBright = SeresI18n.getCookie("theme") === "bright";
         document.body.classList.toggle("bright-body", isBright);
         const single = [
             [".sidebar", "bright-sidebar"],
@@ -1205,8 +1198,8 @@
         many.forEach(([selector, cls]) => document.querySelectorAll(selector).forEach((el) => el.classList.toggle(cls, isBright)));
     }
     function toggleTheme() {
-        const newTheme = getCookie("theme") === "bright" ? "dark" : "bright";
-        document.cookie = "theme=" + newTheme + "; path=/; max-age=31536000; SameSite=Lax";
+        const newTheme = SeresI18n.getCookie("theme") === "bright" ? "dark" : "bright";
+        SeresI18n.setPreference("theme", newTheme);
         applyTheme();
     }
     // --------------------------------------------------------------- intro
@@ -1278,6 +1271,12 @@
         $("upload-avatar-btn").addEventListener("click", uploadAvatar);
         $("theme-toggle-btn").addEventListener("click", toggleTheme);
         $("change-password-btn").addEventListener("click", changePassword);
+        $("cookie-settings-btn").addEventListener("click", () => {
+            closeAllModals();
+            SeresConsent.show();
+        });
+        // Most texts are rendered from data, so reload to show everything in the new language.
+        $("language-select-slot").appendChild(SeresI18n.languageSelect(() => window.location.reload()));
         document.querySelectorAll(".list-view-toggle").forEach((btn) => {
             btn.addEventListener("click", () => switchView(btn.dataset.view));
         });
@@ -1335,6 +1334,7 @@
         });
     }
     async function boot() {
+        SeresI18n.apply();
         loadAnimation();
         applyTheme();
         try {
@@ -1356,7 +1356,7 @@
         userKeys.set(me.id, { id: me.id, username: me.username, pub_ecdh: me.pub_ecdh, pub_sign: me.pub_sign });
         $("my-username-display").textContent = me.username;
         $("mobile-username").textContent = me.username;
-        $("current-chat-name").textContent = "Welcome " + me.username;
+        $("current-chat-name").textContent = t("app.welcomeUser", { name: me.username });
         loadOwnAvatar();
         bindEvents();
         switchView("chats");
