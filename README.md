@@ -73,7 +73,8 @@ pip install -r requirements.txt
 python src/backend/app.py
 ```
 
-The frontend is written in TypeScript. The compiled `.js` files are committed;
+The frontend is written in TypeScript (`src/frontend/`). It is compiled to
+`src/public/` and the compiled `.js` files are committed;
 after changing a `.ts` file run `tsc -p .` in the repository root.
 
 Backend tests: `pip install pytest && python -m pytest tests`
