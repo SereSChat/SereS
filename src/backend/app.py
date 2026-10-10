@@ -861,8 +861,8 @@ def block_user():
         return error("Cannot block yourself")
     conn = get_db()
     conn.execute(
-        "INSERT OR IGNORE INTO blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)",
-        (me_id, other["id"], db.now_iso()),
+        "INSERT OR IGNORE INTO blocks (blocker_id, blocked_id, created_at, was_friend) VALUES (?, ?, ?, ?)",
+        (me_id, other["id"], db.now_iso(), int(are_friends(me_id, other["id"]))),
     )
     conn.execute("DELETE FROM friendships WHERE user_a = ? AND user_b = ?", pair(me_id, other["id"]))
     conn.execute(
@@ -879,9 +879,67 @@ def unblock_user():
     me_id = current_user()["id"]
     other = target_user(json_body())
     conn = get_db()
+    row = conn.execute(
+        "SELECT was_friend FROM blocks WHERE blocker_id = ? AND blocked_id = ?", (me_id, other["id"])
+    ).fetchone()
     conn.execute("DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?", (me_id, other["id"]))
+    restored = bool(row and row["was_friend"]) and not is_blocked_between(me_id, other["id"])
+    if restored:
+        make_friends(conn, me_id, other["id"])
     conn.commit()
-    return ok(message="User unblocked")
+    return ok(message="User unblocked", friends=restored)
+
+
+def is_muted(me_id, other_id):
+    return (
+        get_db()
+        .execute("SELECT 1 FROM muted_users WHERE user_id = ? AND muted_id = ?", (me_id, other_id))
+        .fetchone()
+        is not None
+    )
+
+
+@app.route("/api/users/mute", methods=["POST"])
+@login_required
+def mute_user():
+    me_id = current_user()["id"]
+    data = json_body()
+    other = target_user(data)
+    conn = get_db()
+    if data.get("muted") is True:
+        conn.execute(
+            "INSERT OR IGNORE INTO muted_users (user_id, muted_id, created_at) VALUES (?, ?, ?)",
+            (me_id, other["id"], db.now_iso()),
+        )
+    else:
+        conn.execute("DELETE FROM muted_users WHERE user_id = ? AND muted_id = ?", (me_id, other["id"]))
+    conn.commit()
+    return ok(muted=data.get("muted") is True)
+
+
+@app.route("/api/users/<username>/profile")
+@login_required
+def user_profile(username):
+    me_id = current_user()["id"]
+    other = find_user_by_name(username)
+    if other is None:
+        return error("User not found", 404)
+    conn = get_db()
+    request_row = conn.execute(
+        "SELECT from_id FROM friend_requests WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)",
+        (me_id, other["id"], other["id"], me_id),
+    ).fetchone()
+    return ok(
+        user={**public_user(other), "pub_ecdh": other["pub_ecdh"], "pub_sign": other["pub_sign"]},
+        is_me=other["id"] == me_id,
+        friend=are_friends(me_id, other["id"]),
+        blocked=conn.execute(
+            "SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?", (me_id, other["id"])
+        ).fetchone()
+        is not None,
+        muted=is_muted(me_id, other["id"]),
+        request=None if request_row is None else "outgoing" if request_row["from_id"] == me_id else "incoming",
+    )
 
 
 # --------------------------------------------------------------------------
@@ -997,6 +1055,7 @@ def chat_summary(chat, me_id):
         summary["other_user_id"] = other["id"] if other else None
         summary["name"] = display_name(other) if other else summary["other_user"]
         summary["blocked"] = bool(other) and is_blocked_between(me_id, other["id"])
+        summary["muted"] = bool(other) and is_muted(me_id, other["id"])
     return summary
 
 

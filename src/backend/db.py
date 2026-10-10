@@ -44,6 +44,13 @@ SCHEMA = [
         user_id TEXT NOT NULL UNIQUE,
         created_at TEXT NOT NULL
     )""",
+    # Muted people: their messages don't count as unread.
+    """CREATE TABLE IF NOT EXISTS muted_users (
+        user_id TEXT NOT NULL,
+        muted_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, muted_id)
+    )""",
     """CREATE TABLE IF NOT EXISTS blocks (
         blocker_id TEXT NOT NULL,
         blocked_id TEXT NOT NULL,
@@ -115,11 +122,20 @@ def connect(path):
     return conn
 
 
+# Columns added after the first release of a table.
+EXTRA_COLUMNS = {
+    "users": USER_COLUMNS,
+    # Remembers a friendship so unblocking restores it.
+    "blocks": {"was_friend": "INTEGER NOT NULL DEFAULT 0"},
+}
+
+
 def _migrate_columns(conn):
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
-    for column, definition in USER_COLUMNS.items():
-        if column not in existing:
-            conn.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+    for table, columns in EXTRA_COLUMNS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column, definition in columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def init_schema(conn):
