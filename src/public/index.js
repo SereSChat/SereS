@@ -1184,6 +1184,43 @@
             warning.textContent = errorText(error);
         }
     }
+    // ------------------------------------------------------------- invites
+    function inviteUrl(token) {
+        return new URL("/?invite=" + encodeURIComponent(token), window.location.origin).href;
+    }
+    async function openInviteModal(renew = false) {
+        $("user-dropdown-menu").classList.add("modal-hidden");
+        try {
+            const data = renew ? await post("/api/invite/renew") : await api("/api/invite");
+            const url = inviteUrl(data.token);
+            $("invite-link").value = url;
+            const box = $("invite-qr");
+            box.textContent = "";
+            box.appendChild(SeresQR.toSvg(url));
+            $("invite-share").style.display = typeof navigator.share === "function" ? "" : "none";
+            closeAllModals();
+            openModal("invite-modal");
+        }
+        catch (error) {
+            showAlert(errorText(error));
+        }
+    }
+    async function copyInvite() {
+        const input = $("invite-link");
+        try {
+            await navigator.clipboard.writeText(input.value);
+        }
+        catch {
+            // Older browsers or no clipboard permission.
+            input.select();
+            document.execCommand("copy");
+        }
+        showAlert(t("invite.copied"));
+    }
+    function shareInvite() {
+        const url = $("invite-link").value;
+        navigator.share({ title: "SereS", text: t("invite.shareText"), url }).catch(() => { });
+    }
     async function openSettings() {
         $("user-dropdown-menu").classList.add("modal-hidden");
         $("settings-warning").textContent = "";
@@ -1334,6 +1371,18 @@
             event.preventDefault();
             logout();
         });
+        $("menu-invite").addEventListener("click", (event) => {
+            event.preventDefault();
+            openInviteModal();
+        });
+        $("add-friend-invite").addEventListener("click", () => openInviteModal());
+        $("invite-copy").addEventListener("click", copyInvite);
+        $("invite-share").addEventListener("click", shareInvite);
+        $("invite-renew").addEventListener("click", () => {
+            if (window.confirm(t("invite.renewConfirm")))
+                openInviteModal(true);
+        });
+        $("invite-link").addEventListener("focus", () => $("invite-link").select());
         $("upload-avatar-btn").addEventListener("click", uploadAvatar);
         $("theme-toggle-btn").addEventListener("click", toggleTheme);
         $("change-password-btn").addEventListener("click", changePassword);

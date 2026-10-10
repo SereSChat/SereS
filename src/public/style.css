@@ -2076,3 +2076,54 @@ body.bright-body .language-select {
   -webkit-touch-callout: none;
   user-select: none;
 }
+
+/* --------------------------------------------------------- invite link */
+
+.qr-wrap {
+  display: flex;
+  justify-content: center;
+  margin: 8px 0 14px;
+}
+
+.qr-code {
+  width: min(240px, 70vw);
+  height: auto;
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.invite-link {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+}
+
+.invite-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+
+.invite-actions .pill-btn {
+  padding: 8px 16px;
+  font-size: 0.85rem;
+}
+
+.link-btn {
+  display: block;
+  margin: 4px 0 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #00a884;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
+}
