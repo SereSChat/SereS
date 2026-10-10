@@ -1551,36 +1551,12 @@
         refreshAll();
     }
     // --------------------------------------------------------------- intro
-    function loadAnimation() {
-        const introLayer = $("intro-layer");
-        const introVideo = $("intro-video");
-        const removeOverlay = () => {
-            introLayer.style.opacity = "0";
-            setTimeout(() => introLayer.remove(), 500);
-        };
-        const params = new URLSearchParams(window.location.search);
-        const isLoginRedirect = params.get("login") === "true";
-        const firstLoad = sessionStorage.getItem("sessionStarted") === null;
-        if (isLoginRedirect)
+    // The intro animation (assets/animation.mp4/.mov) is no longer played; the
+    // files are kept. Only the "?login=true" marker of the login redirect is removed.
+    function cleanLoginRedirect() {
+        if (new URLSearchParams(window.location.search).get("login") === "true") {
             window.history.replaceState({}, document.title, window.location.pathname);
-        if (!isLoginRedirect && !firstLoad) {
-            introLayer.remove();
-            return;
         }
-        sessionStorage.setItem("sessionStarted", "true");
-        if (!introVideo) {
-            introLayer.remove();
-            return;
-        }
-        const safety = setTimeout(removeOverlay, 5000);
-        introVideo.play().catch(() => {
-            clearTimeout(safety);
-            introLayer.remove();
-        });
-        introVideo.onended = () => {
-            clearTimeout(safety);
-            setTimeout(removeOverlay, 1000);
-        };
     }
     // ---------------------------------------------------------------- boot
     async function refreshAll() {
@@ -1712,7 +1688,7 @@
         $("my-username-display").textContent = t("common.loading");
         $("mobile-username").textContent = t("common.loading");
         $("current-chat-name").textContent = t("app.welcome");
-        loadAnimation();
+        cleanLoginRedirect();
         applyTheme();
         try {
             me = (await api("/api/me")).user;
