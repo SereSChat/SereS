@@ -2447,3 +2447,15 @@ body.bright-body .language-select {
   line-height: 1.4;
   color: #8696a0;
 }
+
+/* Present for password managers and screen readers' form logic, but not visible. */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px;
+  padding: 0 !important;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  border: 0 !important;
+}
