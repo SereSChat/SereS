@@ -2358,3 +2358,92 @@ body.bright-body .language-select {
     animation: none !important;
   }
 }
+
+/* ---------------------------------------------------------------- profile */
+
+.profile-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+}
+
+.profile-avatar {
+  width: 88px !important;
+  height: 88px !important;
+  font-size: 2.2rem;
+  margin-bottom: 6px;
+}
+
+.profile-name {
+  margin: 0;
+  font-size: 1.3rem;
+  word-break: break-word;
+}
+
+.profile-username {
+  color: #8696a0;
+  font-size: 0.9rem;
+}
+
+.profile-status {
+  margin-top: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background-color: rgba(0, 168, 132, 0.15);
+  color: #00a884;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.profile-code {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.profile-code p {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.message-avatar,
+.message-sender.clickable,
+.request-list-item .avatar,
+.request-list-item .item-info,
+.member-row .avatar {
+  cursor: pointer;
+}
+
+.message-sender.clickable:hover {
+  text-decoration: underline;
+}
+
+/* ------------------------------------------------------------------ muted */
+
+.unread-badge.muted {
+  background-color: #667781 !important;
+}
+
+.muted-icon {
+  margin-left: 4px;
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+.list-hint {
+  margin: 0 16px 8px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: #8696a0;
+}

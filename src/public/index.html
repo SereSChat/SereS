@@ -210,10 +210,28 @@
       </div>
     </div>
 
+    <!-- Profile -->
+    <div class="modal-overlay modal-hidden" id="profile-modal">
+      <div class="modal-box">
+        <div class="profile-head" id="profile-head"></div>
+        <div class="profile-actions" id="profile-actions"></div>
+        <div class="profile-code modal-hidden" id="profile-code"></div>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" id="profile-close" data-i18n="common.close">Close</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Settings -->
     <div class="modal-overlay modal-hidden" id="settings-modal">
       <div class="modal-box modal-wide">
         <h3 data-i18n="settings.title">⚙️ Settings</h3>
+
+        <div class="settings-section">
+          <p data-i18n="settings.displayNameText">Display name:</p>
+          <input type="text" id="display-name-input" maxlength="32" placeholder="Display name" data-i18n-placeholder="settings.displayNamePlaceholder" />
+          <button class="modal-btn secondary-btn" type="button" id="save-display-name" data-i18n="settings.displayNameSave">Save name</button>
+        </div>
 
         <div class="settings-section">
           <p data-i18n="settings.avatarText">Profile picture (PNG, JPG, GIF or WebP, max 2MB):</p>
