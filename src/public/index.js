@@ -112,10 +112,15 @@
             hash = (hash * 31 + name.charCodeAt(i)) | 0;
         return palette[Math.abs(hash) % palette.length];
     }
+    /** The name shown in the app; the @username only appears in the profile. */
+    function nameOf(user) {
+        return user.display_name || user.username;
+    }
+    /** Avatar of a user (picture loaded by username); label is the name the initial is taken from. */
     function avatarEl(name, options = {}) {
         const avatar = h("div", { className: options.className || "avatar" });
         avatar.style.backgroundColor = colorFor(name);
-        const initial = h("span", { text: options.group ? "#" : name.charAt(0).toUpperCase() || "?" });
+        const initial = h("span", { text: options.group ? "#" : (options.label || name).charAt(0).toUpperCase() || "?" });
         avatar.appendChild(initial);
         if (!options.group && avatarState.get(name) !== "no") {
             const img = h("img", { attrs: { alt: "" } });
@@ -323,7 +328,7 @@
         const message = chat.last_message;
         if (shown.type === "system")
             return shown.text;
-        const prefix = message.sender_id === me.id ? t("list.you") : chat.type === "group" && message.sender ? message.sender + ": " : "";
+        const prefix = message.sender_id === me.id ? t("list.you") : chat.type === "group" && message.sender ? (message.sender_display || message.sender) + ": " : "";
         if (shown.type === "deleted")
             return prefix + t("list.deleted");
         return prefix + shown.text.replace(/\s+/g, " ");
@@ -339,14 +344,18 @@
                 className: "list-item chat-list-item" + (current && current.id === chat.id ? " active" : ""),
                 attrs: { "data-chatid": chat.id },
             });
-            item.appendChild(avatarEl(chat.name, { group: chat.type === "group" }));
+            const avatarName = chat.type === "dm" && chat.other_user ? chat.other_user : chat.name;
+            item.appendChild(avatarEl(avatarName, { group: chat.type === "group", label: chat.name }));
             const nameRow = h("div", { className: "item-row" }, [
-                h("span", { className: "item-name", text: chat.name }),
+                h("span", { className: "item-name" }, [
+                    document.createTextNode(chat.name),
+                    chat.muted ? h("span", { className: "muted-icon", text: "🔕", title: t("chat.muted") }) : null,
+                ]),
                 h("span", { className: "item-time", text: formatListTime(chat.last_activity) }),
             ]);
             const statusRow = h("div", { className: "item-row" }, [
                 h("span", { className: "item-status", text: previewText(chat, previews[index]) }),
-                chat.unread > 0 ? h("span", { className: "unread-badge", text: chat.unread > 99 ? "99+" : String(chat.unread) }) : null,
+                chat.unread > 0 ? h("span", { className: "unread-badge" + (chat.muted ? " muted" : ""), text: chat.unread > 99 ? "99+" : String(chat.unread) }) : null,
             ]);
             item.appendChild(h("div", { className: "item-info" }, [nameRow, statusRow]));
             item.addEventListener("click", () => openChat(chat.id));
@@ -370,12 +379,52 @@
         applyTheme();
     }
     function updateBadges() {
-        const unread = chats.reduce((sum, chat) => sum + chat.unread, 0);
+        // Muted chats keep their own counter but don't count in the totals.
+        const unread = chats.reduce((sum, chat) => sum + (chat.muted ? 0 : chat.unread), 0);
         const chatsBadge = $("chats-badge");
         chatsBadge.textContent = unread ? String(unread) : "";
         const requestsBadge = $("requests-badge");
         requestsBadge.textContent = friends.incoming.length ? String(friends.incoming.length) : "";
         document.title = unread ? `(${unread}) SereS` : "SereS";
+        updateFavicon(unread);
+    }
+    let faviconImage = null;
+    let faviconCount = 0;
+    /** Draws a red badge with the number of unread messages onto the tab icon. */
+    function updateFavicon(count) {
+        if (count === faviconCount)
+            return;
+        faviconCount = count;
+        const link = document.querySelector("link[rel~='icon']");
+        if (!link)
+            return;
+        if (!count) {
+            link.href = "assets/favicon.png";
+            return;
+        }
+        const draw = () => {
+            const canvas = document.createElement("canvas");
+            canvas.width = canvas.height = 64;
+            const ctx = canvas.getContext("2d");
+            if (!ctx || !faviconImage || !faviconCount)
+                return;
+            ctx.drawImage(faviconImage, 0, 0, 64, 64);
+            ctx.fillStyle = "#ea0038";
+            ctx.beginPath();
+            ctx.arc(44, 20, 20, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 26px sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(faviconCount > 9 ? "9+" : String(faviconCount), 44, 21);
+            link.href = canvas.toDataURL("image/png");
+        };
+        if (faviconImage && faviconImage.complete)
+            return draw();
+        faviconImage = new Image();
+        faviconImage.onload = draw;
+        faviconImage.src = "assets/favicon.png";
     }
     // --------------------------------------------------------- friends view
     async function loadFriends() {
@@ -392,14 +441,19 @@
         return h("div", { className: "section-title", text });
     }
     function userRow(user, status, actions) {
-        return h("div", { className: "list-item request-list-item" }, [
-            avatarEl(user.username),
-            h("div", { className: "item-info" }, [
-                h("span", { className: "item-name", text: user.username }),
-                h("span", { className: "item-status", text: status }),
-            ]),
-            h("div", { className: "request-actions" }, actions),
+        const avatar = avatarEl(user.username, { label: nameOf(user) });
+        const info = h("div", { className: "item-info" }, [
+            h("span", { className: "item-name", text: nameOf(user) }),
+            h("span", { className: "item-status", text: status }),
         ]);
+        [avatar, info].forEach((el) => el.addEventListener("click", () => openProfile(user.username)));
+        const row = h("div", { className: "list-item request-list-item" }, [avatar, info, h("div", { className: "request-actions" }, actions)]);
+        row.addEventListener("contextmenu", (event) => {
+            event.preventDefault();
+            openUserMenu(user, event);
+        });
+        onLongPress(row, () => openProfile(user.username));
+        return row;
     }
     function action(label, fn, confirmText) {
         return async () => {
@@ -417,7 +471,7 @@
     function renderFriends() {
         const list = $("friends-list");
         const filter = ($("list-search").value || "").toLowerCase();
-        const match = (user) => !filter || user.username.toLowerCase().includes(filter);
+        const match = (user) => !filter || user.username.toLowerCase().includes(filter) || nameOf(user).toLowerCase().includes(filter);
         list.textContent = "";
         list.appendChild(sectionTitle(t("friends.title", { count: friends.friends.length })));
         friends.friends.filter(match).forEach((friend) => {
@@ -441,10 +495,11 @@
             });
         }
         if (friends.blocked.length) {
-            list.appendChild(sectionTitle(t("friends.blocked")));
+            list.appendChild(sectionTitle(`${t("friends.blocked")} — ${friends.blocked.length}`));
+            list.appendChild(h("p", { className: "list-hint", text: t("friends.blockedHint") }));
             friends.blocked.filter(match).forEach((user) => {
-                list.appendChild(userRow(user, t("friends.blocked"), [
-                    button(t("friends.unblock"), "request-action-btn discard", action("unblock", () => post("/api/unblock", { username: user.username }))),
+                list.appendChild(userRow(user, t("profile.blockedStatus"), [
+                    button(t("friends.unblock"), "request-action-btn accept", () => unblockUser(user)),
                 ]));
             });
         }
@@ -452,13 +507,21 @@
     }
     function openUserMenu(user, event) {
         closeFloatingMenus();
+        const isFriend = friends.friends.some((friend) => friend.id === user.id);
+        const isBlocked = friends.blocked.some((blocked) => blocked.id === user.id);
         const menu = h("div", { className: "floating-menu" }, [
-            button(t("friends.messageMenu"), "floating-item", () => {
+            h("div", { className: "floating-title", text: nameOf(user) }),
+            button(t("profile.view"), "floating-item", () => openProfile(user.username)),
+            isBlocked ? button(t("friends.unblock"), "floating-item", () => {
+                closeFloatingMenus();
+                unblockUser(user);
+            }) : null,
+            isFriend ? button(t("friends.messageMenu"), "floating-item", () => {
                 closeFloatingMenus();
                 startDm(user.username);
-            }),
-            button(t("friends.remove"), "floating-item", action("remove", () => post("/api/friends/remove", { username: user.username }), t("friends.removeConfirm", { name: user.username }))),
-            button(t("friends.block"), "floating-item danger", action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirmLong", { name: user.username }))),
+            }) : null,
+            isFriend ? button(t("friends.remove"), "floating-item", action("remove", () => post("/api/friends/remove", { username: user.username }), t("friends.removeConfirm", { name: nameOf(user) }))) : null,
+            isBlocked ? null : button(t("friends.block"), "floating-item danger", action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirmLong", { name: nameOf(user) }))),
         ]);
         const rect = event.currentTarget.getBoundingClientRect();
         menu.style.top = Math.min(rect.bottom + 4, window.innerHeight - 140) + "px";
@@ -471,6 +534,9 @@
         const isGroup = chat.type === "group";
         const menu = h("div", { className: "floating-menu" }, [
             h("div", { className: "floating-title", text: chat.name }),
+            !isGroup && chat.other_user
+                ? button(t("profile.view"), "floating-item", () => openProfile(chat.other_user))
+                : null,
             button(isGroup ? "🚪 " + t("info.leave") : "🗑️ " + t("info.deleteChat"), "floating-item danger", action(isGroup ? "leave" : "delete", async () => {
                 closeFloatingMenus();
                 await post(`/api/chats/${encodeURIComponent(chat.id)}/${isGroup ? "leave" : "delete"}`);
@@ -540,7 +606,7 @@
                     await refreshAll();
                 }),
                 button(t("requests.decline"), "request-action-btn discard", action("decline", () => post("/api/friends/decline", { username: user.username }))),
-                button(t("friends.blockShort"), "request-action-btn more", action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirm", { name: user.username }))),
+                button(t("friends.blockShort"), "request-action-btn more", action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirm", { name: nameOf(user) }))),
             ]));
         });
         applyTheme();
@@ -598,7 +664,7 @@
     }
     function closeChat() {
         current = null;
-        $("current-chat-name").textContent = t("app.welcomeUser", { name: me.username });
+        $("current-chat-name").textContent = t("app.welcomeUser", { name: nameOf(me) });
         $("current-chat-sub").textContent = "";
         $("chat-input-area").classList.add("modal-hidden");
         $("chat-info-btn").classList.add("modal-hidden");
@@ -643,7 +709,7 @@
         if (!current)
             return;
         if (current.changedKeys.length) {
-            const names = current.changedKeys.map((m) => m.username).join(", ");
+            const names = current.changedKeys.map(nameOf).join(", ");
             box.appendChild(h("span", {
                 text: t("chat.keyChanged", { names }),
             }));
@@ -656,7 +722,7 @@
             box.appendChild(button(t("app.chatInfo"), "pill-btn secondary", () => openChatInfo()));
         }
         else if (current.missingKeys.length) {
-            const names = current.missingKeys.map((m) => m.username).join(", ");
+            const names = current.missingKeys.map(nameOf).join(", ");
             box.appendChild(h("span", {
                 text: t("chat.keyMissing", { names }),
             }));
@@ -778,16 +844,19 @@
     }
     function messageRow(opened, message, view, compact) {
         const own = message.sender_id === me.id;
-        const sender = message.sender || t("msg.unknown");
+        const sender = message.sender_display || message.sender || t("msg.unknown");
         const row = h("div", {
             className: "message-row" + (own ? " message-own" : "") + (compact ? " message-compact" : ""),
             attrs: { "data-id": message.id },
         });
-        row.appendChild(compact ? h("div", { className: "message-avatar spacer" }) : avatarEl(sender, { className: "message-avatar" }));
+        const avatar = compact ? h("div", { className: "message-avatar spacer" }) : avatarEl(message.sender || sender, { className: "message-avatar", label: sender });
+        if (!compact && message.sender)
+            avatar.addEventListener("click", () => openProfile(message.sender));
+        row.appendChild(avatar);
         const wrapper = h("div", { className: "message-content-wrapper" });
         if (!compact) {
             const header = h("div", { className: "message-header" }, [
-                h("span", { className: "message-sender", text: own ? t("msg.you") : sender }),
+                h("span", { className: "message-sender clickable", text: own ? t("msg.you") : sender }),
                 h("span", { className: "message-timestamp", text: formatTime(message.created_at) }),
             ]);
             if (view.type === "legacy") {
@@ -797,6 +866,8 @@
                     title: t("msg.notEncryptedHint"),
                 }));
             }
+            if (message.sender)
+                header.firstElementChild.addEventListener("click", () => openProfile(message.sender));
             wrapper.appendChild(header);
         }
         const textDiv = h("div", { className: "message-text" });
@@ -919,8 +990,8 @@
         }
         friends.friends.forEach((friend) => {
             const row = h("div", { className: "picker-item" }, [
-                avatarEl(friend.username),
-                h("span", { className: "item-name", text: friend.username }),
+                avatarEl(friend.username, { label: nameOf(friend) }),
+                h("span", { className: "item-name", text: nameOf(friend) }),
             ]);
             row.addEventListener("click", () => startDm(friend.username));
             list.appendChild(row);
@@ -937,8 +1008,8 @@
             const checkbox = h("input", { attrs: { type: "checkbox", value: friend.username } });
             container.appendChild(h("label", { className: "picker-item" }, [
                 checkbox,
-                avatarEl(friend.username),
-                h("span", { className: "item-name", text: friend.username }),
+                avatarEl(friend.username, { label: nameOf(friend) }),
+                h("span", { className: "item-name", text: nameOf(friend) }),
             ]));
         });
     }
@@ -1017,7 +1088,7 @@
         if (details.type === "dm") {
             const other = members.find((m) => m.id !== me.id);
             if (other) {
-                body.appendChild(h("div", { className: "info-user" }, [avatarEl(other.username), h("strong", { text: other.username })]));
+                body.appendChild(h("div", { className: "info-user" }, [avatarEl(other.username, { label: nameOf(other) }), h("strong", { text: nameOf(other) })]));
                 const fp = await memberFingerprint(other);
                 if (fp) {
                     const code = await SeresCrypto.safetyNumber(myFp, fp);
@@ -1028,8 +1099,11 @@
                 const isBlocked = friends.blocked.some((b) => b.id === other.id);
                 body.appendChild(h("div", { className: "info-actions" }, [
                     isBlocked
-                        ? button(t("friends.unblock"), "pill-btn", action("unblock", () => post("/api/unblock", { username: other.username })))
-                        : button(t("friends.block"), "pill-btn danger", action("block", () => post("/api/block", { username: other.username }), t("friends.blockConfirm", { name: other.username }))),
+                        ? button(t("friends.unblock"), "pill-btn", async () => {
+                            await unblockUser(other);
+                            openChatInfo();
+                        })
+                        : button(t("friends.block"), "pill-btn danger", action("block", () => post("/api/block", { username: other.username }), t("friends.blockConfirm", { name: nameOf(other) }))),
                     button(t("info.deleteChat"), "pill-btn danger", action("delete", async () => {
                         await post(`/api/chats/${encodeURIComponent(details.id)}/delete`);
                         closeAllModals();
@@ -1051,12 +1125,14 @@
             for (const member of members) {
                 const fp = await memberFingerprint(member);
                 const isMe = member.id === me.id;
+                const memberAvatar = avatarEl(member.username, { label: nameOf(member) });
+                memberAvatar.addEventListener("click", () => openProfile(member.username));
                 const row = h("div", { className: "member-row" }, [
-                    avatarEl(member.username),
+                    memberAvatar,
                     h("div", { className: "item-info" }, [
                         h("span", {
                             className: "item-name",
-                            text: (isMe ? t("msg.you") : member.username) + (member.role === "owner" ? t("info.owner") : ""),
+                            text: (isMe ? t("msg.you") : nameOf(member)) + (member.role === "owner" ? t("info.owner") : ""),
                         }),
                         h("span", {
                             className: "item-status",
@@ -1067,7 +1143,7 @@
                 if (!isMe && fp) {
                     const code = await SeresCrypto.safetyNumber(myFp, fp);
                     row.appendChild(button(t("info.code"), "request-action-btn more", () => {
-                        window.alert(t("info.codeAlert", { name: member.username, code }));
+                        window.alert(t("info.codeAlert", { name: nameOf(member), code }));
                     }));
                     row.appendChild(verifyToggle(member.id, fp, verified, true));
                 }
@@ -1075,7 +1151,7 @@
                     row.appendChild(button(t("info.remove"), "request-action-btn discard", action("remove", async () => {
                         await post(`/api/chats/${encodeURIComponent(details.id)}/members/remove`, { username: member.username });
                         await openChatInfo();
-                    }, t("info.removeConfirm", { name: member.username }))));
+                    }, t("info.removeConfirm", { name: nameOf(member) }))));
                 }
                 body.appendChild(row);
             }
@@ -1100,7 +1176,7 @@
         }
         openModal("chat-info-modal");
     }
-    function verifyToggle(userId, fp, verified, compact = false) {
+    function verifyToggle(userId, fp, verified, compact = false, onChange = openChatInfo) {
         const isVerified = verified[userId] === fp;
         return button(t(isVerified ? "info.verified" : compact ? "info.verify" : "info.markVerified"), "pill-btn" + (isVerified ? " verified" : " secondary"), () => {
             const store = readStore("verified");
@@ -1109,8 +1185,104 @@
             else
                 store[userId] = fp;
             writeStore("verified", store);
-            openChatInfo();
+            onChange();
         });
+    }
+    // ------------------------------------------------------------ profile
+    /** Asks, unblocks and tells whether the friendship came back. */
+    async function unblockUser(user) {
+        if (!window.confirm(t("profile.unblockConfirm", { name: nameOf(user) })))
+            return;
+        try {
+            const data = await post("/api/unblock", { username: user.username });
+            showAlert(t(data.friends ? "profile.unblockedFriend" : "profile.unblocked", { name: nameOf(user) }));
+        }
+        catch (error) {
+            showAlert(errorText(error));
+        }
+        chatsSignature = "";
+        await refreshAll();
+    }
+    async function openProfile(username, showCode = false) {
+        closeFloatingMenus();
+        let data;
+        try {
+            data = await api(`/api/users/${encodeURIComponent(username)}/profile`);
+        }
+        catch (error) {
+            showAlert(errorText(error));
+            return;
+        }
+        const user = data.user;
+        const name = nameOf(user);
+        const reopen = () => openProfile(username, showCode);
+        const status = data.is_me
+            ? t("profile.you")
+            : data.blocked
+                ? t("profile.blockedStatus")
+                : data.friend
+                    ? t("profile.friend")
+                    : data.request === "outgoing"
+                        ? t("profile.requestOutgoing")
+                        : data.request === "incoming"
+                            ? t("profile.requestIncoming")
+                            : t("profile.notFriend");
+        const head = $("profile-head");
+        head.textContent = "";
+        head.append(avatarEl(user.username, { className: "avatar profile-avatar", label: name }), h("h3", { className: "profile-name", text: name }), h("span", { className: "profile-username", text: "@" + user.username }), h("span", { className: "profile-status", text: (data.muted ? "🔕 " : "") + status }));
+        const actions = $("profile-actions");
+        actions.textContent = "";
+        const codeBox = $("profile-code");
+        codeBox.textContent = "";
+        codeBox.classList.add("modal-hidden");
+        if (!data.is_me) {
+            if (data.friend) {
+                actions.append(button(t("friends.messageMenu"), "pill-btn", () => startDm(user.username)));
+            }
+            else if (!data.blocked && data.request !== "outgoing") {
+                actions.append(button(t("profile.addFriend"), "pill-btn", async () => {
+                    const url = data.request === "incoming" ? "/api/friends/accept" : "/api/friends/request";
+                    try {
+                        await post(url, { username: user.username });
+                    }
+                    catch (error) {
+                        showAlert(errorText(error));
+                    }
+                    await refreshAll();
+                    reopen();
+                }));
+            }
+            const fp = await memberFingerprint(user);
+            if (fp) {
+                actions.append(button(t(showCode ? "profile.hideCode" : "profile.showCode"), "pill-btn secondary", () => openProfile(username, !showCode)));
+                if (showCode) {
+                    const myFp = await SeresCrypto.fingerprint(identity.pubEcdh, identity.pubSign);
+                    codeBox.append(h("p", { text: t("info.securityCode") }), h("code", { className: "safety-number", text: await SeresCrypto.safetyNumber(myFp, fp) }), verifyToggle(user.id, fp, readStore("verified"), false, reopen));
+                    codeBox.classList.remove("modal-hidden");
+                }
+            }
+            actions.append(button(t(data.muted ? "profile.unmute" : "profile.mute"), "pill-btn secondary", async () => {
+                try {
+                    await post("/api/users/mute", { username: user.username, muted: !data.muted });
+                    showAlert(t(data.muted ? "profile.unmuted" : "profile.muted", { name }));
+                }
+                catch (error) {
+                    showAlert(errorText(error));
+                }
+                chatsSignature = "";
+                await refreshAll();
+                reopen();
+            }), data.blocked
+                ? button(t("friends.unblock"), "pill-btn", async () => {
+                    await unblockUser(user);
+                    reopen();
+                })
+                : button(t("friends.block"), "pill-btn danger", action("block", async () => {
+                    await post("/api/block", { username: user.username });
+                    reopen();
+                }, t("friends.blockConfirmLong", { name }))));
+        }
+        $("profile-modal").classList.remove("modal-hidden");
     }
     // ------------------------------------------------------------- modals
     function openModal(id) {
@@ -1237,7 +1409,7 @@
     async function showInvite(token) {
         try {
             const data = await api("/api/invite/" + encodeURIComponent(token));
-            const name = data.user.username;
+            const name = nameOf(data.user);
             if (data.status === "self")
                 return showAlert(t("invite.self"));
             if (data.status === "friends")
@@ -1245,7 +1417,7 @@
             inviteToAccept = { token, name };
             const userBox = $("invite-accept-user");
             userBox.textContent = "";
-            userBox.append(avatarEl(name), h("strong", { text: name }));
+            userBox.append(avatarEl(data.user.username, { label: name }), h("strong", { text: name }));
             $("invite-accept-text").textContent = t("invite.acceptText", { name });
             $("warning-invite").textContent = "";
             openModal("invite-accept-modal");
@@ -1269,9 +1441,33 @@
             $("warning-invite").textContent = errorText(error);
         }
     }
+    function showOwnName() {
+        $("my-username-display").textContent = nameOf(me);
+        $("mobile-username").textContent = nameOf(me);
+        if (!current)
+            $("current-chat-name").textContent = t("app.welcomeUser", { name: nameOf(me) });
+    }
+    async function saveDisplayName() {
+        const warning = $("settings-warning");
+        warning.textContent = "";
+        try {
+            const data = await post("/api/profile/display_name", {
+                display_name: $("display-name-input").value,
+            });
+            me.display_name = data.display_name;
+            $("display-name-input").value = data.display_name;
+            showOwnName();
+            loadOwnAvatar();
+            showAlert(t("settings.displayNameSaved"));
+        }
+        catch (error) {
+            warning.textContent = errorText(error);
+        }
+    }
     async function openSettings() {
         $("user-dropdown-menu").classList.add("modal-hidden");
         $("settings-warning").textContent = "";
+        $("display-name-input").value = nameOf(me);
         openModal("settings-modal");
         const fp = await SeresCrypto.fingerprint(identity.pubEcdh, identity.pubSign);
         $("my-fingerprint").textContent = fp.replace(/(.{4})/g, "$1 ").trim();
@@ -1279,7 +1475,7 @@
     function loadOwnAvatar() {
         const text = $("user-avatar-text");
         const img = $("user-avatar-img");
-        text.textContent = me.username.charAt(0).toUpperCase();
+        text.textContent = nameOf(me).charAt(0).toUpperCase();
         $("user-avatar").style.backgroundColor = colorFor(me.username);
         fetch("/api/get_avatar", { credentials: "same-origin" })
             .then((response) => {
@@ -1408,6 +1604,11 @@
         $("btn-new-group").addEventListener("click", openNewGroupModal);
         $("confirm-new-group").addEventListener("click", createGroup);
         $("chat-info-btn").addEventListener("click", openChatInfo);
+        document.querySelector(".chat-title").addEventListener("click", () => {
+            if (current && current.details && current.details.type === "dm" && current.details.other_user) {
+                openProfile(current.details.other_user);
+            }
+        });
         $("send-btn").addEventListener("click", sendMessage);
         $("menu-toggle").addEventListener("click", () => document.querySelector(".sidebar")?.classList.toggle("open"));
         $("user-menu-trigger").addEventListener("click", () => $("user-dropdown-menu").classList.toggle("modal-hidden"));
@@ -1432,6 +1633,12 @@
                 openInviteModal(true);
         });
         $("invite-link").addEventListener("focus", () => $("invite-link").select());
+        $("profile-close").addEventListener("click", () => $("profile-modal").classList.add("modal-hidden"));
+        $("save-display-name").addEventListener("click", saveDisplayName);
+        $("display-name-input").addEventListener("keydown", (event) => {
+            if (event.key === "Enter")
+                saveDisplayName();
+        });
         $("upload-avatar-btn").addEventListener("click", uploadAvatar);
         $("theme-toggle-btn").addEventListener("click", toggleTheme);
         $("change-password-btn").addEventListener("click", changePassword);
@@ -1520,9 +1727,7 @@
         }
         identity = stored;
         userKeys.set(me.id, { id: me.id, username: me.username, pub_ecdh: me.pub_ecdh, pub_sign: me.pub_sign });
-        $("my-username-display").textContent = me.username;
-        $("mobile-username").textContent = me.username;
-        $("current-chat-name").textContent = t("app.welcomeUser", { name: me.username });
+        showOwnName();
         loadOwnAvatar();
         bindEvents();
         switchView("chats");
