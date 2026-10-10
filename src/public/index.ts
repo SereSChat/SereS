@@ -4,6 +4,7 @@
   interface UserRef {
     id: string;
     username: string;
+    display_name?: string | null;
   }
 
   interface Me extends UserRef {
@@ -25,6 +26,7 @@
     id: string;
     sender_id: string | null;
     sender: string | null;
+    sender_display?: string | null;
     kind: "e2e" | "legacy" | "system";
     payload: any;
     created_at: string;
@@ -186,10 +188,16 @@
     return palette[Math.abs(hash) % palette.length];
   }
 
-  function avatarEl(name: string, options: { group?: boolean; className?: string } = {}) {
+  /** The name shown in the app; the @username only appears in the profile. */
+  function nameOf(user: { username: string; display_name?: string | null }) {
+    return user.display_name || user.username;
+  }
+
+  /** Avatar of a user (picture loaded by username); label is the name the initial is taken from. */
+  function avatarEl(name: string, options: { group?: boolean; className?: string; label?: string } = {}) {
     const avatar = h("div", { className: options.className || "avatar" });
     avatar.style.backgroundColor = colorFor(name);
-    const initial = h("span", { text: options.group ? "#" : name.charAt(0).toUpperCase() || "?" });
+    const initial = h("span", { text: options.group ? "#" : (options.label || name).charAt(0).toUpperCase() || "?" });
     avatar.appendChild(initial);
     if (!options.group && avatarState.get(name) !== "no") {
       const img = h("img", { attrs: { alt: "" } });
@@ -400,7 +408,7 @@
     if (!chat.last_message || !shown) return chat.type === "group" ? t("list.members", { count: chat.member_count }) : t("list.noMessages");
     const message = chat.last_message;
     if (shown.type === "system") return shown.text;
-    const prefix = message.sender_id === me.id ? t("list.you") : chat.type === "group" && message.sender ? message.sender + ": " : "";
+    const prefix = message.sender_id === me.id ? t("list.you") : chat.type === "group" && message.sender ? (message.sender_display || message.sender) + ": " : "";
     if (shown.type === "deleted") return prefix + t("list.deleted");
     return prefix + shown.text.replace(/\s+/g, " ");
   }
@@ -415,7 +423,8 @@
         className: "list-item chat-list-item" + (current && current.id === chat.id ? " active" : ""),
         attrs: { "data-chatid": chat.id },
       });
-      item.appendChild(avatarEl(chat.name, { group: chat.type === "group" }));
+      const avatarName = chat.type === "dm" && chat.other_user ? chat.other_user : chat.name;
+      item.appendChild(avatarEl(avatarName, { group: chat.type === "group", label: chat.name }));
       const nameRow = h("div", { className: "item-row" }, [
         h("span", { className: "item-name", text: chat.name }),
         h("span", { className: "item-time", text: formatListTime(chat.last_activity) }),
@@ -475,9 +484,9 @@
 
   function userRow(user: UserRef, status: string, actions: HTMLElement[]) {
     return h("div", { className: "list-item request-list-item" }, [
-      avatarEl(user.username),
+      avatarEl(user.username, { label: nameOf(user) }),
       h("div", { className: "item-info" }, [
-        h("span", { className: "item-name", text: user.username }),
+        h("span", { className: "item-name", text: nameOf(user) }),
         h("span", { className: "item-status", text: status }),
       ]),
       h("div", { className: "request-actions" }, actions),
@@ -499,7 +508,8 @@
   function renderFriends() {
     const list = $("friends-list");
     const filter = (($("list-search") as HTMLInputElement).value || "").toLowerCase();
-    const match = (user: UserRef) => !filter || user.username.toLowerCase().includes(filter);
+    const match = (user: UserRef) =>
+      !filter || user.username.toLowerCase().includes(filter) || nameOf(user).toLowerCase().includes(filter);
     list.textContent = "";
 
     list.appendChild(sectionTitle(t("friends.title", { count: friends.friends.length })));
@@ -554,7 +564,7 @@
       button(
         t("friends.remove"),
         "floating-item",
-        action("remove", () => post("/api/friends/remove", { username: user.username }), t("friends.removeConfirm", { name: user.username })),
+        action("remove", () => post("/api/friends/remove", { username: user.username }), t("friends.removeConfirm", { name: nameOf(user) })),
       ),
       button(
         t("friends.block"),
@@ -562,7 +572,7 @@
         action(
           "block",
           () => post("/api/block", { username: user.username }),
-          t("friends.blockConfirmLong", { name: user.username }),
+          t("friends.blockConfirmLong", { name: nameOf(user) }),
         ),
       ),
     ]);
@@ -663,7 +673,7 @@
           button(
             t("friends.blockShort"),
             "request-action-btn more",
-            action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirm", { name: user.username })),
+            action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirm", { name: nameOf(user) })),
           ),
         ]),
       );
@@ -770,7 +780,7 @@
     box.textContent = "";
     if (!current) return;
     if (current.changedKeys.length) {
-      const names = current.changedKeys.map((m) => m.username).join(", ");
+      const names = current.changedKeys.map(nameOf).join(", ");
       box.appendChild(
         h("span", {
           text: t("chat.keyChanged", { names }),
@@ -785,7 +795,7 @@
       );
       box.appendChild(button(t("app.chatInfo"), "pill-btn secondary", () => openChatInfo()));
     } else if (current.missingKeys.length) {
-      const names = current.missingKeys.map((m) => m.username).join(", ");
+      const names = current.missingKeys.map(nameOf).join(", ");
       box.appendChild(
         h("span", {
           text: t("chat.keyMissing", { names }),
@@ -917,12 +927,12 @@
 
   function messageRow(opened: OpenChat, message: Message, view: Shown, compact: boolean) {
     const own = message.sender_id === me.id;
-    const sender = message.sender || t("msg.unknown");
+    const sender = message.sender_display || message.sender || t("msg.unknown");
     const row = h("div", {
       className: "message-row" + (own ? " message-own" : "") + (compact ? " message-compact" : ""),
       attrs: { "data-id": message.id },
     });
-    row.appendChild(compact ? h("div", { className: "message-avatar spacer" }) : avatarEl(sender, { className: "message-avatar" }));
+    row.appendChild(compact ? h("div", { className: "message-avatar spacer" }) : avatarEl(message.sender || sender, { className: "message-avatar", label: sender }));
 
     const wrapper = h("div", { className: "message-content-wrapper" });
     if (!compact) {
@@ -1065,8 +1075,8 @@
     }
     friends.friends.forEach((friend) => {
       const row = h("div", { className: "picker-item" }, [
-        avatarEl(friend.username),
-        h("span", { className: "item-name", text: friend.username }),
+        avatarEl(friend.username, { label: nameOf(friend) }),
+        h("span", { className: "item-name", text: nameOf(friend) }),
       ]);
       row.addEventListener("click", () => startDm(friend.username));
       list.appendChild(row);
@@ -1085,8 +1095,8 @@
       container.appendChild(
         h("label", { className: "picker-item" }, [
           checkbox,
-          avatarEl(friend.username),
-          h("span", { className: "item-name", text: friend.username }),
+          avatarEl(friend.username, { label: nameOf(friend) }),
+          h("span", { className: "item-name", text: nameOf(friend) }),
         ]),
       );
     });
