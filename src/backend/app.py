@@ -701,8 +701,10 @@ def make_friends(conn, a, b):
 @app.route("/api/add_friend", methods=["POST"])
 @login_required
 def request_friend():
-    me_id = current_user()["id"]
-    other = target_user(json_body())
+    return send_friend_request(current_user()["id"], target_user(json_body()))
+
+
+def send_friend_request(me_id, other):
     if rate_limited(("friend-request", me_id), 30, 600):
         return error("Too many friend requests, please wait", 429)
     if other["id"] == me_id:
@@ -729,6 +731,65 @@ def request_friend():
     )
     conn.commit()
     return ok(message="Request sent", status="pending")
+
+
+# ------------------------------------------------------------ invite links
+
+
+def invite_token(user_id, renew=False):
+    conn = get_db()
+    row = conn.execute("SELECT token FROM friend_invites WHERE user_id = ?", (user_id,)).fetchone()
+    if row and not renew:
+        return row["token"]
+    token = secrets.token_urlsafe(16)
+    conn.execute(
+        "INSERT INTO friend_invites (token, user_id, created_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET token = excluded.token, created_at = excluded.created_at",
+        (token, user_id, db.now_iso()),
+    )
+    conn.commit()
+    return token
+
+
+def invite_owner(token):
+    if rate_limited(("invite", client_ip()), 60, 60):
+        flask.abort(flask.make_response(error("Too many requests, please wait", 429)))
+    row = get_db().execute(
+        """SELECT u.* FROM friend_invites i JOIN users u ON u.id = i.user_id
+           WHERE i.token = ?""",
+        (token[:64],),
+    ).fetchone()
+    if row is None:
+        flask.abort(flask.make_response(error("This invite link is invalid or expired", 404)))
+    return row
+
+
+@app.route("/api/invite")
+@login_required
+def my_invite():
+    return ok(token=invite_token(current_user()["id"]))
+
+
+@app.route("/api/invite/renew", methods=["POST"])
+@login_required
+def renew_invite():
+    # The old link stops working.
+    return ok(token=invite_token(current_user()["id"], renew=True))
+
+
+@app.route("/api/invite/<token>")
+@login_required
+def show_invite(token):
+    owner = invite_owner(token)
+    me_id = current_user()["id"]
+    status = "self" if owner["id"] == me_id else "friends" if are_friends(me_id, owner["id"]) else "none"
+    return ok(user=public_user(owner), status=status)
+
+
+@app.route("/api/invite/<token>/accept", methods=["POST"])
+@login_required
+def accept_invite(token):
+    return send_friend_request(current_user()["id"], invite_owner(token))
 
 
 @app.route("/api/friends/accept", methods=["POST"])

@@ -38,6 +38,12 @@ SCHEMA = [
         created_at TEXT NOT NULL,
         PRIMARY KEY (from_id, to_id)
     )""",
+    # One invite link per user; anyone who opens it can send that user a friend request.
+    """CREATE TABLE IF NOT EXISTS friend_invites (
+        token TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    )""",
     """CREATE TABLE IF NOT EXISTS blocks (
         blocker_id TEXT NOT NULL,
         blocked_id TEXT NOT NULL,
