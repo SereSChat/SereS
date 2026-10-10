@@ -71,7 +71,8 @@
     }
     await SeresCrypto.clearIdentities();
     await SeresCrypto.saveIdentity(identity);
-    window.location.href = "index.html?login=true";
+    const invite = new URLSearchParams(window.location.search).get("invite");
+    window.location.href = "index.html?login=true" + (invite ? "&invite=" + encodeURIComponent(invite) : "");
   }
 
   async function login() {
@@ -165,7 +166,7 @@
   }
 
   function applyLoginTheme() {
-    const isBright = SeresI18n.getCookie("theme") === "bright";
+    const isBright = SeresI18n.getPreference("theme") === "bright";
     document.body.classList.toggle("bright-body", isBright);
     document.querySelector(".login")?.classList.toggle("bright-login", isBright);
     document.querySelector(".landr")?.classList.toggle("bright-landr", isBright);
@@ -177,7 +178,7 @@
   }
 
   function toggleLoginTheme() {
-    const newTheme = SeresI18n.getCookie("theme") === "bright" ? "dark" : "bright";
+    const newTheme = SeresI18n.getPreference("theme") === "bright" ? "dark" : "bright";
     SeresI18n.setPreference("theme", newTheme);
     applyLoginTheme();
   }
@@ -212,7 +213,9 @@
       }
     });
 
-    const reason = new URLSearchParams(window.location.search).get("reason");
+    const params = new URLSearchParams(window.location.search);
+    const reason = params.get("reason");
+    if (params.get("invite")) setWarning(t("invite.loginHint"));
     if (reason === "keys") {
       setWarning(t("login.reloginKeys"));
     }

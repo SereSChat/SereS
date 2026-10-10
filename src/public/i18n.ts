@@ -1,9 +1,9 @@
 // Translations and preference cookies shared by all pages.
 //
 // The dictionaries live in language/<code>.js and register themselves on
-// window.SeresLang. The chosen language is stored in the "lang" cookie.
-// Preference cookies (language, theme) are only kept across browser restarts
-// when the user accepted cookies; otherwise they are session cookies.
+// window.SeresLang. The default language is English.
+// Preferences (language, theme) are only stored in cookies when the user
+// accepted cookies; otherwise they are kept in memory for the current page.
 
 type SeresLanguage = "en" | "de" | "fr";
 
@@ -29,10 +29,15 @@ const SeresI18n = (() => {
     return match ? decodeURIComponent(match.slice(name.length + 1)) : undefined;
   }
 
-  function writeCookie(name: string, value: string, persistent: boolean) {
-    const maxAge = persistent ? "; max-age=" + ONE_YEAR : "";
-    document.cookie = name + "=" + encodeURIComponent(value) + "; path=/" + maxAge + "; SameSite=Lax";
+  function writeCookie(name: string, value: string) {
+    document.cookie = name + "=" + encodeURIComponent(value) + "; path=/; max-age=" + ONE_YEAR + "; SameSite=Lax";
   }
+
+  function deleteCookie(name: string) {
+    document.cookie = name + "=; path=/; max-age=0; SameSite=Lax";
+  }
+
+  const memory: Record<string, string> = {};
 
   /** "accepted", "denied" or undefined when the user has not decided yet. */
   function getConsent() {
@@ -40,31 +45,42 @@ const SeresI18n = (() => {
     return value === "accepted" || value === "denied" ? value : undefined;
   }
 
-  /** Stores a preference; it only outlives the browser session with consent. */
+  function getPreference(name: string) {
+    return memory[name] ?? (getConsent() === "accepted" ? getCookie(name) : undefined);
+  }
+
+  /** Remembers a preference; it is only written to a cookie with consent. */
   function setPreference(name: string, value: string) {
-    writeCookie(name, value, getConsent() === "accepted");
+    memory[name] = value;
+    if (getConsent() === "accepted") writeCookie(name, value);
   }
 
-  function setConsent(accepted: boolean) {
-    // Remembering the decision itself is necessary, so it is always persistent.
-    writeCookie("cookie_consent", accepted ? "accepted" : "denied", true);
+  /** Stores the decision and lets the server adjust the login cookie to it. */
+  async function setConsent(accepted: boolean) {
+    // Keep the current values for this page before the cookies change.
     for (const name of PREFERENCE_COOKIES) {
-      const value = getCookie(name);
-      if (value !== undefined) writeCookie(name, value, accepted);
+      const value = getPreference(name);
+      if (value !== undefined) memory[name] = value;
     }
+    // Remembering the decision itself is necessary, so it is always kept.
+    writeCookie("cookie_consent", accepted ? "accepted" : "denied");
+    for (const name of PREFERENCE_COOKIES) {
+      if (!accepted) deleteCookie(name);
+      else if (memory[name] !== undefined) writeCookie(name, memory[name]);
+    }
+    await fetch("/api/cookie_consent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ accepted }),
+    }).catch(() => {});
   }
 
-  function detectLanguage(): SeresLanguage {
-    const saved = getCookie("lang");
-    if (isLanguage(saved)) return saved;
-    for (const preferred of navigator.languages || [navigator.language]) {
-      const code = (preferred || "").slice(0, 2).toLowerCase();
-      if (isLanguage(code)) return code;
-    }
-    return "en";
-  }
+  // Preference cookies from before a denial are not used anymore.
+  if (getConsent() !== "accepted") PREFERENCE_COOKIES.forEach(deleteCookie);
 
-  let language = detectLanguage();
+  const saved = getPreference("lang");
+  let language: SeresLanguage = isLanguage(saved) ? saved : "en";
   document.documentElement.lang = language;
 
   /** Translates a key and fills in {placeholders}. Falls back to English, then to the key. */
@@ -133,6 +149,7 @@ const SeresI18n = (() => {
     getCookie,
     getConsent,
     setConsent,
+    getPreference,
     setPreference,
   };
 })();

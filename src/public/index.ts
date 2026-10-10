@@ -89,6 +89,9 @@
   let chatsSignature = "";
   let friendsSignature = "";
   let sending = false;
+  // Invite token from a link like /?invite=..., kept across the login redirect.
+  const pendingInvite = new URLSearchParams(window.location.search).get("invite");
+  let inviteToAccept: { token: string; name: string } | null = null;
 
   const userKeys = new Map<string, { id: string; username: string; pub_ecdh: string | null; pub_sign: string | null }>();
   const shownCache = new Map<string, Promise<Shown>>();
@@ -131,6 +134,14 @@
     return btn;
   }
 
+  function goToLogin(reason?: string) {
+    const params = new URLSearchParams();
+    if (reason) params.set("reason", reason);
+    if (pendingInvite) params.set("invite", pendingInvite);
+    const query = params.toString();
+    window.location.href = "login.html" + (query ? "?" + query : "");
+  }
+
   async function api(path: string, options: { method?: string; body?: object } = {}): Promise<any> {
     const response = await fetch(path, {
       method: options.method || (options.body ? "POST" : "GET"),
@@ -139,7 +150,7 @@
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
     if (response.status === 401) {
-      window.location.href = "login.html";
+      goToLogin();
       throw new ApiError("Not logged in", 401);
     }
     const data = await response.json().catch(() => ({}));
@@ -415,6 +426,11 @@
       ]);
       item.appendChild(h("div", { className: "item-info" }, [nameRow, statusRow]));
       item.addEventListener("click", () => openChat(chat.id));
+      item.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        openChatMenu(chat, event.clientX, event.clientY);
+      });
+      onLongPress(item, (x, y) => openChatMenu(chat, x, y));
       list.appendChild(item);
     });
     if (!list.childElementCount) {
@@ -554,6 +570,63 @@
     menu.style.top = Math.min(rect.bottom + 4, window.innerHeight - 140) + "px";
     menu.style.left = Math.max(8, rect.right - 180) + "px";
     document.body.appendChild(menu);
+  }
+
+  /** Right-click (or long-press) menu of a chat: delete a direct chat or leave a group. */
+  function openChatMenu(chat: ChatSummary, x: number, y: number) {
+    closeFloatingMenus();
+    const isGroup = chat.type === "group";
+    const menu = h("div", { className: "floating-menu" }, [
+      h("div", { className: "floating-title", text: chat.name }),
+      button(
+        isGroup ? "🚪 " + t("info.leave") : "🗑️ " + t("info.deleteChat"),
+        "floating-item danger",
+        action(
+          isGroup ? "leave" : "delete",
+          async () => {
+            closeFloatingMenus();
+            await post(`/api/chats/${encodeURIComponent(chat.id)}/${isGroup ? "leave" : "delete"}`);
+            if (current && current.id === chat.id) closeChat();
+            chatsSignature = "";
+          },
+          t(isGroup ? "info.leaveConfirm" : "info.deleteChatConfirm"),
+        ),
+      ),
+    ]);
+    document.body.appendChild(menu);
+    // Keep the menu inside the viewport.
+    menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + "px";
+    menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + "px";
+  }
+
+  /** Calls handler after a finger rests ~0.5s on the element (iOS has no contextmenu event). */
+  function onLongPress(element: HTMLElement, handler: (x: number, y: number) => void) {
+    let timer: number | null = null;
+    let fired = false;
+    const cancel = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    element.addEventListener(
+      "touchstart",
+      (event) => {
+        fired = false;
+        const touch = event.touches[0];
+        timer = window.setTimeout(() => {
+          fired = true;
+          if (navigator.vibrate) navigator.vibrate(15);
+          handler(touch.clientX, touch.clientY);
+        }, 500);
+      },
+      { passive: true },
+    );
+    element.addEventListener("touchmove", cancel, { passive: true });
+    element.addEventListener("touchend", (event) => {
+      cancel();
+      // Don't open the chat when the finger is lifted after the menu appeared.
+      if (fired) event.preventDefault();
+    });
+    element.addEventListener("touchcancel", cancel);
   }
 
   function closeFloatingMenus() {
@@ -1321,6 +1394,79 @@
     }
   }
 
+  // ------------------------------------------------------------- invites
+
+  function inviteUrl(token: string) {
+    return new URL("/?invite=" + encodeURIComponent(token), window.location.origin).href;
+  }
+
+  async function openInviteModal(renew = false) {
+    $("user-dropdown-menu").classList.add("modal-hidden");
+    try {
+      const data = renew ? await post("/api/invite/renew") : await api("/api/invite");
+      const url = inviteUrl(data.token);
+      ($("invite-link") as HTMLInputElement).value = url;
+      const box = $("invite-qr");
+      box.textContent = "";
+      box.appendChild(SeresQR.toSvg(url));
+      $("invite-share").style.display = typeof navigator.share === "function" ? "" : "none";
+      closeAllModals();
+      openModal("invite-modal");
+    } catch (error) {
+      showAlert(errorText(error));
+    }
+  }
+
+  async function copyInvite() {
+    const input = $("invite-link") as HTMLInputElement;
+    try {
+      await navigator.clipboard.writeText(input.value);
+    } catch {
+      // Older browsers or no clipboard permission.
+      input.select();
+      document.execCommand("copy");
+    }
+    showAlert(t("invite.copied"));
+  }
+
+  function shareInvite() {
+    const url = ($("invite-link") as HTMLInputElement).value;
+    navigator.share({ title: "SereS", text: t("invite.shareText"), url }).catch(() => {});
+  }
+
+  /** Asks whether to send a friend request to the owner of an opened invite link. */
+  async function showInvite(token: string) {
+    try {
+      const data = await api("/api/invite/" + encodeURIComponent(token));
+      const name = data.user.username;
+      if (data.status === "self") return showAlert(t("invite.self"));
+      if (data.status === "friends") return showAlert(t("invite.alreadyFriends", { name }));
+      inviteToAccept = { token, name };
+      const userBox = $("invite-accept-user");
+      userBox.textContent = "";
+      userBox.append(avatarEl(name), h("strong", { text: name }));
+      $("invite-accept-text").textContent = t("invite.acceptText", { name });
+      $("warning-invite").textContent = "";
+      openModal("invite-accept-modal");
+    } catch (error) {
+      showAlert(error instanceof ApiError && error.status === 404 ? t("invite.invalid") : errorText(error));
+    }
+  }
+
+  async function acceptInvite() {
+    if (!inviteToAccept) return;
+    try {
+      const { token, name } = inviteToAccept;
+      const data = await post("/api/invite/" + encodeURIComponent(token) + "/accept");
+      closeAllModals();
+      showAlert(t(data.status === "friends" ? "friends.nowFriends" : "friends.requestSent", { name }));
+      inviteToAccept = null;
+      await refreshAll();
+    } catch (error) {
+      $("warning-invite").textContent = errorText(error);
+    }
+  }
+
   async function openSettings() {
     $("user-dropdown-menu").classList.add("modal-hidden");
     $("settings-warning").textContent = "";
@@ -1362,7 +1508,7 @@
   // --------------------------------------------------------------- theme
 
   function applyTheme() {
-    const isBright = SeresI18n.getCookie("theme") === "bright";
+    const isBright = SeresI18n.getPreference("theme") === "bright";
     document.body.classList.toggle("bright-body", isBright);
     const single: [string, string][] = [
       [".sidebar", "bright-sidebar"],
@@ -1392,9 +1538,23 @@
   }
 
   function toggleTheme() {
-    const newTheme = SeresI18n.getCookie("theme") === "bright" ? "dark" : "bright";
+    const newTheme = SeresI18n.getPreference("theme") === "bright" ? "dark" : "bright";
     SeresI18n.setPreference("theme", newTheme);
     applyTheme();
+  }
+
+  /** Renders all generated texts again after the language was switched. */
+  function rerenderLanguage() {
+    shownCache.clear();
+    chatsSignature = "";
+    friendsSignature = "";
+    if (current) {
+      refreshCurrentDetails().catch(() => {});
+      renderMessages({}).catch(() => {});
+    } else {
+      closeChat();
+    }
+    refreshAll();
   }
 
   // --------------------------------------------------------------- intro
@@ -1463,6 +1623,18 @@
       event.preventDefault();
       logout();
     });
+    $("menu-invite").addEventListener("click", (event) => {
+      event.preventDefault();
+      openInviteModal();
+    });
+    $("add-friend-invite").addEventListener("click", () => openInviteModal());
+    $("confirm-invite").addEventListener("click", acceptInvite);
+    $("invite-copy").addEventListener("click", copyInvite);
+    $("invite-share").addEventListener("click", shareInvite);
+    $("invite-renew").addEventListener("click", () => {
+      if (window.confirm(t("invite.renewConfirm"))) openInviteModal(true);
+    });
+    $("invite-link").addEventListener("focus", () => ($("invite-link") as HTMLInputElement).select());
     $("upload-avatar-btn").addEventListener("click", uploadAvatar);
     $("theme-toggle-btn").addEventListener("click", toggleTheme);
     $("change-password-btn").addEventListener("click", changePassword);
@@ -1470,8 +1642,7 @@
       closeAllModals();
       SeresConsent.show();
     });
-    // Most texts are rendered from data, so reload to show everything in the new language.
-    $("language-select-slot").appendChild(SeresI18n.languageSelect(() => window.location.reload()));
+    $("language-select-slot").appendChild(SeresI18n.languageSelect(rerenderLanguage));
 
     document.querySelectorAll<HTMLElement>(".list-view-toggle").forEach((btn) => {
       btn.addEventListener("click", () => switchView(btn.dataset.view as "chats" | "friends" | "requests"));
@@ -1534,12 +1705,15 @@
 
   async function boot() {
     SeresI18n.apply();
+    $("my-username-display").textContent = t("common.loading");
+    $("mobile-username").textContent = t("common.loading");
+    $("current-chat-name").textContent = t("app.welcome");
     loadAnimation();
     applyTheme();
     try {
       me = (await api("/api/me")).user;
     } catch {
-      window.location.href = "login.html";
+      goToLogin();
       return;
     }
     const stored = await SeresCrypto.loadIdentity(me.id);
@@ -1547,7 +1721,7 @@
       // No unlocked keys on this device (or they don't match the account): log in again.
       await fetch("/api/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
       await SeresCrypto.clearIdentities();
-      window.location.href = "login.html?reason=keys";
+      goToLogin("keys");
       return;
     }
     identity = stored;
@@ -1562,6 +1736,11 @@
     if (window.innerWidth <= 768) document.querySelector(".sidebar")?.classList.add("open");
 
     await refreshAll();
+    if (pendingInvite) {
+      // Remove the token from the address bar so a reload doesn't ask again.
+      window.history.replaceState({}, document.title, window.location.pathname);
+      showInvite(pendingInvite);
+    }
 
     window.setInterval(() => {
       if (document.visibilityState === "visible") syncCurrent().catch(() => {});

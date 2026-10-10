@@ -12,7 +12,7 @@ window.SeresLang.fr = {
   "common.themeToggle": "🌓 Mode",
 
   "consent.title": "🍪 Cookies",
-  "consent.text": "SereS utilise des cookies nécessaires à la connexion. Avec ton accord, nous mémorisons aussi ta langue et ton thème.",
+  "consent.text": "SereS a besoin d'un cookie pour te garder connecté. Si tu acceptes, tu restes connecté et ta langue ainsi que ton thème sont mémorisés. Si tu refuses, rien n'est enregistré et tu es déconnecté à la fermeture du navigateur.",
   "consent.accept": "Accepter",
   "consent.deny": "Refuser",
 
@@ -183,4 +183,22 @@ window.SeresLang.fr = {
   "info.verified": "✔ Vérifié",
   "info.verify": "Vérifier",
   "info.markVerified": "Marquer comme vérifié",
+
+  "invite.menu": "🔗 Lien d'invitation et QR code",
+  "invite.fromAddFriend": "🔗 Ou partage ton lien d'invitation ou ton QR code",
+  "invite.title": "Inviter des amis",
+  "invite.text": "Partage ce lien ou fais scanner le QR code. La personne pourra alors t'envoyer une demande d'ami en un geste.",
+  "invite.copy": "Copier le lien",
+  "invite.copied": "Lien copié !",
+  "invite.share": "Partager",
+  "invite.shareText": "Ajoute-moi en ami sur SereS !",
+  "invite.renew": "Nouveau lien",
+  "invite.renewConfirm": "Créer un nouveau lien ? L'ancien lien et le QR code ne fonctionneront plus.",
+  "invite.acceptTitle": "Demande d'ami",
+  "invite.acceptText": "Veux-tu envoyer une demande d'ami à {name} ?",
+  "invite.send": "Envoyer la demande",
+  "invite.self": "C'est ton propre lien d'invitation. Partage-le avec tes amis !",
+  "invite.alreadyFriends": "{name} et toi êtes déjà amis.",
+  "invite.invalid": "Ce lien d'invitation n'est pas valide ou ne fonctionne plus.",
+  "invite.loginHint": "Connecte-toi ou inscris-toi pour accepter l'invitation.",
 };

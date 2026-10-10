@@ -12,6 +12,7 @@
   "files": [
     "src/public/i18n.ts",
     "src/public/consent.ts",
+    "src/public/qr.ts",
     "src/public/crypto.ts",
     "src/public/login.ts",
     "src/public/index.ts",

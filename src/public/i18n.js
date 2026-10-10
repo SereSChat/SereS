@@ -2,9 +2,9 @@
 // Translations and preference cookies shared by all pages.
 //
 // The dictionaries live in language/<code>.js and register themselves on
-// window.SeresLang. The chosen language is stored in the "lang" cookie.
-// Preference cookies (language, theme) are only kept across browser restarts
-// when the user accepted cookies; otherwise they are session cookies.
+// window.SeresLang. The default language is English.
+// Preferences (language, theme) are only stored in cookies when the user
+// accepted cookies; otherwise they are kept in memory for the current page.
 const SeresI18n = (() => {
     const LANGUAGES = {
         en: "English",
@@ -23,40 +23,55 @@ const SeresI18n = (() => {
         const match = document.cookie.split("; ").find((part) => part.startsWith(name + "="));
         return match ? decodeURIComponent(match.slice(name.length + 1)) : undefined;
     }
-    function writeCookie(name, value, persistent) {
-        const maxAge = persistent ? "; max-age=" + ONE_YEAR : "";
-        document.cookie = name + "=" + encodeURIComponent(value) + "; path=/" + maxAge + "; SameSite=Lax";
+    function writeCookie(name, value) {
+        document.cookie = name + "=" + encodeURIComponent(value) + "; path=/; max-age=" + ONE_YEAR + "; SameSite=Lax";
     }
+    function deleteCookie(name) {
+        document.cookie = name + "=; path=/; max-age=0; SameSite=Lax";
+    }
+    const memory = {};
     /** "accepted", "denied" or undefined when the user has not decided yet. */
     function getConsent() {
         const value = getCookie("cookie_consent");
         return value === "accepted" || value === "denied" ? value : undefined;
     }
-    /** Stores a preference; it only outlives the browser session with consent. */
+    function getPreference(name) {
+        return memory[name] ?? (getConsent() === "accepted" ? getCookie(name) : undefined);
+    }
+    /** Remembers a preference; it is only written to a cookie with consent. */
     function setPreference(name, value) {
-        writeCookie(name, value, getConsent() === "accepted");
+        memory[name] = value;
+        if (getConsent() === "accepted")
+            writeCookie(name, value);
     }
-    function setConsent(accepted) {
-        // Remembering the decision itself is necessary, so it is always persistent.
-        writeCookie("cookie_consent", accepted ? "accepted" : "denied", true);
+    /** Stores the decision and lets the server adjust the login cookie to it. */
+    async function setConsent(accepted) {
+        // Keep the current values for this page before the cookies change.
         for (const name of PREFERENCE_COOKIES) {
-            const value = getCookie(name);
+            const value = getPreference(name);
             if (value !== undefined)
-                writeCookie(name, value, accepted);
+                memory[name] = value;
         }
-    }
-    function detectLanguage() {
-        const saved = getCookie("lang");
-        if (isLanguage(saved))
-            return saved;
-        for (const preferred of navigator.languages || [navigator.language]) {
-            const code = (preferred || "").slice(0, 2).toLowerCase();
-            if (isLanguage(code))
-                return code;
+        // Remembering the decision itself is necessary, so it is always kept.
+        writeCookie("cookie_consent", accepted ? "accepted" : "denied");
+        for (const name of PREFERENCE_COOKIES) {
+            if (!accepted)
+                deleteCookie(name);
+            else if (memory[name] !== undefined)
+                writeCookie(name, memory[name]);
         }
-        return "en";
+        await fetch("/api/cookie_consent", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: JSON.stringify({ accepted }),
+        }).catch(() => { });
     }
-    let language = detectLanguage();
+    // Preference cookies from before a denial are not used anymore.
+    if (getConsent() !== "accepted")
+        PREFERENCE_COOKIES.forEach(deleteCookie);
+    const saved = getPreference("lang");
+    let language = isLanguage(saved) ? saved : "en";
     document.documentElement.lang = language;
     /** Translates a key and fills in {placeholders}. Falls back to English, then to the key. */
     function t(key, params = {}) {
@@ -119,6 +134,7 @@ const SeresI18n = (() => {
         getCookie,
         getConsent,
         setConsent,
+        getPreference,
         setPreference,
     };
 })();
