@@ -1,6 +1,6 @@
 # 💬 SereS
 
-![Beta Status](https://img.shields.io/badge/Status-Web%20Beta-orange.svg)
+[![Beta Status](https://img.shields.io/badge/Status-Web%20Beta-orange.svg)](https://status.seres-chat.com)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white)](https://discord.gg/vx3vKcp2Kq)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -73,7 +73,8 @@ pip install -r requirements.txt
 python src/backend/app.py
 ```
 
-The frontend is written in TypeScript. The compiled `.js` files are committed;
+The frontend is written in TypeScript (`src/frontend/`). It is compiled to
+`src/public/` and the compiled `.js` files are committed;
 after changing a `.ts` file run `tsc -p .` in the repository root.
 
 Backend tests: `pip install pytest && python -m pytest tests`

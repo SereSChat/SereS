@@ -46,7 +46,7 @@
           </span>
         </div>
         <div class="list-search-wrap">
-          <input type="search" id="list-search" class="list-search" placeholder="Search..." data-i18n-placeholder="app.search" autocomplete="off" />
+          <input type="search" id="list-search" name="chat-search" class="list-search" placeholder="Search..." data-i18n-placeholder="app.search" autocomplete="off" />
         </div>
 
         <div id="dm-list" class="list-view-panel active" data-panel="chats"></div>
@@ -259,13 +259,16 @@
           <code class="fingerprint" id="my-fingerprint">...</code>
         </div>
 
-        <div class="settings-section">
+        <!-- Own form with a username field, so password managers fill this form
+             instead of putting the saved login into the first text field (the search). -->
+        <form class="settings-section" id="password-form" autocomplete="on">
           <p data-i18n="settings.passwordText">Change password:</p>
+          <input type="text" id="password-username" class="visually-hidden" autocomplete="username" tabindex="-1" aria-hidden="true" readonly />
           <input type="password" id="old-password" placeholder="Current password" data-i18n-placeholder="settings.oldPassword" autocomplete="current-password" />
           <input type="password" id="new-password" placeholder="New password (min. 8 characters)" data-i18n-placeholder="settings.newPassword" autocomplete="new-password" />
           <input type="password" id="new-password-repeat" placeholder="Repeat new password" data-i18n-placeholder="settings.repeatPassword" autocomplete="new-password" />
-          <button class="modal-btn secondary-btn" type="button" id="change-password-btn" data-i18n="settings.changeButton">Change password</button>
-        </div>
+          <button class="modal-btn secondary-btn" type="submit" id="change-password-btn" data-i18n="settings.changeButton">Change password</button>
+        </form>
 
         <h4 class="modal-warning" id="settings-warning"></h4>
         <div class="modal-buttons">

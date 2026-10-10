@@ -1676,6 +1676,7 @@
 
   function showOwnName() {
     $("my-username-display").textContent = nameOf(me);
+    ($("password-username") as HTMLInputElement).value = me.username;
     $("mobile-username").textContent = nameOf(me);
     if (!current) $("current-chat-name").textContent = t("app.welcomeUser", { name: nameOf(me) });
   }
@@ -1878,7 +1879,10 @@
     });
     $("upload-avatar-btn").addEventListener("click", uploadAvatar);
     $("theme-toggle-btn").addEventListener("click", toggleTheme);
-    $("change-password-btn").addEventListener("click", changePassword);
+    $("password-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      changePassword();
+    });
     $("cookie-settings-btn").addEventListener("click", () => {
       closeAllModals();
       SeresConsent.show();
