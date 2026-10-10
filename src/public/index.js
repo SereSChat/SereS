@@ -398,14 +398,19 @@
         return h("div", { className: "section-title", text });
     }
     function userRow(user, status, actions) {
-        return h("div", { className: "list-item request-list-item" }, [
-            avatarEl(user.username, { label: nameOf(user) }),
-            h("div", { className: "item-info" }, [
-                h("span", { className: "item-name", text: nameOf(user) }),
-                h("span", { className: "item-status", text: status }),
-            ]),
-            h("div", { className: "request-actions" }, actions),
+        const avatar = avatarEl(user.username, { label: nameOf(user) });
+        const info = h("div", { className: "item-info" }, [
+            h("span", { className: "item-name", text: nameOf(user) }),
+            h("span", { className: "item-status", text: status }),
         ]);
+        [avatar, info].forEach((el) => el.addEventListener("click", () => openProfile(user.username)));
+        const row = h("div", { className: "list-item request-list-item" }, [avatar, info, h("div", { className: "request-actions" }, actions)]);
+        row.addEventListener("contextmenu", (event) => {
+            event.preventDefault();
+            openUserMenu(user, event);
+        });
+        onLongPress(row, () => openProfile(user.username));
+        return row;
     }
     function action(label, fn, confirmText) {
         return async () => {
@@ -458,13 +463,21 @@
     }
     function openUserMenu(user, event) {
         closeFloatingMenus();
+        const isFriend = friends.friends.some((friend) => friend.id === user.id);
+        const isBlocked = friends.blocked.some((blocked) => blocked.id === user.id);
         const menu = h("div", { className: "floating-menu" }, [
-            button(t("friends.messageMenu"), "floating-item", () => {
+            h("div", { className: "floating-title", text: nameOf(user) }),
+            button(t("profile.view"), "floating-item", () => openProfile(user.username)),
+            isBlocked ? button(t("friends.unblock"), "floating-item", () => {
+                closeFloatingMenus();
+                unblockUser(user);
+            }) : null,
+            isFriend ? button(t("friends.messageMenu"), "floating-item", () => {
                 closeFloatingMenus();
                 startDm(user.username);
-            }),
-            button(t("friends.remove"), "floating-item", action("remove", () => post("/api/friends/remove", { username: user.username }), t("friends.removeConfirm", { name: nameOf(user) }))),
-            button(t("friends.block"), "floating-item danger", action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirmLong", { name: nameOf(user) }))),
+            }) : null,
+            isFriend ? button(t("friends.remove"), "floating-item", action("remove", () => post("/api/friends/remove", { username: user.username }), t("friends.removeConfirm", { name: nameOf(user) }))) : null,
+            isBlocked ? null : button(t("friends.block"), "floating-item danger", action("block", () => post("/api/block", { username: user.username }), t("friends.blockConfirmLong", { name: nameOf(user) }))),
         ]);
         const rect = event.currentTarget.getBoundingClientRect();
         menu.style.top = Math.min(rect.bottom + 4, window.innerHeight - 140) + "px";
@@ -477,6 +490,9 @@
         const isGroup = chat.type === "group";
         const menu = h("div", { className: "floating-menu" }, [
             h("div", { className: "floating-title", text: chat.name }),
+            !isGroup && chat.other_user
+                ? button(t("profile.view"), "floating-item", () => openProfile(chat.other_user))
+                : null,
             button(isGroup ? "🚪 " + t("info.leave") : "🗑️ " + t("info.deleteChat"), "floating-item danger", action(isGroup ? "leave" : "delete", async () => {
                 closeFloatingMenus();
                 await post(`/api/chats/${encodeURIComponent(chat.id)}/${isGroup ? "leave" : "delete"}`);
@@ -789,11 +805,14 @@
             className: "message-row" + (own ? " message-own" : "") + (compact ? " message-compact" : ""),
             attrs: { "data-id": message.id },
         });
-        row.appendChild(compact ? h("div", { className: "message-avatar spacer" }) : avatarEl(message.sender || sender, { className: "message-avatar", label: sender }));
+        const avatar = compact ? h("div", { className: "message-avatar spacer" }) : avatarEl(message.sender || sender, { className: "message-avatar", label: sender });
+        if (!compact && message.sender)
+            avatar.addEventListener("click", () => openProfile(message.sender));
+        row.appendChild(avatar);
         const wrapper = h("div", { className: "message-content-wrapper" });
         if (!compact) {
             const header = h("div", { className: "message-header" }, [
-                h("span", { className: "message-sender", text: own ? t("msg.you") : sender }),
+                h("span", { className: "message-sender clickable", text: own ? t("msg.you") : sender }),
                 h("span", { className: "message-timestamp", text: formatTime(message.created_at) }),
             ]);
             if (view.type === "legacy") {
@@ -803,6 +822,8 @@
                     title: t("msg.notEncryptedHint"),
                 }));
             }
+            if (message.sender)
+                header.firstElementChild.addEventListener("click", () => openProfile(message.sender));
             wrapper.appendChild(header);
         }
         const textDiv = h("div", { className: "message-text" });
@@ -1057,8 +1078,10 @@
             for (const member of members) {
                 const fp = await memberFingerprint(member);
                 const isMe = member.id === me.id;
+                const memberAvatar = avatarEl(member.username, { label: nameOf(member) });
+                memberAvatar.addEventListener("click", () => openProfile(member.username));
                 const row = h("div", { className: "member-row" }, [
-                    avatarEl(member.username, { label: nameOf(member) }),
+                    memberAvatar,
                     h("div", { className: "item-info" }, [
                         h("span", {
                             className: "item-name",
@@ -1534,6 +1557,11 @@
         $("btn-new-group").addEventListener("click", openNewGroupModal);
         $("confirm-new-group").addEventListener("click", createGroup);
         $("chat-info-btn").addEventListener("click", openChatInfo);
+        document.querySelector(".chat-title").addEventListener("click", () => {
+            if (current && current.details && current.details.type === "dm" && current.details.other_user) {
+                openProfile(current.details.other_user);
+            }
+        });
         $("send-btn").addEventListener("click", sendMessage);
         $("menu-toggle").addEventListener("click", () => document.querySelector(".sidebar")?.classList.toggle("open"));
         $("user-menu-trigger").addEventListener("click", () => $("user-dropdown-menu").classList.toggle("modal-hidden"));
