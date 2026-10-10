@@ -1967,7 +1967,8 @@ body.bright-body .chat-info-body {
   left: 50%;
   bottom: 16px;
   transform: translateX(-50%);
-  z-index: 3000;
+  /* Above the mobile sidebar, dialogs and menus; only alerts are higher. */
+  z-index: 99999998;
   width: min(520px, calc(100% - 32px));
   box-sizing: border-box;
   padding: 16px 18px;
@@ -2458,4 +2459,10 @@ body.bright-body .language-select {
   overflow: hidden;
   clip: rect(0 0 0 0);
   border: 0 !important;
+}
+
+.settings-hint {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+  color: #8696a0;
 }

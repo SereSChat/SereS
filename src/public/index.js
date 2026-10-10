@@ -1465,10 +1465,15 @@
             warning.textContent = errorText(error);
         }
     }
+    function showCookieStatus() {
+        const consent = SeresI18n.getConsent();
+        $("cookie-status").textContent = t(consent === "accepted" ? "settings.cookiesAccepted" : consent === "denied" ? "settings.cookiesDenied" : "settings.cookiesUndecided");
+    }
     async function openSettings() {
         $("user-dropdown-menu").classList.add("modal-hidden");
         $("settings-warning").textContent = "";
         $("display-name-input").value = nameOf(me);
+        showCookieStatus();
         openModal("settings-modal");
         const fp = await SeresCrypto.fingerprint(identity.pubEcdh, identity.pubSign);
         $("my-fingerprint").textContent = fp.replace(/(.{4})/g, "$1 ").trim();
@@ -1539,6 +1544,7 @@
     /** Renders all generated texts again after the language was switched. */
     function rerenderLanguage() {
         shownCache.clear();
+        showCookieStatus();
         chatsSignature = "";
         friendsSignature = "";
         if (current) {
@@ -1622,9 +1628,12 @@
             event.preventDefault();
             changePassword();
         });
+        // Shows the cookie banner again (above the settings) to change the decision.
         $("cookie-settings-btn").addEventListener("click", () => {
-            closeAllModals();
-            SeresConsent.show();
+            SeresConsent.show(() => {
+                showCookieStatus();
+                showAlert(t("settings.cookiesSaved"));
+            });
         });
         $("language-select-slot").appendChild(SeresI18n.languageSelect(rerenderLanguage));
         document.querySelectorAll(".list-view-toggle").forEach((btn) => {
