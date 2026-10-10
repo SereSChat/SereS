@@ -156,6 +156,20 @@
       </div>
     </div>
 
+    <!-- Opened someone's invite link -->
+    <div class="modal-overlay modal-hidden" id="invite-accept-modal">
+      <div class="modal-box">
+        <h3 data-i18n="invite.acceptTitle">Friend request</h3>
+        <div class="info-user" id="invite-accept-user"></div>
+        <p id="invite-accept-text"></p>
+        <h4 class="modal-warning" id="warning-invite"></h4>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.cancel">Cancel</button>
+          <button class="modal-btn confirm-btn" type="button" id="confirm-invite" data-i18n="invite.send">Send request</button>
+        </div>
+      </div>
+    </div>
+
     <!-- New direct message -->
     <div class="modal-overlay modal-hidden" id="new-dm-modal">
       <div class="modal-box">

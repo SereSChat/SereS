@@ -71,7 +71,8 @@
     }
     await SeresCrypto.clearIdentities();
     await SeresCrypto.saveIdentity(identity);
-    window.location.href = "index.html?login=true";
+    const invite = new URLSearchParams(window.location.search).get("invite");
+    window.location.href = "index.html?login=true" + (invite ? "&invite=" + encodeURIComponent(invite) : "");
   }
 
   async function login() {
@@ -212,7 +213,9 @@
       }
     });
 
-    const reason = new URLSearchParams(window.location.search).get("reason");
+    const params = new URLSearchParams(window.location.search);
+    const reason = params.get("reason");
+    if (params.get("invite")) setWarning(t("invite.loginHint"));
     if (reason === "keys") {
       setWarning(t("login.reloginKeys"));
     }

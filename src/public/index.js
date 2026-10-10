@@ -22,6 +22,9 @@
     let chatsSignature = "";
     let friendsSignature = "";
     let sending = false;
+    // Invite token from a link like /?invite=..., kept across the login redirect.
+    const pendingInvite = new URLSearchParams(window.location.search).get("invite");
+    let inviteToAccept = null;
     const userKeys = new Map();
     const shownCache = new Map();
     const avatarState = new Map();
@@ -57,6 +60,15 @@
         });
         return btn;
     }
+    function goToLogin(reason) {
+        const params = new URLSearchParams();
+        if (reason)
+            params.set("reason", reason);
+        if (pendingInvite)
+            params.set("invite", pendingInvite);
+        const query = params.toString();
+        window.location.href = "login.html" + (query ? "?" + query : "");
+    }
     async function api(path, options = {}) {
         const response = await fetch(path, {
             method: options.method || (options.body ? "POST" : "GET"),
@@ -65,7 +77,7 @@
             body: options.body ? JSON.stringify(options.body) : undefined,
         });
         if (response.status === 401) {
-            window.location.href = "login.html";
+            goToLogin();
             throw new ApiError("Not logged in", 401);
         }
         const data = await response.json().catch(() => ({}));
@@ -1221,6 +1233,42 @@
         const url = $("invite-link").value;
         navigator.share({ title: "SereS", text: t("invite.shareText"), url }).catch(() => { });
     }
+    /** Asks whether to send a friend request to the owner of an opened invite link. */
+    async function showInvite(token) {
+        try {
+            const data = await api("/api/invite/" + encodeURIComponent(token));
+            const name = data.user.username;
+            if (data.status === "self")
+                return showAlert(t("invite.self"));
+            if (data.status === "friends")
+                return showAlert(t("invite.alreadyFriends", { name }));
+            inviteToAccept = { token, name };
+            const userBox = $("invite-accept-user");
+            userBox.textContent = "";
+            userBox.append(avatarEl(name), h("strong", { text: name }));
+            $("invite-accept-text").textContent = t("invite.acceptText", { name });
+            $("warning-invite").textContent = "";
+            openModal("invite-accept-modal");
+        }
+        catch (error) {
+            showAlert(error instanceof ApiError && error.status === 404 ? t("invite.invalid") : errorText(error));
+        }
+    }
+    async function acceptInvite() {
+        if (!inviteToAccept)
+            return;
+        try {
+            const { token, name } = inviteToAccept;
+            const data = await post("/api/invite/" + encodeURIComponent(token) + "/accept");
+            closeAllModals();
+            showAlert(t(data.status === "friends" ? "friends.nowFriends" : "friends.requestSent", { name }));
+            inviteToAccept = null;
+            await refreshAll();
+        }
+        catch (error) {
+            $("warning-invite").textContent = errorText(error);
+        }
+    }
     async function openSettings() {
         $("user-dropdown-menu").classList.add("modal-hidden");
         $("settings-warning").textContent = "";
@@ -1376,6 +1424,7 @@
             openInviteModal();
         });
         $("add-friend-invite").addEventListener("click", () => openInviteModal());
+        $("confirm-invite").addEventListener("click", acceptInvite);
         $("invite-copy").addEventListener("click", copyInvite);
         $("invite-share").addEventListener("click", shareInvite);
         $("invite-renew").addEventListener("click", () => {
@@ -1458,7 +1507,7 @@
             me = (await api("/api/me")).user;
         }
         catch {
-            window.location.href = "login.html";
+            goToLogin();
             return;
         }
         const stored = await SeresCrypto.loadIdentity(me.id);
@@ -1466,7 +1515,7 @@
             // No unlocked keys on this device (or they don't match the account): log in again.
             await fetch("/api/logout", { method: "POST", credentials: "same-origin" }).catch(() => { });
             await SeresCrypto.clearIdentities();
-            window.location.href = "login.html?reason=keys";
+            goToLogin("keys");
             return;
         }
         identity = stored;
@@ -1480,6 +1529,11 @@
         if (window.innerWidth <= 768)
             document.querySelector(".sidebar")?.classList.add("open");
         await refreshAll();
+        if (pendingInvite) {
+            // Remove the token from the address bar so a reload doesn't ask again.
+            window.history.replaceState({}, document.title, window.location.pathname);
+            showInvite(pendingInvite);
+        }
         window.setInterval(() => {
             if (document.visibilityState === "visible")
                 syncCurrent().catch(() => { });
