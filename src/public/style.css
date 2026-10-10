@@ -2440,3 +2440,10 @@ body.bright-body .language-select {
   font-size: 0.75rem;
   opacity: 0.7;
 }
+
+.list-hint {
+  margin: 0 16px 8px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: #8696a0;
+}

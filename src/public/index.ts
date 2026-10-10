@@ -589,11 +589,12 @@
     }
 
     if (friends.blocked.length) {
-      list.appendChild(sectionTitle(t("friends.blocked")));
+      list.appendChild(sectionTitle(`${t("friends.blocked")} — ${friends.blocked.length}`));
+      list.appendChild(h("p", { className: "list-hint", text: t("friends.blockedHint") }));
       friends.blocked.filter(match).forEach((user) => {
         list.appendChild(
-          userRow(user, t("friends.blocked"), [
-            button(t("friends.unblock"), "request-action-btn discard", action("unblock", () => post("/api/unblock", { username: user.username }))),
+          userRow(user, t("profile.blockedStatus"), [
+            button(t("friends.unblock"), "request-action-btn accept", () => unblockUser(user)),
           ]),
         );
       });
@@ -1251,7 +1252,10 @@
         body.appendChild(
           h("div", { className: "info-actions" }, [
             isBlocked
-              ? button(t("friends.unblock"), "pill-btn", action("unblock", () => post("/api/unblock", { username: other.username })))
+              ? button(t("friends.unblock"), "pill-btn", async () => {
+                  await unblockUser(other);
+                  openChatInfo();
+                })
               : button(
                   t("friends.block"),
                   "pill-btn danger",
