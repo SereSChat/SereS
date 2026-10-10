@@ -347,12 +347,15 @@
             const avatarName = chat.type === "dm" && chat.other_user ? chat.other_user : chat.name;
             item.appendChild(avatarEl(avatarName, { group: chat.type === "group", label: chat.name }));
             const nameRow = h("div", { className: "item-row" }, [
-                h("span", { className: "item-name", text: chat.name }),
+                h("span", { className: "item-name" }, [
+                    document.createTextNode(chat.name),
+                    chat.muted ? h("span", { className: "muted-icon", text: "🔕", title: t("chat.muted") }) : null,
+                ]),
                 h("span", { className: "item-time", text: formatListTime(chat.last_activity) }),
             ]);
             const statusRow = h("div", { className: "item-row" }, [
                 h("span", { className: "item-status", text: previewText(chat, previews[index]) }),
-                chat.unread > 0 ? h("span", { className: "unread-badge", text: chat.unread > 99 ? "99+" : String(chat.unread) }) : null,
+                chat.unread > 0 ? h("span", { className: "unread-badge" + (chat.muted ? " muted" : ""), text: chat.unread > 99 ? "99+" : String(chat.unread) }) : null,
             ]);
             item.appendChild(h("div", { className: "item-info" }, [nameRow, statusRow]));
             item.addEventListener("click", () => openChat(chat.id));
@@ -376,7 +379,8 @@
         applyTheme();
     }
     function updateBadges() {
-        const unread = chats.reduce((sum, chat) => sum + chat.unread, 0);
+        // Muted chats keep their own counter but don't count in the totals.
+        const unread = chats.reduce((sum, chat) => sum + (chat.muted ? 0 : chat.unread), 0);
         const chatsBadge = $("chats-badge");
         chatsBadge.textContent = unread ? String(unread) : "";
         const requestsBadge = $("requests-badge");
