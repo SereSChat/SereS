@@ -2059,3 +2059,20 @@ body.bright-body .language-select {
   border-color: #d1d7db;
   color: #111b21;
 }
+
+/* ------------------------------------------------------------ chat menu */
+
+.floating-title {
+  padding: 10px 14px 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #8696a0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-list-item {
+  -webkit-touch-callout: none;
+  user-select: none;
+}

@@ -415,6 +415,11 @@
       ]);
       item.appendChild(h("div", { className: "item-info" }, [nameRow, statusRow]));
       item.addEventListener("click", () => openChat(chat.id));
+      item.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        openChatMenu(chat, event.clientX, event.clientY);
+      });
+      onLongPress(item, (x, y) => openChatMenu(chat, x, y));
       list.appendChild(item);
     });
     if (!list.childElementCount) {
@@ -554,6 +559,63 @@
     menu.style.top = Math.min(rect.bottom + 4, window.innerHeight - 140) + "px";
     menu.style.left = Math.max(8, rect.right - 180) + "px";
     document.body.appendChild(menu);
+  }
+
+  /** Right-click (or long-press) menu of a chat: delete a direct chat or leave a group. */
+  function openChatMenu(chat: ChatSummary, x: number, y: number) {
+    closeFloatingMenus();
+    const isGroup = chat.type === "group";
+    const menu = h("div", { className: "floating-menu" }, [
+      h("div", { className: "floating-title", text: chat.name }),
+      button(
+        isGroup ? "🚪 " + t("info.leave") : "🗑️ " + t("info.deleteChat"),
+        "floating-item danger",
+        action(
+          isGroup ? "leave" : "delete",
+          async () => {
+            closeFloatingMenus();
+            await post(`/api/chats/${encodeURIComponent(chat.id)}/${isGroup ? "leave" : "delete"}`);
+            if (current && current.id === chat.id) closeChat();
+            chatsSignature = "";
+          },
+          t(isGroup ? "info.leaveConfirm" : "info.deleteChatConfirm"),
+        ),
+      ),
+    ]);
+    document.body.appendChild(menu);
+    // Keep the menu inside the viewport.
+    menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + "px";
+    menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + "px";
+  }
+
+  /** Calls handler after a finger rests ~0.5s on the element (iOS has no contextmenu event). */
+  function onLongPress(element: HTMLElement, handler: (x: number, y: number) => void) {
+    let timer: number | null = null;
+    let fired = false;
+    const cancel = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    element.addEventListener(
+      "touchstart",
+      (event) => {
+        fired = false;
+        const touch = event.touches[0];
+        timer = window.setTimeout(() => {
+          fired = true;
+          if (navigator.vibrate) navigator.vibrate(15);
+          handler(touch.clientX, touch.clientY);
+        }, 500);
+      },
+      { passive: true },
+    );
+    element.addEventListener("touchmove", cancel, { passive: true });
+    element.addEventListener("touchend", (event) => {
+      cancel();
+      // Don't open the chat when the finger is lifted after the menu appeared.
+      if (fired) event.preventDefault();
+    });
+    element.addEventListener("touchcancel", cancel);
   }
 
   function closeFloatingMenus() {
