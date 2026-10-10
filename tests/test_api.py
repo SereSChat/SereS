@@ -115,6 +115,21 @@ def test_invite_link_sends_friend_request(make_client):
     assert make_client().get(f"/api/invite/{new_token}").status_code == 401
 
 
+def test_display_name_is_shown_and_not_unique(alice_bob, make_client):
+    alice, bob = alice_bob
+    assert alice.post("/api/profile/display_name", json={"display_name": "  Ali   Cat "}).json["display_name"] == "Ali Cat"
+    assert bob.post("/api/profile/display_name", json={"display_name": "Ali Cat"}).status_code == 200
+    assert alice.post("/api/profile/display_name", json={"display_name": "x" * 33}).status_code == 400
+
+    friend = bob.get("/api/friends").json["friends"][0]
+    assert friend["username"] == "alice" and friend["display_name"] == "Ali Cat"
+    chat_id = bob.post("/api/chats", json={"type": "dm", "username": "alice"}).json["chat_id"]
+    assert bob.get(f"/api/chats/{chat_id}").json["chat"]["name"] == "Ali Cat"
+
+    assert alice.post("/api/profile/display_name", json={"display_name": ""}).json["display_name"] == "alice"
+    assert alice.get("/api/me").json["user"]["display_name"] == "alice"
+
+
 def test_security_headers(make_client):
     res = make_client().get("/api/online")
     assert "script-src 'self'" in res.headers["Content-Security-Policy"]

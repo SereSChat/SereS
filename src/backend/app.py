@@ -285,8 +285,14 @@ def find_user_by_login(nameomail):
     ).fetchone()
 
 
+def display_name(row):
+    """The name shown in the app: the display name, or the username without one."""
+    keys = row.keys() if hasattr(row, "keys") else ()
+    return (row["display_name"] if "display_name" in keys else None) or row["username"]
+
+
 def public_user(row):
-    return {"id": row["id"], "username": row["username"]}
+    return {"id": row["id"], "username": row["username"], "display_name": display_name(row)}
 
 
 def own_user(row):
@@ -540,9 +546,9 @@ def user_keys():
         return ok(users=[])
     placeholders = ",".join("?" * len(ids))
     rows = get_db().execute(
-        f"SELECT id, username, pub_ecdh, pub_sign FROM users WHERE id IN ({placeholders})", ids
+        f"SELECT id, username, display_name, pub_ecdh, pub_sign FROM users WHERE id IN ({placeholders})", ids
     )
-    return ok(users=[dict(row) for row in rows])
+    return ok(users=[{**dict(row), "display_name": display_name(row)} for row in rows])
 
 
 # --------------------------------------------------------------------------
@@ -663,23 +669,23 @@ def list_friends():
     me_id = current_user()["id"]
     return ok(
         friends=users_by_query(
-            """SELECT u.id, u.username FROM friendships f JOIN users u
+            """SELECT u.id, u.username, u.display_name FROM friendships f JOIN users u
                ON u.id = CASE WHEN f.user_a = ? THEN f.user_b ELSE f.user_a END
-               WHERE f.user_a = ? OR f.user_b = ? ORDER BY u.username COLLATE NOCASE""",
+               WHERE f.user_a = ? OR f.user_b = ? ORDER BY COALESCE(u.display_name, u.username) COLLATE NOCASE""",
             (me_id, me_id, me_id),
         ),
         incoming=users_by_query(
-            """SELECT u.id, u.username FROM friend_requests r JOIN users u ON u.id = r.from_id
+            """SELECT u.id, u.username, u.display_name FROM friend_requests r JOIN users u ON u.id = r.from_id
                WHERE r.to_id = ? ORDER BY r.created_at""",
             (me_id,),
         ),
         outgoing=users_by_query(
-            """SELECT u.id, u.username FROM friend_requests r JOIN users u ON u.id = r.to_id
+            """SELECT u.id, u.username, u.display_name FROM friend_requests r JOIN users u ON u.id = r.to_id
                WHERE r.from_id = ? ORDER BY r.created_at""",
             (me_id,),
         ),
         blocked=users_by_query(
-            """SELECT u.id, u.username FROM blocks b JOIN users u ON u.id = b.blocked_id
+            """SELECT u.id, u.username, u.display_name FROM blocks b JOIN users u ON u.id = b.blocked_id
                WHERE b.blocker_id = ? ORDER BY u.username COLLATE NOCASE""",
             (me_id,),
         ),
@@ -905,7 +911,7 @@ def require_membership(chat_id):
 
 def chat_members(chat_id):
     return get_db().execute(
-        """SELECT u.id, u.username, u.pub_ecdh, u.pub_sign, m.role
+        """SELECT u.id, u.username, u.display_name, u.pub_ecdh, u.pub_sign, m.role
            FROM chat_members m JOIN users u ON u.id = m.user_id
            WHERE m.chat_id = ? ORDER BY m.joined_at, u.username COLLATE NOCASE""",
         (chat_id,),
@@ -931,6 +937,7 @@ def serialize_message(row):
         "id": row["id"],
         "sender_id": row["sender_id"],
         "sender": row["sender"],
+        "sender_display": row["sender_display"] or row["sender"],
         "kind": row["kind"],
         "payload": payload,
         "created_at": row["created_at"],
@@ -938,7 +945,7 @@ def serialize_message(row):
     }
 
 
-MESSAGE_SELECT = """SELECT m.*, u.username AS sender FROM messages m
+MESSAGE_SELECT = """SELECT m.*, u.username AS sender, u.display_name AS sender_display FROM messages m
                     LEFT JOIN users u ON u.id = m.sender_id"""
 
 
@@ -988,7 +995,7 @@ def chat_summary(chat, me_id):
         other = others[0] if others else None
         summary["other_user"] = other["username"] if other else "Unknown User"
         summary["other_user_id"] = other["id"] if other else None
-        summary["name"] = summary["other_user"]
+        summary["name"] = display_name(other) if other else summary["other_user"]
         summary["blocked"] = bool(other) and is_blocked_between(me_id, other["id"])
     return summary
 
@@ -1040,6 +1047,21 @@ def open_dm(me_id, other):
     return ok(chat_id=chat_id, message="Chat created successfully!")
 
 
+@app.route("/api/profile/display_name", methods=["POST"])
+@login_required
+def set_display_name():
+    value = json_body().get("display_name")
+    if value is not None and not isinstance(value, str):
+        return error("Invalid display name")
+    value = " ".join((value or "").split())  # no line breaks or repeated spaces
+    if len(value) > 32:
+        return error("Display name can be at most 32 characters")
+    conn = get_db()
+    conn.execute("UPDATE users SET display_name = ? WHERE id = ?", (value or None, current_user()["id"]))
+    conn.commit()
+    return ok(display_name=value or current_user()["username"])
+
+
 def validate_group_name(value):
     if not isinstance(value, str) or not value.strip() or len(value.strip()) > 64:
         flask.abort(flask.make_response(error("Group name must be 1-64 characters")))
@@ -1078,7 +1100,7 @@ def create_chat():
     add_member(conn, chat_id, me["id"], "owner")
     for user_id in members:
         add_member(conn, chat_id, user_id)
-    add_system_message(conn, chat_id, "created", actor=me["username"], name=name)
+    add_system_message(conn, chat_id, "created", actor=display_name(me), name=name)
     conn.commit()
     return ok(chat_id=chat_id, message="Group created successfully!")
 
@@ -1095,7 +1117,7 @@ def chat_details(chat_id):
     chat = require_membership(chat_id)
     me_id = current_user()["id"]
     summary = chat_summary(chat, me_id)
-    summary["members"] = [dict(row) for row in chat_members(chat_id)]
+    summary["members"] = [{**dict(row), "display_name": display_name(row)} for row in chat_members(chat_id)]
     summary["owner_id"] = chat["owner_id"]
     return ok(chat=summary)
 
@@ -1253,7 +1275,7 @@ def add_group_member(chat_id):
         return error("The group is full")
     with db.write_transaction(conn):
         add_member(conn, chat_id, other["id"])
-        add_system_message(conn, chat_id, "added", actor=me["username"], target=other["username"])
+        add_system_message(conn, chat_id, "added", actor=display_name(me), target=display_name(other))
     return ok(message="Member added")
 
 
@@ -1272,7 +1294,7 @@ def leave_chat(conn, chat, user):
             "UPDATE chat_members SET role = 'owner' WHERE chat_id = ? AND user_id = ?",
             (chat_id, new_owner["id"]),
         )
-    add_system_message(conn, chat_id, "left", actor=user["username"])
+    add_system_message(conn, chat_id, "left", actor=display_name(user))
 
 
 @app.route("/api/chats/<chat_id>/members/remove", methods=["POST"])
@@ -1289,7 +1311,7 @@ def remove_group_member(chat_id):
     conn = get_db()
     with db.write_transaction(conn):
         conn.execute("DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, other["id"]))
-        add_system_message(conn, chat_id, "removed", actor=me["username"], target=other["username"])
+        add_system_message(conn, chat_id, "removed", actor=display_name(me), target=display_name(other))
     return ok(message="Member removed")
 
 
@@ -1303,7 +1325,7 @@ def rename_group(chat_id):
     conn = get_db()
     with db.write_transaction(conn):
         conn.execute("UPDATE chats SET name = ? WHERE id = ?", (name, chat_id))
-        add_system_message(conn, chat_id, "renamed", actor=me["username"], name=name)
+        add_system_message(conn, chat_id, "renamed", actor=display_name(me), name=name)
     return ok(message="Group renamed")
 
 

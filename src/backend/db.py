@@ -98,6 +98,8 @@ USER_COLUMNS = {
     "pub_sign": "TEXT",
     "enc_private": "TEXT",
     "created_at": "TEXT",
+    # Shown instead of the username; does not have to be unique.
+    "display_name": "TEXT",
 }
 
 
