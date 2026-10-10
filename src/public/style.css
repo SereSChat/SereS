@@ -2127,3 +2127,89 @@ body.bright-body .language-select {
 .link-btn:hover {
   text-decoration: underline;
 }
+
+/* ------------------------------------------------------- mobile: layout */
+
+@media (max-width: 768px) {
+  html,
+  body {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* dvh = the height that is really visible (without the browser's address bar). */
+  body,
+  .sidebar,
+  .main-chat,
+  .modal-overlay {
+    height: 100vh !important;
+    height: 100dvh !important;
+  }
+
+  .sidebar-header,
+  .chat-header {
+    height: auto !important;
+    min-height: 56px;
+    padding-top: env(safe-area-inset-top) !important;
+    padding-left: max(16px, env(safe-area-inset-left)) !important;
+    padding-right: max(16px, env(safe-area-inset-right)) !important;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+  }
+
+  .user-menu-container {
+    padding-bottom: max(12px, env(safe-area-inset-bottom)) !important;
+  }
+
+  .input-container {
+    padding: 8px max(10px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom))
+      max(10px, env(safe-area-inset-left)) !important;
+    gap: 8px !important;
+  }
+
+  .input-box {
+    border-radius: 22px !important;
+    padding: 10px 16px !important;
+  }
+
+  /* iOS zooms into inputs with a font size below 16px. */
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
+  .messages-container {
+    padding: 12px 10px !important;
+    gap: 8px !important;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .list-container,
+  .list-view-panel {
+    overscroll-behavior: contain;
+  }
+
+  .alert-box {
+    top: calc(12px + env(safe-area-inset-top)) !important;
+    width: calc(100% - 32px);
+    box-sizing: border-box;
+    text-align: center;
+  }
+
+  .cookie-banner {
+    bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 480px) {
+  .login {
+    padding-top: calc(48px + env(safe-area-inset-top));
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .floating-controls {
+    top: calc(10px + env(safe-area-inset-top));
+  }
+}
