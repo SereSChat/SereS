@@ -115,6 +115,45 @@ def test_invite_link_sends_friend_request(make_client):
     assert make_client().get(f"/api/invite/{new_token}").status_code == 401
 
 
+def test_display_name_is_shown_and_not_unique(alice_bob, make_client):
+    alice, bob = alice_bob
+    assert alice.post("/api/profile/display_name", json={"display_name": "  Ali   Cat "}).json["display_name"] == "Ali Cat"
+    assert bob.post("/api/profile/display_name", json={"display_name": "Ali Cat"}).status_code == 200
+    assert alice.post("/api/profile/display_name", json={"display_name": "x" * 33}).status_code == 400
+
+    friend = bob.get("/api/friends").json["friends"][0]
+    assert friend["username"] == "alice" and friend["display_name"] == "Ali Cat"
+    chat_id = bob.post("/api/chats", json={"type": "dm", "username": "alice"}).json["chat_id"]
+    assert bob.get(f"/api/chats/{chat_id}").json["chat"]["name"] == "Ali Cat"
+
+    assert alice.post("/api/profile/display_name", json={"display_name": ""}).json["display_name"] == "alice"
+    assert alice.get("/api/me").json["user"]["display_name"] == "alice"
+
+
+def test_unblock_restores_friendship(alice_bob):
+    alice, bob = alice_bob
+    alice.post("/api/block", json={"username": "bob"})
+    assert alice.get("/api/friends").json["friends"] == []
+    assert alice.post("/api/unblock", json={"username": "bob"}).json["friends"] is True
+    assert [u["username"] for u in alice.get("/api/friends").json["friends"]] == ["bob"]
+
+
+def test_profile_and_mute(alice_bob):
+    alice, bob = alice_bob
+    chat_id = alice.post("/api/chats", json={"type": "dm", "username": "bob"}).json["chat_id"]
+    profile = alice.get("/api/users/bob/profile").json
+    assert profile["friend"] and not profile["muted"] and not profile["blocked"]
+    assert profile["user"]["pub_ecdh"]
+
+    assert alice.post("/api/users/mute", json={"username": "bob", "muted": True}).json["muted"] is True
+    assert alice.get("/api/users/bob/profile").json["muted"] is True
+    assert alice.get(f"/api/chats/{chat_id}").json["chat"]["muted"] is True
+    assert bob.get(f"/api/chats/{chat_id}").json["chat"]["muted"] is False
+    alice.post("/api/users/mute", json={"username": "bob", "muted": False})
+    assert alice.get(f"/api/chats/{chat_id}").json["chat"]["muted"] is False
+    assert alice.get("/api/users/nobody/profile").status_code == 404
+
+
 def test_security_headers(make_client):
     res = make_client().get("/api/online")
     assert "script-src 'self'" in res.headers["Content-Security-Policy"]
