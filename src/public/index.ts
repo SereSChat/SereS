@@ -1304,7 +1304,13 @@
     openModal("chat-info-modal");
   }
 
-  function verifyToggle(userId: string, fp: string, verified: Record<string, string>, compact = false) {
+  function verifyToggle(
+    userId: string,
+    fp: string,
+    verified: Record<string, string>,
+    compact = false,
+    onChange: () => void = openChatInfo,
+  ) {
     const isVerified = verified[userId] === fp;
     return button(
       t(isVerified ? "info.verified" : compact ? "info.verify" : "info.markVerified"),
@@ -1314,9 +1320,133 @@
         if (store[userId] === fp) delete store[userId];
         else store[userId] = fp;
         writeStore("verified", store);
-        openChatInfo();
+        onChange();
       },
     );
+  }
+
+  // ------------------------------------------------------------ profile
+
+  /** Asks, unblocks and tells whether the friendship came back. */
+  async function unblockUser(user: UserRef) {
+    if (!window.confirm(t("profile.unblockConfirm", { name: nameOf(user) }))) return;
+    try {
+      const data = await post("/api/unblock", { username: user.username });
+      showAlert(t(data.friends ? "profile.unblockedFriend" : "profile.unblocked", { name: nameOf(user) }));
+    } catch (error) {
+      showAlert(errorText(error));
+    }
+    chatsSignature = "";
+    await refreshAll();
+  }
+
+  async function openProfile(username: string, showCode = false) {
+    closeFloatingMenus();
+    let data: any;
+    try {
+      data = await api(`/api/users/${encodeURIComponent(username)}/profile`);
+    } catch (error) {
+      showAlert(errorText(error));
+      return;
+    }
+    const user = data.user;
+    const name = nameOf(user);
+    const reopen = () => openProfile(username, showCode);
+    const status = data.is_me
+      ? t("profile.you")
+      : data.blocked
+        ? t("profile.blockedStatus")
+        : data.friend
+          ? t("profile.friend")
+          : data.request === "outgoing"
+            ? t("profile.requestOutgoing")
+            : data.request === "incoming"
+              ? t("profile.requestIncoming")
+              : t("profile.notFriend");
+
+    const head = $("profile-head");
+    head.textContent = "";
+    head.append(
+      avatarEl(user.username, { className: "avatar profile-avatar", label: name }),
+      h("h3", { className: "profile-name", text: name }),
+      h("span", { className: "profile-username", text: "@" + user.username }),
+      h("span", { className: "profile-status", text: (data.muted ? "🔕 " : "") + status }),
+    );
+
+    const actions = $("profile-actions");
+    actions.textContent = "";
+    const codeBox = $("profile-code");
+    codeBox.textContent = "";
+    codeBox.classList.add("modal-hidden");
+
+    if (!data.is_me) {
+      if (data.friend) {
+        actions.append(button(t("friends.messageMenu"), "pill-btn", () => startDm(user.username)));
+      } else if (!data.blocked && data.request !== "outgoing") {
+        actions.append(
+          button(t("profile.addFriend"), "pill-btn", async () => {
+            const url = data.request === "incoming" ? "/api/friends/accept" : "/api/friends/request";
+            try {
+              await post(url, { username: user.username });
+            } catch (error) {
+              showAlert(errorText(error));
+            }
+            await refreshAll();
+            reopen();
+          }),
+        );
+      }
+
+      const fp = await memberFingerprint(user);
+      if (fp) {
+        actions.append(
+          button(t(showCode ? "profile.hideCode" : "profile.showCode"), "pill-btn secondary", () =>
+            openProfile(username, !showCode),
+          ),
+        );
+        if (showCode) {
+          const myFp = await SeresCrypto.fingerprint(identity.pubEcdh, identity.pubSign);
+          codeBox.append(
+            h("p", { text: t("info.securityCode") }),
+            h("code", { className: "safety-number", text: await SeresCrypto.safetyNumber(myFp, fp) }),
+            verifyToggle(user.id, fp, readStore("verified"), false, reopen),
+          );
+          codeBox.classList.remove("modal-hidden");
+        }
+      }
+
+      actions.append(
+        button(t(data.muted ? "profile.unmute" : "profile.mute"), "pill-btn secondary", async () => {
+          try {
+            await post("/api/users/mute", { username: user.username, muted: !data.muted });
+            showAlert(t(data.muted ? "profile.unmuted" : "profile.muted", { name }));
+          } catch (error) {
+            showAlert(errorText(error));
+          }
+          chatsSignature = "";
+          await refreshAll();
+          reopen();
+        }),
+        data.blocked
+          ? button(t("friends.unblock"), "pill-btn", async () => {
+              await unblockUser(user);
+              reopen();
+            })
+          : button(
+              t("friends.block"),
+              "pill-btn danger",
+              action(
+                "block",
+                async () => {
+                  await post("/api/block", { username: user.username });
+                  reopen();
+                },
+                t("friends.blockConfirmLong", { name }),
+              ),
+            ),
+      );
+    }
+    $("profile-modal").classList.remove("modal-hidden");
   }
 
   // ------------------------------------------------------------- modals
@@ -1669,6 +1799,7 @@
       if (window.confirm(t("invite.renewConfirm"))) openInviteModal(true);
     });
     $("invite-link").addEventListener("focus", () => ($("invite-link") as HTMLInputElement).select());
+    $("profile-close").addEventListener("click", () => $("profile-modal").classList.add("modal-hidden"));
     $("save-display-name").addEventListener("click", saveDisplayName);
     $("display-name-input").addEventListener("keydown", (event) => {
       if ((event as KeyboardEvent).key === "Enter") saveDisplayName();
