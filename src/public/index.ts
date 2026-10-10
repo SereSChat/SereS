@@ -469,6 +469,43 @@
     const requestsBadge = $("requests-badge");
     requestsBadge.textContent = friends.incoming.length ? String(friends.incoming.length) : "";
     document.title = unread ? `(${unread}) SereS` : "SereS";
+    updateFavicon(unread);
+  }
+
+  let faviconImage: HTMLImageElement | null = null;
+  let faviconCount = 0;
+
+  /** Draws a red badge with the number of unread messages onto the tab icon. */
+  function updateFavicon(count: number) {
+    if (count === faviconCount) return;
+    faviconCount = count;
+    const link = document.querySelector<HTMLLinkElement>("link[rel~='icon']");
+    if (!link) return;
+    if (!count) {
+      link.href = "assets/favicon.png";
+      return;
+    }
+    const draw = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 64;
+      const ctx = canvas.getContext("2d");
+      if (!ctx || !faviconImage || !faviconCount) return;
+      ctx.drawImage(faviconImage, 0, 0, 64, 64);
+      ctx.fillStyle = "#ea0038";
+      ctx.beginPath();
+      ctx.arc(44, 20, 20, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 26px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(faviconCount > 9 ? "9+" : String(faviconCount), 44, 21);
+      link.href = canvas.toDataURL("image/png");
+    };
+    if (faviconImage && faviconImage.complete) return draw();
+    faviconImage = new Image();
+    faviconImage.onload = draw;
+    faviconImage.src = "assets/favicon.png";
   }
 
   // --------------------------------------------------------- friends view
