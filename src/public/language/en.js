@@ -12,7 +12,7 @@ window.SeresLang.en = {
   "common.themeToggle": "🌓 Mode",
 
   "consent.title": "🍪 Cookies",
-  "consent.text": "SereS uses cookies that are required for logging in. With your consent, we also remember your language and design choice.",
+  "consent.text": "SereS needs a cookie to keep you logged in. If you accept, you stay logged in and your language and design are remembered. If you deny, nothing is saved and you are logged out when you close the browser.",
   "consent.accept": "Accept",
   "consent.deny": "Deny",
 
@@ -183,4 +183,22 @@ window.SeresLang.en = {
   "info.verified": "✔ Verified",
   "info.verify": "Verify",
   "info.markVerified": "Mark as verified",
+
+  "invite.menu": "🔗 Invite link & QR code",
+  "invite.fromAddFriend": "🔗 Share your invite link or QR code instead",
+  "invite.title": "Invite friends",
+  "invite.text": "Share this link or let someone scan the QR code. They can then send you a friend request with one tap.",
+  "invite.copy": "Copy link",
+  "invite.copied": "Link copied!",
+  "invite.share": "Share",
+  "invite.shareText": "Add me as a friend on SereS!",
+  "invite.renew": "New link",
+  "invite.renewConfirm": "Create a new link? The old link and QR code will stop working.",
+  "invite.acceptTitle": "Friend request",
+  "invite.acceptText": "Do you want to send {name} a friend request?",
+  "invite.send": "Send request",
+  "invite.self": "This is your own invite link. Share it with your friends!",
+  "invite.alreadyFriends": "You and {name} are already friends.",
+  "invite.invalid": "This invite link is invalid or no longer works.",
+  "invite.loginHint": "Log in or register to accept the friend invite.",
 };

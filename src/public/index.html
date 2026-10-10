@@ -2,7 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#202c33" />
     <title>SereS</title>
     <link rel="icon" type="image/png" href="assets/favicon.png" />
     <link rel="stylesheet" href="style.css" />
@@ -23,7 +24,7 @@
         </button>
       </div>
       <div class="mobile-welcome">
-        <span data-i18n="app.welcome">Welcome</span> <span id="mobile-username" data-i18n="common.loading">Loading...</span>
+        <span data-i18n="app.welcome">Welcome</span> <span id="mobile-username">Loading...</span>
       </div>
 
       <div class="list-container">
@@ -59,11 +60,12 @@
             <span id="user-avatar-text">?</span>
             <img id="user-avatar-img" src="" alt="Avatar" class="hidden-el" />
           </div>
-          <span class="item-name" id="my-username-display" data-i18n="common.loading">Loading...</span>
+          <span class="item-name" id="my-username-display">Loading...</span>
         </div>
 
         <div class="user-dropdown modal-hidden" id="user-dropdown-menu">
           <a href="#" class="dropdown-item" id="menu-settings" data-i18n="menu.settings">⚙️ Settings</a>
+          <a href="#" class="dropdown-item" id="menu-invite" data-i18n="invite.menu">🔗 Invite link &amp; QR code</a>
           <hr class="dropdown-divider" />
           <a href="https://discord.gg/vx3vKcp2Kq" class="dropdown-item" target="_blank" rel="noopener noreferrer">
             <img src="assets/discord.png" alt="Discord Logo" />
@@ -92,7 +94,7 @@
           </svg>
         </button>
         <div class="chat-title">
-          <span id="current-chat-name" data-i18n="app.welcome">Welcome</span>
+          <span id="current-chat-name">Welcome</span>
           <span id="current-chat-sub" class="chat-subtitle"></span>
         </div>
         <button class="header-icon-button modal-hidden" type="button" id="chat-info-btn" title="Chat info" data-i18n-title="app.chatInfo">ⓘ</button>
@@ -126,10 +128,45 @@
         <h3 data-i18n="modal.addFriendTitle">Add friend</h3>
         <p data-i18n="modal.addFriendText">Enter the username of your friend.</p>
         <input type="text" id="friends-username-input" placeholder="Username" data-i18n-placeholder="modal.username" maxlength="20" />
+        <button class="link-btn" type="button" id="add-friend-invite" data-i18n="invite.fromAddFriend">
+          🔗 Share your invite link or QR code instead
+        </button>
         <h4 class="modal-warning" id="warning-add-friend"></h4>
         <div class="modal-buttons">
           <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.cancel">Cancel</button>
           <button class="modal-btn confirm-btn" type="button" id="confirm-add-friend" data-i18n="common.add">Add</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Invite link & QR code -->
+    <div class="modal-overlay modal-hidden" id="invite-modal">
+      <div class="modal-box">
+        <h3 data-i18n="invite.title">Invite friends</h3>
+        <p data-i18n="invite.text">Share this link or let someone scan the QR code.</p>
+        <div class="qr-wrap" id="invite-qr"></div>
+        <input type="text" id="invite-link" class="invite-link" readonly />
+        <div class="invite-actions">
+          <button class="pill-btn" type="button" id="invite-copy" data-i18n="invite.copy">Copy link</button>
+          <button class="pill-btn" type="button" id="invite-share" data-i18n="invite.share">Share</button>
+          <button class="pill-btn secondary" type="button" id="invite-renew" data-i18n="invite.renew">New link</button>
+        </div>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.close">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Opened someone's invite link -->
+    <div class="modal-overlay modal-hidden" id="invite-accept-modal">
+      <div class="modal-box">
+        <h3 data-i18n="invite.acceptTitle">Friend request</h3>
+        <div class="info-user" id="invite-accept-user"></div>
+        <p id="invite-accept-text"></p>
+        <h4 class="modal-warning" id="warning-invite"></h4>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.cancel">Cancel</button>
+          <button class="modal-btn confirm-btn" type="button" id="confirm-invite" data-i18n="invite.send">Send request</button>
         </div>
       </div>
     </div>
@@ -165,7 +202,7 @@
     <!-- Chat info -->
     <div class="modal-overlay modal-hidden" id="chat-info-modal">
       <div class="modal-box modal-wide">
-        <h3 id="chat-info-title" data-i18n="app.chatInfo">Chat info</h3>
+        <h3 id="chat-info-title">Chat info</h3>
         <div id="chat-info-body" class="chat-info-body"></div>
         <div class="modal-buttons">
           <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.close">Close</button>
@@ -224,6 +261,7 @@
     <script src="language/fr.js"></script>
     <script src="i18n.js"></script>
     <script src="consent.js"></script>
+    <script src="qr.js"></script>
     <script src="crypto.js"></script>
     <script src="index.js"></script>
   </body>
