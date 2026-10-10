@@ -216,6 +216,12 @@
         <h3 data-i18n="settings.title">⚙️ Settings</h3>
 
         <div class="settings-section">
+          <p data-i18n="settings.displayNameText">Display name:</p>
+          <input type="text" id="display-name-input" maxlength="32" placeholder="Display name" data-i18n-placeholder="settings.displayNamePlaceholder" />
+          <button class="modal-btn secondary-btn" type="button" id="save-display-name" data-i18n="settings.displayNameSave">Save name</button>
+        </div>
+
+        <div class="settings-section">
           <p data-i18n="settings.avatarText">Profile picture (PNG, JPG, GIF or WebP, max 2MB):</p>
           <input type="file" id="avatar-upload-input" accept="image/png,image/jpeg,image/gif,image/webp" />
           <button class="modal-btn secondary-btn" type="button" id="upload-avatar-btn" data-i18n="settings.uploadButton">Upload picture</button>

@@ -604,7 +604,7 @@
     }
     function closeChat() {
         current = null;
-        $("current-chat-name").textContent = t("app.welcomeUser", { name: me.username });
+        $("current-chat-name").textContent = t("app.welcomeUser", { name: nameOf(me) });
         $("current-chat-sub").textContent = "";
         $("chat-input-area").classList.add("modal-hidden");
         $("chat-info-btn").classList.add("modal-hidden");
@@ -1023,7 +1023,7 @@
         if (details.type === "dm") {
             const other = members.find((m) => m.id !== me.id);
             if (other) {
-                body.appendChild(h("div", { className: "info-user" }, [avatarEl(other.username), h("strong", { text: other.username })]));
+                body.appendChild(h("div", { className: "info-user" }, [avatarEl(other.username, { label: nameOf(other) }), h("strong", { text: nameOf(other) })]));
                 const fp = await memberFingerprint(other);
                 if (fp) {
                     const code = await SeresCrypto.safetyNumber(myFp, fp);
@@ -1035,7 +1035,7 @@
                 body.appendChild(h("div", { className: "info-actions" }, [
                     isBlocked
                         ? button(t("friends.unblock"), "pill-btn", action("unblock", () => post("/api/unblock", { username: other.username })))
-                        : button(t("friends.block"), "pill-btn danger", action("block", () => post("/api/block", { username: other.username }), t("friends.blockConfirm", { name: other.username }))),
+                        : button(t("friends.block"), "pill-btn danger", action("block", () => post("/api/block", { username: other.username }), t("friends.blockConfirm", { name: nameOf(other) }))),
                     button(t("info.deleteChat"), "pill-btn danger", action("delete", async () => {
                         await post(`/api/chats/${encodeURIComponent(details.id)}/delete`);
                         closeAllModals();
@@ -1058,11 +1058,11 @@
                 const fp = await memberFingerprint(member);
                 const isMe = member.id === me.id;
                 const row = h("div", { className: "member-row" }, [
-                    avatarEl(member.username),
+                    avatarEl(member.username, { label: nameOf(member) }),
                     h("div", { className: "item-info" }, [
                         h("span", {
                             className: "item-name",
-                            text: (isMe ? t("msg.you") : member.username) + (member.role === "owner" ? t("info.owner") : ""),
+                            text: (isMe ? t("msg.you") : nameOf(member)) + (member.role === "owner" ? t("info.owner") : ""),
                         }),
                         h("span", {
                             className: "item-status",
@@ -1073,7 +1073,7 @@
                 if (!isMe && fp) {
                     const code = await SeresCrypto.safetyNumber(myFp, fp);
                     row.appendChild(button(t("info.code"), "request-action-btn more", () => {
-                        window.alert(t("info.codeAlert", { name: member.username, code }));
+                        window.alert(t("info.codeAlert", { name: nameOf(member), code }));
                     }));
                     row.appendChild(verifyToggle(member.id, fp, verified, true));
                 }
@@ -1081,7 +1081,7 @@
                     row.appendChild(button(t("info.remove"), "request-action-btn discard", action("remove", async () => {
                         await post(`/api/chats/${encodeURIComponent(details.id)}/members/remove`, { username: member.username });
                         await openChatInfo();
-                    }, t("info.removeConfirm", { name: member.username }))));
+                    }, t("info.removeConfirm", { name: nameOf(member) }))));
                 }
                 body.appendChild(row);
             }
@@ -1243,7 +1243,7 @@
     async function showInvite(token) {
         try {
             const data = await api("/api/invite/" + encodeURIComponent(token));
-            const name = data.user.username;
+            const name = nameOf(data.user);
             if (data.status === "self")
                 return showAlert(t("invite.self"));
             if (data.status === "friends")
@@ -1251,7 +1251,7 @@
             inviteToAccept = { token, name };
             const userBox = $("invite-accept-user");
             userBox.textContent = "";
-            userBox.append(avatarEl(name), h("strong", { text: name }));
+            userBox.append(avatarEl(data.user.username, { label: name }), h("strong", { text: name }));
             $("invite-accept-text").textContent = t("invite.acceptText", { name });
             $("warning-invite").textContent = "";
             openModal("invite-accept-modal");
@@ -1275,9 +1275,33 @@
             $("warning-invite").textContent = errorText(error);
         }
     }
+    function showOwnName() {
+        $("my-username-display").textContent = nameOf(me);
+        $("mobile-username").textContent = nameOf(me);
+        if (!current)
+            $("current-chat-name").textContent = t("app.welcomeUser", { name: nameOf(me) });
+    }
+    async function saveDisplayName() {
+        const warning = $("settings-warning");
+        warning.textContent = "";
+        try {
+            const data = await post("/api/profile/display_name", {
+                display_name: $("display-name-input").value,
+            });
+            me.display_name = data.display_name;
+            $("display-name-input").value = data.display_name;
+            showOwnName();
+            loadOwnAvatar();
+            showAlert(t("settings.displayNameSaved"));
+        }
+        catch (error) {
+            warning.textContent = errorText(error);
+        }
+    }
     async function openSettings() {
         $("user-dropdown-menu").classList.add("modal-hidden");
         $("settings-warning").textContent = "";
+        $("display-name-input").value = nameOf(me);
         openModal("settings-modal");
         const fp = await SeresCrypto.fingerprint(identity.pubEcdh, identity.pubSign);
         $("my-fingerprint").textContent = fp.replace(/(.{4})/g, "$1 ").trim();
@@ -1285,7 +1309,7 @@
     function loadOwnAvatar() {
         const text = $("user-avatar-text");
         const img = $("user-avatar-img");
-        text.textContent = me.username.charAt(0).toUpperCase();
+        text.textContent = nameOf(me).charAt(0).toUpperCase();
         $("user-avatar").style.backgroundColor = colorFor(me.username);
         fetch("/api/get_avatar", { credentials: "same-origin" })
             .then((response) => {
@@ -1438,6 +1462,11 @@
                 openInviteModal(true);
         });
         $("invite-link").addEventListener("focus", () => $("invite-link").select());
+        $("save-display-name").addEventListener("click", saveDisplayName);
+        $("display-name-input").addEventListener("keydown", (event) => {
+            if (event.key === "Enter")
+                saveDisplayName();
+        });
         $("upload-avatar-btn").addEventListener("click", uploadAvatar);
         $("theme-toggle-btn").addEventListener("click", toggleTheme);
         $("change-password-btn").addEventListener("click", changePassword);
@@ -1526,9 +1555,7 @@
         }
         identity = stored;
         userKeys.set(me.id, { id: me.id, username: me.username, pub_ecdh: me.pub_ecdh, pub_sign: me.pub_sign });
-        $("my-username-display").textContent = me.username;
-        $("mobile-username").textContent = me.username;
-        $("current-chat-name").textContent = t("app.welcomeUser", { name: me.username });
+        showOwnName();
         loadOwnAvatar();
         bindEvents();
         switchView("chats");
