@@ -675,6 +675,7 @@
     function closeChat() {
         cancelEdit();
         sendTyping(false);
+        $("typing-bubble").classList.add("modal-hidden");
         current = null;
         $("current-chat-name").textContent = t("app.welcomeUser", { name: nameOf(me) });
         $("current-chat-sub").textContent = "";
@@ -730,6 +731,9 @@
         const sub = $("current-chat-sub");
         sub.textContent = current.typing.length ? typingText(current.typing) : current.subtitle;
         sub.classList.toggle("typing", current.typing.length > 0);
+        // Animated bubble above the input field.
+        $("typing-bubble-text").textContent = current.typing.length ? typingText(current.typing) : "";
+        $("typing-bubble").classList.toggle("modal-hidden", current.typing.length === 0);
     }
     // Tell the others that we are typing (at most every 3 seconds, stops after sending).
     let typingSentAt = 0;

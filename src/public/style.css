@@ -2585,3 +2585,65 @@ body.bright-body .edit-bar {
 .message-ticks.read {
   color: #53bdeb;
 }
+
+/* "… is typing" bubble with bouncing dots, bottom left above the input */
+.typing-bubble {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  margin: 0 0 6px 16px;
+  padding: 6px 12px;
+  border-radius: 16px 16px 16px 4px;
+  background-color: #202c33;
+  color: #8696a0;
+  font-size: 0.75rem;
+  animation: fade-in 0.2s ease-out;
+}
+
+.typing-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.typing-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #00a884;
+  animation: typing-bounce 1.2s infinite ease-in-out;
+}
+
+.typing-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+body.bright-body .typing-bubble {
+  background-color: #ffffff;
+  color: #54656f;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-dots i {
+    animation: none;
+    opacity: 0.8;
+  }
+}
