@@ -2558,3 +2558,10 @@ body.bright-body .edit-bar {
 .messages-container {
   overflow-x: hidden;
 }
+
+/* "is typing…" in the chat header and the chat list */
+.chat-subtitle.typing,
+.item-status.typing {
+  color: #00a884 !important;
+  font-style: italic;
+}

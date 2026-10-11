@@ -47,6 +47,7 @@
     other_user_id?: string;
     blocked?: boolean;
     muted?: boolean;
+    typing?: UserRef[];
     members?: Member[];
     owner_id?: string;
   }
@@ -66,6 +67,8 @@
     lastReadSent: number;
     changedKeys: Member[];
     missingKeys: Member[];
+    subtitle: string;
+    typing: UserRef[];
   }
 
   class ApiError extends Error {
@@ -437,7 +440,9 @@
         h("span", { className: "item-time", text: formatListTime(chat.last_activity) }),
       ]);
       const statusRow = h("div", { className: "item-row" }, [
-        h("span", { className: "item-status", text: previewText(chat, previews[index]) }),
+        chat.typing && chat.typing.length
+          ? h("span", { className: "item-status typing", text: t("typing.short") })
+          : h("span", { className: "item-status", text: previewText(chat, previews[index]) }),
         chat.unread > 0 ? h("span", { className: "unread-badge" + (chat.muted ? " muted" : ""), text: chat.unread > 99 ? "99+" : String(chat.unread) }) : null,
       ]);
       item.appendChild(h("div", { className: "item-info" }, [nameRow, statusRow]));
@@ -759,6 +764,7 @@
 
   async function openChat(chatId: string) {
     cancelEdit();
+    sendTyping(false);
     current = {
       id: chatId,
       details: null,
@@ -769,6 +775,8 @@
       lastReadSent: 0,
       changedKeys: [],
       missingKeys: [],
+      subtitle: "",
+      typing: [],
     };
     const opened = current;
     document.querySelectorAll(".chat-list-item").forEach((item) => {
@@ -799,6 +807,7 @@
 
   function closeChat() {
     cancelEdit();
+    sendTyping(false);
     current = null;
     $("current-chat-name").textContent = t("app.welcomeUser", { name: nameOf(me) });
     $("current-chat-sub").textContent = "";
@@ -830,13 +839,43 @@
     opened.changedKeys = changed;
     opened.missingKeys = missing;
     $("current-chat-name").textContent = details.name;
-    $("current-chat-sub").textContent =
+    opened.subtitle =
       details.type === "group"
         ? t("chat.groupSub", { count: details.member_count })
         : details.blocked
           ? t("chat.blocked")
           : t("chat.dmSub");
+    renderSubtitle();
     renderKeyWarning();
+  }
+
+  function typingText(users: UserRef[]) {
+    if (users.length === 1) return t("typing.one", { name: nameOf(users[0]) });
+    if (users.length === 2) return t("typing.two", { first: nameOf(users[0]), second: nameOf(users[1]) });
+    return t("typing.many");
+  }
+
+  /** The line under the chat name: who is typing, otherwise members / encryption. */
+  function renderSubtitle() {
+    if (!current) return;
+    const sub = $("current-chat-sub");
+    sub.textContent = current.typing.length ? typingText(current.typing) : current.subtitle;
+    sub.classList.toggle("typing", current.typing.length > 0);
+  }
+
+  // Tell the others that we are typing (at most every 3 seconds, stops after sending).
+  let typingSentAt = 0;
+  let typingChat: string | null = null;
+
+  function sendTyping(typing: boolean) {
+    if (!current) return;
+    const now = Date.now();
+    if (typing && typingChat === current.id && now - typingSentAt < 3000) return;
+    if (!typing && typingChat === null) return;
+    const chatId = typing ? current.id : typingChat!;
+    typingSentAt = typing ? now : 0;
+    typingChat = typing ? current.id : null;
+    post(`/api/chats/${encodeURIComponent(chatId)}/typing`, { typing }).catch(() => {});
   }
 
   function renderKeyWarning() {
@@ -905,6 +944,8 @@
       `/api/chats/${encodeURIComponent(opened.id)}/messages?since_rev=${opened.maxRev}&limit=200`,
     );
     if (current !== opened) return;
+    opened.typing = data.typing || [];
+    renderSubtitle();
     if (mergeMessages(data.messages)) {
       await renderMessages({});
       markRead();
@@ -1229,6 +1270,7 @@
           }
           input.value = "";
           autoGrow(input);
+          typingChat = null; // the server forgets it when a message arrives
           await syncCurrent();
           loadChats().catch(() => {});
           return;
@@ -2030,7 +2072,10 @@
         sendMessage();
       }
     });
-    input.addEventListener("input", () => autoGrow(input));
+    input.addEventListener("input", () => {
+      autoGrow(input);
+      sendTyping(input.value.trim().length > 0);
+    });
 
     document.addEventListener("click", (event) => {
       const target = event.target as Element;
