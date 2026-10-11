@@ -1057,6 +1057,7 @@ def chat_summary(chat, me_id):
         summary["name"] = display_name(other) if other else summary["other_user"]
         summary["blocked"] = bool(other) and is_blocked_between(me_id, other["id"])
         summary["muted"] = bool(other) and is_muted(me_id, other["id"])
+    summary["typing"] = typing_users(chat["id"], me_id)
     return summary
 
 
@@ -1209,7 +1210,11 @@ def get_chat_messages(chat_id):
     if rows:
         advance_receipt(conn, chat_id, current_user()["id"], "delivered", max(row["seq"] for row in rows))
         conn.commit()
-    return ok(messages=[serialize_message(row) for row in rows], has_more=len(rows) == limit)
+    return ok(
+        messages=[serialize_message(row) for row in rows],
+        has_more=len(rows) == limit,
+        typing=typing_users(chat_id, current_user()["id"]),
+    )
 
 
 @app.route("/api/get_messages")
@@ -1279,6 +1284,8 @@ def post_message(chat_id):
             )
     except sqlite3.IntegrityError:
         return error("Duplicate message id", 409)
+    with typing_lock:
+        typing_state.pop((chat_id, me_id), None)
     return ok(message="Message sent successfully!", seq=cur.lastrowid, rev=rev)
 
 
@@ -1323,6 +1330,42 @@ def edit_message(chat_id, message_id):
     if cur.rowcount == 0:
         return error("Message not found", 404)
     return ok(message="Message edited")
+
+
+# Who is typing right now. Kept in memory only: it is short-lived and not worth storing.
+TYPING_SECONDS = 6
+typing_state = {}  # (chat_id, user_id) -> time.monotonic() of the last signal
+typing_lock = threading.Lock()
+
+
+def typing_users(chat_id, me_id):
+    now = time.monotonic()
+    with typing_lock:
+        ids = [
+            uid for (cid, uid), at in typing_state.items()
+            if cid == chat_id and uid != me_id and now - at < TYPING_SECONDS
+        ]
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    rows = get_db().execute(f"SELECT id, username, display_name FROM users WHERE id IN ({placeholders})", ids)
+    return [public_user(row) for row in rows]
+
+
+@app.route("/api/chats/<chat_id>/typing", methods=["POST"])
+@login_required
+def set_typing(chat_id):
+    require_membership(chat_id)
+    key = (chat_id, current_user()["id"])
+    now = time.monotonic()
+    with typing_lock:
+        if json_body().get("typing") is False:
+            typing_state.pop(key, None)
+        else:
+            typing_state[key] = now
+        for stale in [k for k, at in typing_state.items() if now - at >= TYPING_SECONDS]:
+            del typing_state[stale]
+    return ok()
 
 
 @app.route("/api/chats/<chat_id>/read", methods=["POST"])

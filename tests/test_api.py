@@ -190,6 +190,18 @@ def test_edit_and_delete_message(alice_bob):
     assert alice.post(f"/api/chats/{chat_id}/messages/{message_id}/edit", json={"payload": new_payload}).status_code == 404
 
 
+def test_typing_indicator(alice_bob):
+    alice, bob = alice_bob
+    chat_id = alice.post("/api/chats", json={"type": "dm", "username": "bob"}).json["chat_id"]
+    assert bob.get(f"/api/chats/{chat_id}/messages").json["typing"] == []
+    alice.post(f"/api/chats/{chat_id}/typing", json={"typing": True})
+    assert [u["username"] for u in bob.get(f"/api/chats/{chat_id}/messages").json["typing"]] == ["alice"]
+    assert alice.get(f"/api/chats/{chat_id}/messages").json["typing"] == []
+    assert bob.get("/api/chats").json["chats"][0]["typing"][0]["username"] == "alice"
+    alice.post(f"/api/chats/{chat_id}/typing", json={"typing": False})
+    assert bob.get(f"/api/chats/{chat_id}/messages").json["typing"] == []
+
+
 def test_security_headers(make_client):
     res = make_client().get("/api/online")
     assert "script-src 'self'" in res.headers["Content-Security-Policy"]
