@@ -642,6 +642,7 @@
             missingKeys: [],
             subtitle: "",
             typing: [],
+            receipts: null,
         };
         const opened = current;
         document.querySelectorAll(".chat-list-item").forEach((item) => {
@@ -660,6 +661,7 @@
             const data = await api(`/api/chats/${encodeURIComponent(chatId)}/messages?limit=50`);
             if (current !== opened)
                 return;
+            opened.receipts = data.receipts || null;
             mergeMessages(data.messages);
             opened.hasMore = data.has_more;
             await renderMessages({ forceBottom: true });
@@ -809,7 +811,9 @@
             return;
         opened.typing = data.typing || [];
         renderSubtitle();
-        if (mergeMessages(data.messages)) {
+        const receiptsChanged = JSON.stringify(data.receipts || null) !== JSON.stringify(opened.receipts);
+        opened.receipts = data.receipts || null;
+        if (mergeMessages(data.messages) || receiptsChanged) {
             await renderMessages({});
             markRead();
         }
@@ -924,6 +928,8 @@
         }
         if (message.edited_at)
             textDiv.appendChild(h("span", { className: "message-edited", text: t("msg.edited") }));
+        if (own && message.kind === "e2e")
+            textDiv.appendChild(ticks(opened, message));
         textDiv.title = parseTime(message.created_at).toLocaleString(SeresI18n.getLanguage());
         wrapper.appendChild(textDiv);
         row.appendChild(wrapper);
@@ -973,6 +979,17 @@
         };
         element.addEventListener("touchend", end);
         element.addEventListener("touchcancel", end);
+    }
+    /** ✓ sent, ✓✓ delivered to everyone, blue ✓✓ seen by everyone. */
+    function ticks(opened, message) {
+        const receipts = opened.receipts;
+        const read = !!receipts && receipts.read_seq >= message.seq;
+        const delivered = read || (!!receipts && receipts.delivered_seq >= message.seq);
+        return h("span", {
+            className: "message-ticks" + (read ? " read" : delivered ? " delivered" : ""),
+            text: delivered ? "✓✓" : "✓",
+            title: t(read ? "msgInfo.read" : delivered ? "msgInfo.delivered" : "msgInfo.sent"),
+        });
     }
     /** Right-click / long-press menu of a message. */
     function openMessageMenu(opened, message, view, x, y) {

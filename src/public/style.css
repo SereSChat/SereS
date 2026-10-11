@@ -2572,3 +2572,16 @@ body.bright-body .edit-bar {
   font-size: 0.8rem;
   color: #8696a0;
 }
+
+/* Ticks on own messages */
+.message-ticks {
+  margin-left: 6px;
+  font-size: 0.7rem;
+  letter-spacing: -2px;
+  color: #8696a0;
+  white-space: nowrap;
+}
+
+.message-ticks.read {
+  color: #53bdeb;
+}
