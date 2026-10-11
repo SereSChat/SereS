@@ -999,6 +999,7 @@ def serialize_message(row):
         "kind": row["kind"],
         "payload": payload,
         "created_at": row["created_at"],
+        "edited_at": row["edited_at"],
         "deleted": bool(row["deleted"]),
     }
 
@@ -1028,7 +1029,7 @@ def chat_summary(chat, me_id):
     conn = get_db()
     floor = max(chat["joined_seq"], chat["cleared_seq"])
     last = conn.execute(
-        MESSAGE_SELECT + " WHERE m.chat_id = ? AND m.seq > ? ORDER BY m.seq DESC LIMIT 1",
+        MESSAGE_SELECT + " WHERE m.chat_id = ? AND m.seq > ? AND m.deleted = 0 ORDER BY m.seq DESC LIMIT 1",
         (chat["id"], floor),
     ).fetchone()
     unread = conn.execute(
@@ -1300,6 +1301,28 @@ def delete_message(chat_id, message_id):
     if cur.rowcount == 0:
         return error("Message not found", 404)
     return ok(message="Message deleted")
+
+
+@app.route("/api/chats/<chat_id>/messages/<message_id>/edit", methods=["POST"])
+@login_required
+def edit_message(chat_id, message_id):
+    """Replaces the encrypted content of an own message (re-encrypted by the client)."""
+    me_id = current_user()["id"]
+    require_membership(chat_id)
+    members = chat_members(chat_id)
+    problem = validate_envelope(json_body().get("payload"), [m["id"] for m in members])
+    if problem:
+        return error(problem, 409 if "members" in problem else 400)
+    conn = get_db()
+    with db.write_transaction(conn):
+        cur = conn.execute(
+            """UPDATE messages SET payload = ?, edited_at = ?, rev = ?
+               WHERE id = ? AND chat_id = ? AND sender_id = ? AND kind = 'e2e' AND deleted = 0""",
+            (json.dumps(json_body()["payload"]), db.now_iso(), db.next_rev(conn), message_id, chat_id, me_id),
+        )
+    if cur.rowcount == 0:
+        return error("Message not found", 404)
+    return ok(message="Message edited")
 
 
 @app.route("/api/chats/<chat_id>/read", methods=["POST"])

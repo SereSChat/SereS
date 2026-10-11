@@ -172,6 +172,24 @@ def test_message_info_shows_delivered_and_read(alice_bob):
     assert member["read"] and member["read_at"] and member["username"] == "bob"
 
 
+def test_edit_and_delete_message(alice_bob):
+    alice, bob = alice_bob
+    chat_id = alice.post("/api/chats", json={"type": "dm", "username": "bob"}).json["chat_id"]
+    message_id = str(uuid.uuid4())
+    members = [alice.user_id, bob.user_id]
+    alice.post(f"/api/chats/{chat_id}/messages", json={"id": message_id, "payload": envelope(members)})
+
+    new_payload = envelope(members)
+    assert bob.post(f"/api/chats/{chat_id}/messages/{message_id}/edit", json={"payload": new_payload}).status_code == 404
+    assert alice.post(f"/api/chats/{chat_id}/messages/{message_id}/edit", json={"payload": new_payload}).status_code == 200
+    message = bob.get(f"/api/chats/{chat_id}/messages").json["messages"][-1]
+    assert message["payload"] == new_payload and message["edited_at"]
+
+    alice.post(f"/api/chats/{chat_id}/messages/{message_id}/delete")
+    assert bob.get(f"/api/chats").json["chats"][0]["last_message"] is None
+    assert alice.post(f"/api/chats/{chat_id}/messages/{message_id}/edit", json={"payload": new_payload}).status_code == 404
+
+
 def test_security_headers(make_client):
     res = make_client().get("/api/online")
     assert "script-src 'self'" in res.headers["Content-Security-Policy"]

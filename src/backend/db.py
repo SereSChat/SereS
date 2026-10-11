@@ -137,6 +137,7 @@ EXTRA_COLUMNS = {
     # Remembers a friendship so unblocking restores it.
     "blocks": {"was_friend": "INTEGER NOT NULL DEFAULT 0"},
     "chat_members": {"delivered_seq": "INTEGER NOT NULL DEFAULT 0"},
+    "messages": {"edited_at": "TEXT"},
 }
 
 
