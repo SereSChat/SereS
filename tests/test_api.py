@@ -154,6 +154,24 @@ def test_profile_and_mute(alice_bob):
     assert alice.get("/api/users/nobody/profile").status_code == 404
 
 
+def test_message_info_shows_delivered_and_read(alice_bob):
+    alice, bob = alice_bob
+    chat_id = alice.post("/api/chats", json={"type": "dm", "username": "bob"}).json["chat_id"]
+    message_id = str(uuid.uuid4())
+    alice.post(f"/api/chats/{chat_id}/messages", json={"id": message_id, "payload": envelope([alice.user_id, bob.user_id])})
+
+    info = alice.get(f"/api/chats/{chat_id}/messages/{message_id}/info").json
+    assert info["sent_at"] and info["members"][0]["delivered"] is False
+
+    seq = bob.get(f"/api/chats/{chat_id}/messages").json["messages"][-1]["seq"]
+    member = alice.get(f"/api/chats/{chat_id}/messages/{message_id}/info").json["members"][0]
+    assert member["delivered"] and member["delivered_at"] and not member["read"]
+
+    bob.post(f"/api/chats/{chat_id}/read", json={"seq": seq})
+    member = alice.get(f"/api/chats/{chat_id}/messages/{message_id}/info").json["members"][0]
+    assert member["read"] and member["read_at"] and member["username"] == "bob"
+
+
 def test_security_headers(make_client):
     res = make_client().get("/api/online")
     assert "script-src 'self'" in res.headers["Content-Security-Policy"]

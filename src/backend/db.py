@@ -90,6 +90,15 @@ SCHEMA = [
         rev INTEGER NOT NULL DEFAULT 0
     )""",
     "CREATE INDEX IF NOT EXISTS idx_messages_chat_seq ON messages(chat_id, seq)",
+    # When a member's 'delivered' or 'read' position moved forward (for message info).
+    """CREATE TABLE IF NOT EXISTS receipts (
+        chat_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('delivered', 'read')),
+        seq INTEGER NOT NULL,
+        at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_receipts ON receipts(chat_id, user_id, kind, seq)",
     "CREATE INDEX IF NOT EXISTS idx_messages_chat_rev ON messages(chat_id, rev)",
     """CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
@@ -127,6 +136,7 @@ EXTRA_COLUMNS = {
     "users": USER_COLUMNS,
     # Remembers a friendship so unblocking restores it.
     "blocks": {"was_friend": "INTEGER NOT NULL DEFAULT 0"},
+    "chat_members": {"delivered_seq": "INTEGER NOT NULL DEFAULT 0"},
 }
 
 
