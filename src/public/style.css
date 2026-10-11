@@ -2499,3 +2499,44 @@ body.bright-body .language-select {
 body.bright-body .edit-bar {
   background-color: #f0f2f5;
 }
+
+.message-info-preview {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background-color: #005c4b;
+  color: #e9edef;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.info-member {
+  padding: 8px 0;
+  border-top: 1px solid rgba(134, 150, 160, 0.2);
+}
+
+.info-member-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.info-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 0.85rem;
+  color: #8696a0;
+}
+
+.info-line.done .info-icon {
+  color: #53bdeb;
+}
+
+.info-label {
+  flex: 1;
+}

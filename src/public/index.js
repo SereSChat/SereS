@@ -902,6 +902,10 @@
             return;
         const url = `/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(message.id)}`;
         const menu = h("div", { className: "floating-menu" }, [
+            button(t("msg.menuInfo"), "floating-item", () => {
+                closeFloatingMenus();
+                openMessageInfo(opened, message, view);
+            }),
             view.type === "text"
                 ? button(t("msg.menuEdit"), "floating-item", () => {
                     closeFloatingMenus();
@@ -928,6 +932,42 @@
         document.body.appendChild(menu);
         menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + "px";
         menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + "px";
+    }
+    function formatDateTime(iso) {
+        return parseTime(iso).toLocaleString(SeresI18n.getLanguage(), { dateStyle: "short", timeStyle: "short" });
+    }
+    /** When the message was sent, delivered to and seen by each member. */
+    async function openMessageInfo(opened, message, view) {
+        let data;
+        try {
+            data = await api(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(message.id)}/info`);
+        }
+        catch (error) {
+            showAlert(errorText(error));
+            return;
+        }
+        $("message-info-preview").textContent = view.text;
+        const body = $("message-info-body");
+        body.textContent = "";
+        const line = (icon, label, done, at) => h("div", { className: "info-line" + (done ? " done" : "") }, [
+            h("span", { className: "info-icon", text: icon }),
+            h("span", { className: "info-label", text: label }),
+            h("span", { className: "info-time", text: done ? (at ? formatDateTime(at) : "✓") : t("msgInfo.notYet") }),
+        ]);
+        body.appendChild(line("🕓", t("msgInfo.sent"), true, data.sent_at));
+        if (!data.members.length)
+            body.appendChild(h("p", { className: "list-hint", text: t("msgInfo.noRecipients") }));
+        for (const member of data.members) {
+            body.appendChild(h("div", { className: "info-member" }, [
+                h("div", { className: "info-member-head" }, [
+                    avatarEl(member.username, { label: nameOf(member) }),
+                    h("strong", { text: nameOf(member) }),
+                ]),
+                line("✓", t("msgInfo.delivered"), member.delivered, member.delivered_at),
+                line("✓✓", t("msgInfo.read"), member.read, member.read_at),
+            ]));
+        }
+        openModal("message-info-modal");
     }
     function startEdit(opened, message, text) {
         editing = { chatId: opened.id, message };
