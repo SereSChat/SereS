@@ -892,7 +892,47 @@
             openMessageMenu(opened, message, view, event.clientX, event.clientY);
         });
         onLongPress(row, (x, y) => openMessageMenu(opened, message, view, x, y));
+        if (own && message.kind === "e2e")
+            onSwipeLeft(row, () => openMessageInfo(opened, message, view));
         return row;
+    }
+    /** Phones: dragging a message to the left (like in WhatsApp) calls handler. */
+    function onSwipeLeft(element, handler) {
+        const MAX = 90;
+        const TRIGGER = 60;
+        let startX = 0;
+        let startY = 0;
+        let dx = 0;
+        let mode = "idle";
+        element.addEventListener("touchstart", (event) => {
+            startX = event.touches[0].clientX;
+            startY = event.touches[0].clientY;
+            dx = 0;
+            mode = "idle";
+            element.style.transition = "none";
+        }, { passive: true });
+        element.addEventListener("touchmove", (event) => {
+            const moveX = event.touches[0].clientX - startX;
+            const moveY = event.touches[0].clientY - startY;
+            if (mode === "idle" && Math.abs(moveX) + Math.abs(moveY) > 8) {
+                mode = moveX < 0 && Math.abs(moveX) > Math.abs(moveY) ? "swipe" : "scroll";
+            }
+            if (mode !== "swipe")
+                return;
+            dx = Math.max(-MAX, Math.min(0, moveX));
+            element.style.transform = `translateX(${dx}px)`;
+            element.classList.toggle("swipe-ready", dx <= -TRIGGER);
+        }, { passive: true });
+        const end = () => {
+            if (mode === "swipe" && dx <= -TRIGGER)
+                handler();
+            element.style.transition = "transform 0.2s ease-out";
+            element.style.transform = "";
+            element.classList.remove("swipe-ready");
+            mode = "idle";
+        };
+        element.addEventListener("touchend", end);
+        element.addEventListener("touchcancel", end);
     }
     /** Right-click / long-press menu of a message. */
     function openMessageMenu(opened, message, view, x, y) {

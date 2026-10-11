@@ -2540,3 +2540,21 @@ body.bright-body .edit-bar {
 .info-label {
   flex: 1;
 }
+
+/* Swipe-to-info hint on phones. */
+.message-row {
+  position: relative;
+}
+
+.message-row.swipe-ready::after {
+  content: "ℹ️";
+  position: absolute;
+  right: -34px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 1.1rem;
+}
+
+.messages-container {
+  overflow-x: hidden;
+}
