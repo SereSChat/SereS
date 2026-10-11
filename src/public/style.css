@@ -2459,3 +2459,43 @@ body.bright-body .language-select {
   clip: rect(0 0 0 0);
   border: 0 !important;
 }
+
+/* ------------------------------------------------------- message actions */
+
+.message-edited {
+  margin-left: 6px;
+  font-size: 0.7rem;
+  opacity: 0.6;
+}
+
+.message-row {
+  -webkit-touch-callout: none;
+}
+
+.edit-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background-color: #1f2c34;
+  border-top: 2px solid #00a884;
+  color: #00a884;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.edit-bar.modal-hidden {
+  display: none;
+}
+
+.edit-cancel {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+body.bright-body .edit-bar {
+  background-color: #f0f2f5;
+}

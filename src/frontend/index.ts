@@ -30,6 +30,7 @@
     kind: "e2e" | "legacy" | "system";
     payload: any;
     created_at: string;
+    edited_at?: string | null;
     deleted: boolean;
   }
 
@@ -92,6 +93,8 @@
   let chatsSignature = "";
   let friendsSignature = "";
   let sending = false;
+  // The own message that is being edited in the input field.
+  let editing: { chatId: string; message: Message } | null = null;
   // Invite token from a link like /?invite=..., kept across the login redirect.
   const pendingInvite = new URLSearchParams(window.location.search).get("invite");
   let inviteToAccept: { token: string; name: string } | null = null;
@@ -755,6 +758,7 @@
   // ------------------------------------------------------------ open chat
 
   async function openChat(chatId: string) {
+    cancelEdit();
     current = {
       id: chatId,
       details: null,
@@ -794,6 +798,7 @@
   }
 
   function closeChat() {
+    cancelEdit();
     current = null;
     $("current-chat-name").textContent = t("app.welcomeUser", { name: nameOf(me) });
     $("current-chat-sub").textContent = "";
@@ -927,7 +932,7 @@
     if (!current) return;
     const opened = current;
     const container = $("messages");
-    const ordered = [...opened.messages.values()].sort((a, b) => a.seq - b.seq);
+    const ordered = [...opened.messages.values()].filter((m) => !m.deleted).sort((a, b) => a.seq - b.seq);
     const shown = await Promise.all(ordered.map((message) => showMessage(opened.id, message)));
     if (current !== opened) return;
 
@@ -1021,29 +1026,67 @@
     } else {
       textDiv.appendChild(richText(view.text));
     }
+    if (message.edited_at) textDiv.appendChild(h("span", { className: "message-edited", text: t("msg.edited") }));
     textDiv.title = parseTime(message.created_at).toLocaleString(SeresI18n.getLanguage());
     wrapper.appendChild(textDiv);
-
-    if (own && !message.deleted && message.kind === "e2e") {
-      wrapper.appendChild(
-        button(
-          t("msg.delete"),
-          "message-delete",
-          async () => {
-            if (!window.confirm(t("msg.deleteConfirm"))) return;
-            try {
-              await post(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(message.id)}/delete`);
-              await syncCurrent();
-            } catch (error) {
-              showAlert(errorText(error));
-            }
-          },
-          t("msg.deleteTitle"),
-        ),
-      );
-    }
     row.appendChild(wrapper);
+
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      openMessageMenu(opened, message, view, event.clientX, event.clientY);
+    });
+    onLongPress(row, (x, y) => openMessageMenu(opened, message, view, x, y));
     return row;
+  }
+
+  /** Right-click / long-press menu of a message. */
+  function openMessageMenu(opened: OpenChat, message: Message, view: Shown, x: number, y: number) {
+    closeFloatingMenus();
+    const own = message.sender_id === me.id && message.kind === "e2e";
+    if (!own) return;
+    const url = `/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(message.id)}`;
+    const menu = h("div", { className: "floating-menu" }, [
+      view.type === "text"
+        ? button(t("msg.menuEdit"), "floating-item", () => {
+            closeFloatingMenus();
+            startEdit(opened, message, view.text);
+          })
+        : null,
+      button(t("msg.menuDelete"), "floating-item danger", async () => {
+        closeFloatingMenus();
+        if (!window.confirm(t("msg.deleteConfirm"))) return;
+        try {
+          await post(url + "/delete");
+          if (editing && editing.message.id === message.id) cancelEdit();
+          await syncCurrent();
+          chatsSignature = "";
+          loadChats().catch(() => {});
+        } catch (error) {
+          showAlert(errorText(error));
+        }
+      }),
+    ]);
+    document.body.appendChild(menu);
+    menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + "px";
+    menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + "px";
+  }
+
+  function startEdit(opened: OpenChat, message: Message, text: string) {
+    editing = { chatId: opened.id, message };
+    const input = $("message-input-field") as HTMLTextAreaElement;
+    input.value = text;
+    autoGrow(input);
+    $("edit-bar").classList.remove("modal-hidden");
+    input.focus();
+  }
+
+  function cancelEdit() {
+    if (!editing) return;
+    editing = null;
+    const input = $("message-input-field") as HTMLTextAreaElement;
+    input.value = "";
+    autoGrow(input);
+    $("edit-bar").classList.add("modal-hidden");
   }
 
   // ---------------------------------------------------------------- send
@@ -1085,10 +1128,16 @@
           pub_ecdh: m.pub_ecdh!,
           pub_sign: m.pub_sign!,
         }));
-        const messageId = newMessageId();
+        const edit = editing && editing.chatId === opened.id ? editing.message : null;
+        const messageId = edit ? edit.id : newMessageId();
         const payload = await SeresCrypto.encryptMessage(identity, opened.id, messageId, { text }, members);
         try {
-          await post(`/api/chats/${encodeURIComponent(opened.id)}/messages`, { id: messageId, payload });
+          if (edit) {
+            await post(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(messageId)}/edit`, { payload });
+            cancelEdit();
+          } else {
+            await post(`/api/chats/${encodeURIComponent(opened.id)}/messages`, { id: messageId, payload });
+          }
           input.value = "";
           autoGrow(input);
           await syncCurrent();
@@ -1827,6 +1876,7 @@
       }
     });
     $("send-btn").addEventListener("click", sendMessage);
+    $("edit-cancel").addEventListener("click", cancelEdit);
     $("menu-toggle").addEventListener("click", () => document.querySelector(".sidebar")?.classList.toggle("open"));
     $("user-menu-trigger").addEventListener("click", () => $("user-dropdown-menu").classList.toggle("modal-hidden"));
     $("menu-settings").addEventListener("click", (event) => {
