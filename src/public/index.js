@@ -374,7 +374,7 @@
             list.appendChild(h("div", { className: "list-empty" }, [
                 h("p", { text: t(filter ? "list.noChatsFound" : "list.noChats") }),
                 !filter && friends.friends.length
-                    ? button(t("list.startChat"), "pill-btn", () => openNewDmModal())
+                    ? button(t("list.startChat"), "pill-btn", () => openNewChatModal())
                     : !filter
                         ? button(t("list.addFriend"), "pill-btn", () => openModal("add-friend-modal"))
                         : null,
@@ -1159,23 +1159,6 @@
             showAlert(errorText(error));
         }
     }
-    function openNewDmModal() {
-        const list = $("new-dm-list");
-        list.textContent = "";
-        $("warning-new-dm").textContent = "";
-        if (!friends.friends.length) {
-            list.appendChild(h("p", { text: t("chat.noFriends") }));
-        }
-        friends.friends.forEach((friend) => {
-            const row = h("div", { className: "picker-item" }, [
-                avatarEl(friend.username, { label: nameOf(friend) }),
-                h("span", { className: "item-name", text: nameOf(friend) }),
-            ]);
-            row.addEventListener("click", () => startDm(friend.username));
-            list.appendChild(row);
-        });
-        openModal("new-dm-modal");
-    }
     function friendCheckboxes(container, exclude) {
         container.textContent = "";
         const available = friends.friends.filter((friend) => !exclude.has(friend.id));
@@ -1194,23 +1177,40 @@
     function checkedUsernames(container) {
         return [...container.querySelectorAll("input[type=checkbox]:checked")].map((box) => box.value);
     }
-    function openNewGroupModal() {
-        $("new-group-name").value = "";
-        $("warning-new-group").textContent = "";
-        friendCheckboxes($("new-group-list"), new Set());
-        openModal("new-group-modal");
+    function openNewChatModal() {
+        const list = $("new-chat-list");
+        const nameInput = $("new-chat-name");
+        nameInput.value = "";
+        nameInput.classList.add("modal-hidden");
+        $("warning-new-chat").textContent = "";
+        friendCheckboxes(list, new Set());
+        if (!friends.friends.length) {
+            list.textContent = "";
+            list.appendChild(h("p", { text: t("chat.noFriends") }));
+        }
+        openModal("new-chat-modal");
     }
-    async function createGroup() {
-        const name = $("new-group-name").value.trim();
-        const usernames = checkedUsernames($("new-group-list"));
-        const warning = $("warning-new-group");
-        if (!name) {
-            warning.textContent = t("chat.groupNameMissing");
+    /** The group name is only needed when more than one friend is picked. */
+    function updateNewChatName() {
+        $("new-chat-name").classList.toggle("modal-hidden", checkedUsernames($("new-chat-list")).length < 2);
+    }
+    async function startNewChat() {
+        const usernames = checkedUsernames($("new-chat-list"));
+        const warning = $("warning-new-chat");
+        if (!usernames.length) {
+            warning.textContent = t("newChat.pickOne");
             return;
         }
-        if (!usernames.length) {
-            warning.textContent = t("chat.pickFriend");
-            return;
+        if (usernames.length === 1)
+            return startDm(usernames[0]);
+        let name = $("new-chat-name").value.trim();
+        if (!name) {
+            // Without a name the group is called after its members.
+            const names = usernames.map((u) => {
+                const friend = friends.friends.find((f) => f.username === u);
+                return friend ? nameOf(friend) : u;
+            });
+            name = [nameOf(me), ...names].join(", ").slice(0, 64);
         }
         try {
             const data = await post("/api/chats", { type: "group", name, usernames });
@@ -1755,9 +1755,9 @@
             if (event.key === "Enter")
                 addFriend();
         });
-        $("btn-new-dm").addEventListener("click", openNewDmModal);
-        $("btn-new-group").addEventListener("click", openNewGroupModal);
-        $("confirm-new-group").addEventListener("click", createGroup);
+        $("btn-new-chat").addEventListener("click", openNewChatModal);
+        $("new-chat-list").addEventListener("change", updateNewChatName);
+        $("confirm-new-chat").addEventListener("click", startNewChat);
         $("chat-info-btn").addEventListener("click", openChatInfo);
         document.querySelector(".chat-title").addEventListener("click", () => {
             if (current && current.details && current.details.type === "dm" && current.details.other_user) {

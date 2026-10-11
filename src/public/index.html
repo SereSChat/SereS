@@ -34,8 +34,7 @@
         <div class="section-title chat-section-header" id="chats-header">
           <span data-i18n="app.chatsHeader">Direct Messages &amp; Groups</span>
           <span class="section-actions">
-            <button class="add-dm-button" type="button" id="btn-new-dm" title="New direct message" data-i18n-title="app.newDm">+</button>
-            <button class="add-dm-button" type="button" id="btn-new-group" title="New group" data-i18n-title="app.newGroup">#</button>
+            <button class="add-dm-button" type="button" id="btn-new-chat" title="New message" data-i18n-title="newChat.button">+</button>
           </span>
         </div>
         <div class="list-search-wrap">
@@ -168,30 +167,17 @@
       </div>
     </div>
 
-    <!-- New direct message -->
-    <div class="modal-overlay modal-hidden" id="new-dm-modal">
+    <!-- New message: one friend = direct chat, several = group -->
+    <div class="modal-overlay modal-hidden" id="new-chat-modal">
       <div class="modal-box">
-        <h3 data-i18n="modal.newDmTitle">New chat</h3>
-        <p data-i18n="modal.newDmText">Pick a friend to start a direct message.</p>
-        <div class="picker-list" id="new-dm-list"></div>
-        <h4 class="modal-warning" id="warning-new-dm"></h4>
+        <h3 data-i18n="newChat.title">New message</h3>
+        <p data-i18n="newChat.text">Pick one friend for a direct chat, or several for a group chat.</p>
+        <div class="picker-list" id="new-chat-list"></div>
+        <input type="text" id="new-chat-name" class="modal-hidden" maxlength="64" placeholder="Group name" data-i18n-placeholder="newChat.groupName" />
+        <h4 class="modal-warning" id="warning-new-chat"></h4>
         <div class="modal-buttons">
           <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.cancel">Cancel</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- New group -->
-    <div class="modal-overlay modal-hidden" id="new-group-modal">
-      <div class="modal-box">
-        <h3 data-i18n="modal.newGroupTitle">New group</h3>
-        <input type="text" id="new-group-name" placeholder="Group name" data-i18n-placeholder="modal.groupName" maxlength="64" />
-        <p data-i18n="modal.groupMembers">Members (only friends can be added):</p>
-        <div class="picker-list" id="new-group-list"></div>
-        <h4 class="modal-warning" id="warning-new-group"></h4>
-        <div class="modal-buttons">
-          <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.cancel">Cancel</button>
-          <button class="modal-btn confirm-btn" type="button" id="confirm-new-group" data-i18n="common.create">Create</button>
+          <button class="modal-btn confirm-btn" type="button" id="confirm-new-chat" data-i18n="newChat.start">Start chat</button>
         </div>
       </div>
     </div>
