@@ -163,11 +163,16 @@ def test_message_info_shows_delivered_and_read(alice_bob):
     info = alice.get(f"/api/chats/{chat_id}/messages/{message_id}/info").json
     assert info["sent_at"] and info["members"][0]["delivered"] is False
 
+    receipts = alice.get(f"/api/chats/{chat_id}/messages").json["receipts"]
     seq = bob.get(f"/api/chats/{chat_id}/messages").json["messages"][-1]["seq"]
+    assert receipts["delivered_seq"] < seq
     member = alice.get(f"/api/chats/{chat_id}/messages/{message_id}/info").json["members"][0]
     assert member["delivered"] and member["delivered_at"] and not member["read"]
+    receipts = alice.get(f"/api/chats/{chat_id}/messages").json["receipts"]
+    assert receipts["delivered_seq"] >= seq and receipts["read_seq"] < seq
 
     bob.post(f"/api/chats/{chat_id}/read", json={"seq": seq})
+    assert alice.get(f"/api/chats/{chat_id}/messages").json["receipts"]["read_seq"] >= seq
     member = alice.get(f"/api/chats/{chat_id}/messages/{message_id}/info").json["members"][0]
     assert member["read"] and member["read_at"] and member["username"] == "bob"
 

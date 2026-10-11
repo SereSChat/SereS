@@ -1214,6 +1214,7 @@ def get_chat_messages(chat_id):
         messages=[serialize_message(row) for row in rows],
         has_more=len(rows) == limit,
         typing=typing_users(chat_id, current_user()["id"]),
+        receipts=member_receipts(chat_id, current_user()["id"]),
     )
 
 
@@ -1396,6 +1397,19 @@ def advance_receipt(conn, chat_id, user_id, kind, seq):
                 "INSERT INTO receipts (chat_id, user_id, kind, seq, at) VALUES (?, ?, ?, ?, ?)",
                 (chat_id, user_id, k, seq, db.now_iso()),
             )
+
+
+def member_receipts(chat_id, me_id):
+    """Up to which message all other members have it delivered / have read it (for the ticks)."""
+    row = get_db().execute(
+        """SELECT MIN(delivered_seq) AS delivered, MIN(last_read_seq) AS read, COUNT(*) AS n
+           FROM chat_members WHERE chat_id = ? AND user_id != ?""",
+        (chat_id, me_id),
+    ).fetchone()
+    if not row["n"]:
+        return None
+    # Reading implies delivery (older rows may not have a delivered position yet).
+    return {"delivered_seq": max(row["delivered"], row["read"]), "read_seq": row["read"]}
 
 
 def receipt_time(conn, chat_id, user_id, kind, seq):
