@@ -30,6 +30,7 @@
     kind: "e2e" | "legacy" | "system";
     payload: any;
     created_at: string;
+    edited_at?: string | null;
     deleted: boolean;
   }
 
@@ -46,6 +47,7 @@
     other_user_id?: string;
     blocked?: boolean;
     muted?: boolean;
+    typing?: UserRef[];
     members?: Member[];
     owner_id?: string;
   }
@@ -65,6 +67,10 @@
     lastReadSent: number;
     changedKeys: Member[];
     missingKeys: Member[];
+    subtitle: string;
+    typing: UserRef[];
+    // Up to which message all other members got / read it (for the ticks).
+    receipts: { delivered_seq: number; read_seq: number } | null;
   }
 
   class ApiError extends Error {
@@ -92,6 +98,8 @@
   let chatsSignature = "";
   let friendsSignature = "";
   let sending = false;
+  // The own message that is being edited in the input field.
+  let editing: { chatId: string; message: Message } | null = null;
   // Invite token from a link like /?invite=..., kept across the login redirect.
   const pendingInvite = new URLSearchParams(window.location.search).get("invite");
   let inviteToAccept: { token: string; name: string } | null = null;
@@ -434,7 +442,9 @@
         h("span", { className: "item-time", text: formatListTime(chat.last_activity) }),
       ]);
       const statusRow = h("div", { className: "item-row" }, [
-        h("span", { className: "item-status", text: previewText(chat, previews[index]) }),
+        chat.typing && chat.typing.length
+          ? h("span", { className: "item-status typing", text: t("typing.short") })
+          : h("span", { className: "item-status", text: previewText(chat, previews[index]) }),
         chat.unread > 0 ? h("span", { className: "unread-badge" + (chat.muted ? " muted" : ""), text: chat.unread > 99 ? "99+" : String(chat.unread) }) : null,
       ]);
       item.appendChild(h("div", { className: "item-info" }, [nameRow, statusRow]));
@@ -451,7 +461,7 @@
         h("div", { className: "list-empty" }, [
           h("p", { text: t(filter ? "list.noChatsFound" : "list.noChats") }),
           !filter && friends.friends.length
-            ? button(t("list.startChat"), "pill-btn", () => openNewDmModal())
+            ? button(t("list.startChat"), "pill-btn", () => openNewChatModal())
             : !filter
               ? button(t("list.addFriend"), "pill-btn", () => openModal("add-friend-modal"))
               : null,
@@ -755,6 +765,8 @@
   // ------------------------------------------------------------ open chat
 
   async function openChat(chatId: string) {
+    cancelEdit();
+    sendTyping(false);
     current = {
       id: chatId,
       details: null,
@@ -765,6 +777,9 @@
       lastReadSent: 0,
       changedKeys: [],
       missingKeys: [],
+      subtitle: "",
+      typing: [],
+      receipts: null,
     };
     const opened = current;
     document.querySelectorAll(".chat-list-item").forEach((item) => {
@@ -783,6 +798,7 @@
       await refreshCurrentDetails();
       const data = await api(`/api/chats/${encodeURIComponent(chatId)}/messages?limit=50`);
       if (current !== opened) return;
+      opened.receipts = data.receipts || null;
       mergeMessages(data.messages);
       opened.hasMore = data.has_more;
       await renderMessages({ forceBottom: true });
@@ -794,6 +810,9 @@
   }
 
   function closeChat() {
+    cancelEdit();
+    sendTyping(false);
+    $("typing-bubble").classList.add("modal-hidden");
     current = null;
     $("current-chat-name").textContent = t("app.welcomeUser", { name: nameOf(me) });
     $("current-chat-sub").textContent = "";
@@ -825,13 +844,46 @@
     opened.changedKeys = changed;
     opened.missingKeys = missing;
     $("current-chat-name").textContent = details.name;
-    $("current-chat-sub").textContent =
+    opened.subtitle =
       details.type === "group"
         ? t("chat.groupSub", { count: details.member_count })
         : details.blocked
           ? t("chat.blocked")
           : t("chat.dmSub");
+    renderSubtitle();
     renderKeyWarning();
+  }
+
+  function typingText(users: UserRef[]) {
+    if (users.length === 1) return t("typing.one", { name: nameOf(users[0]) });
+    if (users.length === 2) return t("typing.two", { first: nameOf(users[0]), second: nameOf(users[1]) });
+    return t("typing.many");
+  }
+
+  /** The line under the chat name: who is typing, otherwise members / encryption. */
+  function renderSubtitle() {
+    if (!current) return;
+    const sub = $("current-chat-sub");
+    sub.textContent = current.typing.length ? typingText(current.typing) : current.subtitle;
+    sub.classList.toggle("typing", current.typing.length > 0);
+    // Animated bubble above the input field.
+    $("typing-bubble-text").textContent = current.typing.length ? typingText(current.typing) : "";
+    $("typing-bubble").classList.toggle("modal-hidden", current.typing.length === 0);
+  }
+
+  // Tell the others that we are typing (at most every 3 seconds, stops after sending).
+  let typingSentAt = 0;
+  let typingChat: string | null = null;
+
+  function sendTyping(typing: boolean) {
+    if (!current) return;
+    const now = Date.now();
+    if (typing && typingChat === current.id && now - typingSentAt < 3000) return;
+    if (!typing && typingChat === null) return;
+    const chatId = typing ? current.id : typingChat!;
+    typingSentAt = typing ? now : 0;
+    typingChat = typing ? current.id : null;
+    post(`/api/chats/${encodeURIComponent(chatId)}/typing`, { typing }).catch(() => {});
   }
 
   function renderKeyWarning() {
@@ -900,7 +952,11 @@
       `/api/chats/${encodeURIComponent(opened.id)}/messages?since_rev=${opened.maxRev}&limit=200`,
     );
     if (current !== opened) return;
-    if (mergeMessages(data.messages)) {
+    opened.typing = data.typing || [];
+    renderSubtitle();
+    const receiptsChanged = JSON.stringify(data.receipts || null) !== JSON.stringify(opened.receipts);
+    opened.receipts = data.receipts || null;
+    if (mergeMessages(data.messages) || receiptsChanged) {
       await renderMessages({});
       markRead();
     }
@@ -927,7 +983,7 @@
     if (!current) return;
     const opened = current;
     const container = $("messages");
-    const ordered = [...opened.messages.values()].sort((a, b) => a.seq - b.seq);
+    const ordered = [...opened.messages.values()].filter((m) => !m.deleted).sort((a, b) => a.seq - b.seq);
     const shown = await Promise.all(ordered.map((message) => showMessage(opened.id, message)));
     if (current !== opened) return;
 
@@ -1021,29 +1077,169 @@
     } else {
       textDiv.appendChild(richText(view.text));
     }
+    if (message.edited_at) textDiv.appendChild(h("span", { className: "message-edited", text: t("msg.edited") }));
+    if (own && message.kind === "e2e") textDiv.appendChild(ticks(opened, message));
     textDiv.title = parseTime(message.created_at).toLocaleString(SeresI18n.getLanguage());
     wrapper.appendChild(textDiv);
+    row.appendChild(wrapper);
 
-    if (own && !message.deleted && message.kind === "e2e") {
-      wrapper.appendChild(
-        button(
-          t("msg.delete"),
-          "message-delete",
-          async () => {
-            if (!window.confirm(t("msg.deleteConfirm"))) return;
-            try {
-              await post(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(message.id)}/delete`);
-              await syncCurrent();
-            } catch (error) {
-              showAlert(errorText(error));
-            }
-          },
-          t("msg.deleteTitle"),
-        ),
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      openMessageMenu(opened, message, view, event.clientX, event.clientY);
+    });
+    onLongPress(row, (x, y) => openMessageMenu(opened, message, view, x, y));
+    if (own && message.kind === "e2e") onSwipeLeft(row, () => openMessageInfo(opened, message, view));
+    return row;
+  }
+
+  /** Phones: dragging a message to the left (like in WhatsApp) calls handler. */
+  function onSwipeLeft(element: HTMLElement, handler: () => void) {
+    const MAX = 90;
+    const TRIGGER = 60;
+    let startX = 0;
+    let startY = 0;
+    let dx = 0;
+    let mode: "idle" | "swipe" | "scroll" = "idle";
+    element.addEventListener(
+      "touchstart",
+      (event) => {
+        startX = event.touches[0].clientX;
+        startY = event.touches[0].clientY;
+        dx = 0;
+        mode = "idle";
+        element.style.transition = "none";
+      },
+      { passive: true },
+    );
+    element.addEventListener(
+      "touchmove",
+      (event) => {
+        const moveX = event.touches[0].clientX - startX;
+        const moveY = event.touches[0].clientY - startY;
+        if (mode === "idle" && Math.abs(moveX) + Math.abs(moveY) > 8) {
+          mode = moveX < 0 && Math.abs(moveX) > Math.abs(moveY) ? "swipe" : "scroll";
+        }
+        if (mode !== "swipe") return;
+        dx = Math.max(-MAX, Math.min(0, moveX));
+        element.style.transform = `translateX(${dx}px)`;
+        element.classList.toggle("swipe-ready", dx <= -TRIGGER);
+      },
+      { passive: true },
+    );
+    const end = () => {
+      if (mode === "swipe" && dx <= -TRIGGER) handler();
+      element.style.transition = "transform 0.2s ease-out";
+      element.style.transform = "";
+      element.classList.remove("swipe-ready");
+      mode = "idle";
+    };
+    element.addEventListener("touchend", end);
+    element.addEventListener("touchcancel", end);
+  }
+
+  /** ✓ sent, ✓✓ delivered to everyone, blue ✓✓ seen by everyone. */
+  function ticks(opened: OpenChat, message: Message) {
+    const receipts = opened.receipts;
+    const read = !!receipts && receipts.read_seq >= message.seq;
+    const delivered = read || (!!receipts && receipts.delivered_seq >= message.seq);
+    return h("span", {
+      className: "message-ticks" + (read ? " read" : delivered ? " delivered" : ""),
+      text: delivered ? "✓✓" : "✓",
+      title: t(read ? "msgInfo.read" : delivered ? "msgInfo.delivered" : "msgInfo.sent"),
+    });
+  }
+
+  /** Right-click / long-press menu of a message. */
+  function openMessageMenu(opened: OpenChat, message: Message, view: Shown, x: number, y: number) {
+    closeFloatingMenus();
+    const own = message.sender_id === me.id && message.kind === "e2e";
+    if (!own) return;
+    const url = `/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(message.id)}`;
+    const menu = h("div", { className: "floating-menu" }, [
+      button(t("msg.menuInfo"), "floating-item", () => {
+        closeFloatingMenus();
+        openMessageInfo(opened, message, view);
+      }),
+      view.type === "text"
+        ? button(t("msg.menuEdit"), "floating-item", () => {
+            closeFloatingMenus();
+            startEdit(opened, message, view.text);
+          })
+        : null,
+      button(t("msg.menuDelete"), "floating-item danger", async () => {
+        closeFloatingMenus();
+        if (!window.confirm(t("msg.deleteConfirm"))) return;
+        try {
+          await post(url + "/delete");
+          if (editing && editing.message.id === message.id) cancelEdit();
+          await syncCurrent();
+          chatsSignature = "";
+          loadChats().catch(() => {});
+        } catch (error) {
+          showAlert(errorText(error));
+        }
+      }),
+    ]);
+    document.body.appendChild(menu);
+    menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + "px";
+    menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + "px";
+  }
+
+  function formatDateTime(iso: string) {
+    return parseTime(iso).toLocaleString(SeresI18n.getLanguage(), { dateStyle: "short", timeStyle: "short" });
+  }
+
+  /** When the message was sent, delivered to and seen by each member. */
+  async function openMessageInfo(opened: OpenChat, message: Message, view: Shown) {
+    let data: any;
+    try {
+      data = await api(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(message.id)}/info`);
+    } catch (error) {
+      showAlert(errorText(error));
+      return;
+    }
+    $("message-info-preview").textContent = view.text;
+    const body = $("message-info-body");
+    body.textContent = "";
+    const line = (icon: string, label: string, done: boolean, at: string | null) =>
+      h("div", { className: "info-line" + (done ? " done" : "") }, [
+        h("span", { className: "info-icon", text: icon }),
+        h("span", { className: "info-label", text: label }),
+        h("span", { className: "info-time", text: done ? (at ? formatDateTime(at) : "✓") : t("msgInfo.notYet") }),
+      ]);
+    body.appendChild(line("🕓", t("msgInfo.sent"), true, data.sent_at));
+    if (!data.members.length) body.appendChild(h("p", { className: "list-hint", text: t("msgInfo.noRecipients") }));
+    for (const member of data.members) {
+      body.appendChild(
+        h("div", { className: "info-member" }, [
+          h("div", { className: "info-member-head" }, [
+            avatarEl(member.username, { label: nameOf(member) }),
+            h("strong", { text: nameOf(member) }),
+          ]),
+          line("✓", t("msgInfo.delivered"), member.delivered, member.delivered_at),
+          line("✓✓", t("msgInfo.read"), member.read, member.read_at),
+        ]),
       );
     }
-    row.appendChild(wrapper);
-    return row;
+    openModal("message-info-modal");
+  }
+
+  function startEdit(opened: OpenChat, message: Message, text: string) {
+    editing = { chatId: opened.id, message };
+    const input = $("message-input-field") as HTMLTextAreaElement;
+    input.value = text;
+    autoGrow(input);
+    $("edit-bar").classList.remove("modal-hidden");
+    input.focus();
+  }
+
+  function cancelEdit() {
+    if (!editing) return;
+    editing = null;
+    const input = $("message-input-field") as HTMLTextAreaElement;
+    input.value = "";
+    autoGrow(input);
+    $("edit-bar").classList.add("modal-hidden");
   }
 
   // ---------------------------------------------------------------- send
@@ -1085,12 +1281,19 @@
           pub_ecdh: m.pub_ecdh!,
           pub_sign: m.pub_sign!,
         }));
-        const messageId = newMessageId();
+        const edit = editing && editing.chatId === opened.id ? editing.message : null;
+        const messageId = edit ? edit.id : newMessageId();
         const payload = await SeresCrypto.encryptMessage(identity, opened.id, messageId, { text }, members);
         try {
-          await post(`/api/chats/${encodeURIComponent(opened.id)}/messages`, { id: messageId, payload });
+          if (edit) {
+            await post(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(messageId)}/edit`, { payload });
+            cancelEdit();
+          } else {
+            await post(`/api/chats/${encodeURIComponent(opened.id)}/messages`, { id: messageId, payload });
+          }
           input.value = "";
           autoGrow(input);
+          typingChat = null; // the server forgets it when a message arrives
           await syncCurrent();
           loadChats().catch(() => {});
           return;
@@ -1128,24 +1331,6 @@
     }
   }
 
-  function openNewDmModal() {
-    const list = $("new-dm-list");
-    list.textContent = "";
-    $("warning-new-dm").textContent = "";
-    if (!friends.friends.length) {
-      list.appendChild(h("p", { text: t("chat.noFriends") }));
-    }
-    friends.friends.forEach((friend) => {
-      const row = h("div", { className: "picker-item" }, [
-        avatarEl(friend.username, { label: nameOf(friend) }),
-        h("span", { className: "item-name", text: nameOf(friend) }),
-      ]);
-      row.addEventListener("click", () => startDm(friend.username));
-      list.appendChild(row);
-    });
-    openModal("new-dm-modal");
-  }
-
   function friendCheckboxes(container: HTMLElement, exclude: Set<string>) {
     container.textContent = "";
     const available = friends.friends.filter((friend) => !exclude.has(friend.id));
@@ -1168,24 +1353,41 @@
     return [...container.querySelectorAll<HTMLInputElement>("input[type=checkbox]:checked")].map((box) => box.value);
   }
 
-  function openNewGroupModal() {
-    ($("new-group-name") as HTMLInputElement).value = "";
-    $("warning-new-group").textContent = "";
-    friendCheckboxes($("new-group-list"), new Set());
-    openModal("new-group-modal");
+  function openNewChatModal() {
+    const list = $("new-chat-list");
+    const nameInput = $("new-chat-name") as HTMLInputElement;
+    nameInput.value = "";
+    nameInput.classList.add("modal-hidden");
+    $("warning-new-chat").textContent = "";
+    friendCheckboxes(list, new Set());
+    if (!friends.friends.length) {
+      list.textContent = "";
+      list.appendChild(h("p", { text: t("chat.noFriends") }));
+    }
+    openModal("new-chat-modal");
   }
 
-  async function createGroup() {
-    const name = ($("new-group-name") as HTMLInputElement).value.trim();
-    const usernames = checkedUsernames($("new-group-list"));
-    const warning = $("warning-new-group");
-    if (!name) {
-      warning.textContent = t("chat.groupNameMissing");
+  /** The group name is only needed when more than one friend is picked. */
+  function updateNewChatName() {
+    $("new-chat-name").classList.toggle("modal-hidden", checkedUsernames($("new-chat-list")).length < 2);
+  }
+
+  async function startNewChat() {
+    const usernames = checkedUsernames($("new-chat-list"));
+    const warning = $("warning-new-chat");
+    if (!usernames.length) {
+      warning.textContent = t("newChat.pickOne");
       return;
     }
-    if (!usernames.length) {
-      warning.textContent = t("chat.pickFriend");
-      return;
+    if (usernames.length === 1) return startDm(usernames[0]);
+    let name = ($("new-chat-name") as HTMLInputElement).value.trim();
+    if (!name) {
+      // Without a name the group is called after its members.
+      const names = usernames.map((u) => {
+        const friend = friends.friends.find((f) => f.username === u);
+        return friend ? nameOf(friend) : u;
+      });
+      name = [nameOf(me), ...names].join(", ").slice(0, 64);
     }
     try {
       const data = await post("/api/chats", { type: "group", name, usernames });
@@ -1698,10 +1900,18 @@
     }
   }
 
+  function showCookieStatus() {
+    const consent = SeresI18n.getConsent();
+    $("cookie-status").textContent = t(
+      consent === "accepted" ? "settings.cookiesAccepted" : consent === "denied" ? "settings.cookiesDenied" : "settings.cookiesUndecided",
+    );
+  }
+
   async function openSettings() {
     $("user-dropdown-menu").classList.add("modal-hidden");
     $("settings-warning").textContent = "";
     ($("display-name-input") as HTMLInputElement).value = nameOf(me);
+    showCookieStatus();
     openModal("settings-modal");
     const fp = await SeresCrypto.fingerprint(identity.pubEcdh, identity.pubSign);
     $("my-fingerprint").textContent = fp.replace(/(.{4})/g, "$1 ").trim();
@@ -1778,6 +1988,7 @@
   /** Renders all generated texts again after the language was switched. */
   function rerenderLanguage() {
     shownCache.clear();
+    showCookieStatus();
     chatsSignature = "";
     friendsSignature = "";
     if (current) {
@@ -1817,9 +2028,9 @@
     $("friends-username-input").addEventListener("keydown", (event) => {
       if ((event as KeyboardEvent).key === "Enter") addFriend();
     });
-    $("btn-new-dm").addEventListener("click", openNewDmModal);
-    $("btn-new-group").addEventListener("click", openNewGroupModal);
-    $("confirm-new-group").addEventListener("click", createGroup);
+    $("btn-new-chat").addEventListener("click", openNewChatModal);
+    $("new-chat-list").addEventListener("change", updateNewChatName);
+    $("confirm-new-chat").addEventListener("click", startNewChat);
     $("chat-info-btn").addEventListener("click", openChatInfo);
     document.querySelector(".chat-title")!.addEventListener("click", () => {
       if (current && current.details && current.details.type === "dm" && current.details.other_user) {
@@ -1827,6 +2038,7 @@
       }
     });
     $("send-btn").addEventListener("click", sendMessage);
+    $("edit-cancel").addEventListener("click", cancelEdit);
     $("menu-toggle").addEventListener("click", () => document.querySelector(".sidebar")?.classList.toggle("open"));
     $("user-menu-trigger").addEventListener("click", () => $("user-dropdown-menu").classList.toggle("modal-hidden"));
     $("menu-settings").addEventListener("click", (event) => {
@@ -1860,9 +2072,12 @@
       event.preventDefault();
       changePassword();
     });
+    // Shows the cookie banner again (above the settings) to change the decision.
     $("cookie-settings-btn").addEventListener("click", () => {
-      closeAllModals();
-      SeresConsent.show();
+      SeresConsent.show(() => {
+        showCookieStatus();
+        showAlert(t("settings.cookiesSaved"));
+      });
     });
     $("language-select-slot").appendChild(SeresI18n.languageSelect(rerenderLanguage));
 
@@ -1891,7 +2106,10 @@
         sendMessage();
       }
     });
-    input.addEventListener("input", () => autoGrow(input));
+    input.addEventListener("input", () => {
+      autoGrow(input);
+      sendTyping(input.value.trim().length > 0);
+    });
 
     document.addEventListener("click", (event) => {
       const target = event.target as Element;

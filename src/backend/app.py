@@ -999,6 +999,7 @@ def serialize_message(row):
         "kind": row["kind"],
         "payload": payload,
         "created_at": row["created_at"],
+        "edited_at": row["edited_at"],
         "deleted": bool(row["deleted"]),
     }
 
@@ -1028,7 +1029,7 @@ def chat_summary(chat, me_id):
     conn = get_db()
     floor = max(chat["joined_seq"], chat["cleared_seq"])
     last = conn.execute(
-        MESSAGE_SELECT + " WHERE m.chat_id = ? AND m.seq > ? ORDER BY m.seq DESC LIMIT 1",
+        MESSAGE_SELECT + " WHERE m.chat_id = ? AND m.seq > ? AND m.deleted = 0 ORDER BY m.seq DESC LIMIT 1",
         (chat["id"], floor),
     ).fetchone()
     unread = conn.execute(
@@ -1056,6 +1057,7 @@ def chat_summary(chat, me_id):
         summary["name"] = display_name(other) if other else summary["other_user"]
         summary["blocked"] = bool(other) and is_blocked_between(me_id, other["id"])
         summary["muted"] = bool(other) and is_muted(me_id, other["id"])
+    summary["typing"] = typing_users(chat["id"], me_id)
     return summary
 
 
@@ -1070,6 +1072,10 @@ def list_chats():
            WHERE m.user_id = ? AND m.hidden = 0 ORDER BY c.last_activity DESC""",
         (me_id,),
     ).fetchall()
+    conn = get_db()
+    for row in rows:
+        advance_receipt(conn, row["id"], me_id, "delivered", max_seq(conn, row["id"]))
+    conn.commit()
     return ok(chats=[chat_summary(row, me_id) for row in rows])
 
 
@@ -1201,7 +1207,15 @@ def get_chat_messages(chat_id):
             + " WHERE m.chat_id = ? AND m.seq > ? AND m.seq < ? ORDER BY m.seq DESC LIMIT ?",
             (chat_id, floor, before if before else 2**62, limit),
         ).fetchall()[::-1]
-    return ok(messages=[serialize_message(row) for row in rows], has_more=len(rows) == limit)
+    if rows:
+        advance_receipt(conn, chat_id, current_user()["id"], "delivered", max(row["seq"] for row in rows))
+        conn.commit()
+    return ok(
+        messages=[serialize_message(row) for row in rows],
+        has_more=len(rows) == limit,
+        typing=typing_users(chat_id, current_user()["id"]),
+        receipts=member_receipts(chat_id, current_user()["id"]),
+    )
 
 
 @app.route("/api/get_messages")
@@ -1266,11 +1280,13 @@ def post_message(chat_id):
             conn.execute("UPDATE chats SET last_activity = ? WHERE id = ?", (db.now_iso(), chat_id))
             conn.execute("UPDATE chat_members SET hidden = 0 WHERE chat_id = ?", (chat_id,))
             conn.execute(
-                "UPDATE chat_members SET last_read_seq = ? WHERE chat_id = ? AND user_id = ?",
-                (cur.lastrowid, chat_id, me_id),
+                "UPDATE chat_members SET last_read_seq = ?, delivered_seq = ? WHERE chat_id = ? AND user_id = ?",
+                (cur.lastrowid, cur.lastrowid, chat_id, me_id),
             )
     except sqlite3.IntegrityError:
         return error("Duplicate message id", 409)
+    with typing_lock:
+        typing_state.pop((chat_id, me_id), None)
     return ok(message="Message sent successfully!", seq=cur.lastrowid, rev=rev)
 
 
@@ -1295,6 +1311,64 @@ def delete_message(chat_id, message_id):
     return ok(message="Message deleted")
 
 
+@app.route("/api/chats/<chat_id>/messages/<message_id>/edit", methods=["POST"])
+@login_required
+def edit_message(chat_id, message_id):
+    """Replaces the encrypted content of an own message (re-encrypted by the client)."""
+    me_id = current_user()["id"]
+    require_membership(chat_id)
+    members = chat_members(chat_id)
+    problem = validate_envelope(json_body().get("payload"), [m["id"] for m in members])
+    if problem:
+        return error(problem, 409 if "members" in problem else 400)
+    conn = get_db()
+    with db.write_transaction(conn):
+        cur = conn.execute(
+            """UPDATE messages SET payload = ?, edited_at = ?, rev = ?
+               WHERE id = ? AND chat_id = ? AND sender_id = ? AND kind = 'e2e' AND deleted = 0""",
+            (json.dumps(json_body()["payload"]), db.now_iso(), db.next_rev(conn), message_id, chat_id, me_id),
+        )
+    if cur.rowcount == 0:
+        return error("Message not found", 404)
+    return ok(message="Message edited")
+
+
+# Who is typing right now. Kept in memory only: it is short-lived and not worth storing.
+TYPING_SECONDS = 6
+typing_state = {}  # (chat_id, user_id) -> time.monotonic() of the last signal
+typing_lock = threading.Lock()
+
+
+def typing_users(chat_id, me_id):
+    now = time.monotonic()
+    with typing_lock:
+        ids = [
+            uid for (cid, uid), at in typing_state.items()
+            if cid == chat_id and uid != me_id and now - at < TYPING_SECONDS
+        ]
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    rows = get_db().execute(f"SELECT id, username, display_name FROM users WHERE id IN ({placeholders})", ids)
+    return [public_user(row) for row in rows]
+
+
+@app.route("/api/chats/<chat_id>/typing", methods=["POST"])
+@login_required
+def set_typing(chat_id):
+    require_membership(chat_id)
+    key = (chat_id, current_user()["id"])
+    now = time.monotonic()
+    with typing_lock:
+        if json_body().get("typing") is False:
+            typing_state.pop(key, None)
+        else:
+            typing_state[key] = now
+        for stale in [k for k, at in typing_state.items() if now - at >= TYPING_SECONDS]:
+            del typing_state[stale]
+    return ok()
+
+
 @app.route("/api/chats/<chat_id>/read", methods=["POST"])
 @login_required
 def mark_read(chat_id):
@@ -1303,12 +1377,82 @@ def mark_read(chat_id):
     if not isinstance(seq, int):
         return error("Invalid seq")
     conn = get_db()
-    conn.execute(
-        "UPDATE chat_members SET last_read_seq = MAX(last_read_seq, MIN(?, ?)) WHERE chat_id = ? AND user_id = ?",
-        (seq, max_seq(conn, chat_id), chat_id, current_user()["id"]),
-    )
+    seq = min(seq, max_seq(conn, chat_id))
+    advance_receipt(conn, chat_id, current_user()["id"], "read", seq)
     conn.commit()
     return ok()
+
+
+def advance_receipt(conn, chat_id, user_id, kind, seq):
+    """Moves the member's delivered/read position forward and remembers when."""
+    kinds = ["delivered", "read"] if kind == "read" else ["delivered"]  # read implies delivered
+    for k in kinds:
+        column = "last_read_seq" if k == "read" else "delivered_seq"
+        cur = conn.execute(
+            f"UPDATE chat_members SET {column} = ? WHERE chat_id = ? AND user_id = ? AND {column} < ?",
+            (seq, chat_id, user_id, seq),
+        )
+        if cur.rowcount:
+            conn.execute(
+                "INSERT INTO receipts (chat_id, user_id, kind, seq, at) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, user_id, k, seq, db.now_iso()),
+            )
+
+
+def member_receipts(chat_id, me_id):
+    """Up to which message all other members have it delivered / have read it (for the ticks)."""
+    row = get_db().execute(
+        """SELECT MIN(delivered_seq) AS delivered, MIN(last_read_seq) AS read, COUNT(*) AS n
+           FROM chat_members WHERE chat_id = ? AND user_id != ?""",
+        (chat_id, me_id),
+    ).fetchone()
+    if not row["n"]:
+        return None
+    # Reading implies delivery (older rows may not have a delivered position yet).
+    return {"delivered_seq": max(row["delivered"], row["read"]), "read_seq": row["read"]}
+
+
+def receipt_time(conn, chat_id, user_id, kind, seq):
+    row = conn.execute(
+        "SELECT MIN(at) AS at FROM receipts WHERE chat_id = ? AND user_id = ? AND kind = ? AND seq >= ?",
+        (chat_id, user_id, kind, seq),
+    ).fetchone()
+    return row["at"]
+
+
+@app.route("/api/chats/<chat_id>/messages/<message_id>/info")
+@login_required
+def message_info(chat_id, message_id):
+    chat = require_membership(chat_id)
+    conn = get_db()
+    message = conn.execute(
+        "SELECT * FROM messages WHERE id = ? AND chat_id = ? AND deleted = 0 AND seq > ?",
+        (message_id, chat_id, max(chat["joined_seq"], chat["cleared_seq"])),
+    ).fetchone()
+    if message is None:
+        return error("Message not found", 404)
+    members = []
+    rows = conn.execute(
+        """SELECT u.id, u.username, u.display_name, m.delivered_seq, m.last_read_seq, m.joined_seq
+           FROM chat_members m JOIN users u ON u.id = m.user_id WHERE m.chat_id = ?""",
+        (chat_id,),
+    ).fetchall()
+    for row in rows:
+        # Skip the sender and people who joined after the message was sent.
+        if row["id"] == message["sender_id"] or row["joined_seq"] >= message["seq"]:
+            continue
+        read = row["last_read_seq"] >= message["seq"]
+        delivered = read or row["delivered_seq"] >= message["seq"]
+        members.append(
+            {
+                **public_user(row),
+                "delivered": delivered,
+                "delivered_at": receipt_time(conn, chat_id, row["id"], "delivered", message["seq"]) if delivered else None,
+                "read": read,
+                "read_at": receipt_time(conn, chat_id, row["id"], "read", message["seq"]) if read else None,
+            }
+        )
+    return ok(sent_at=message["created_at"], members=members)
 
 
 def require_group(chat, owner_only=False):

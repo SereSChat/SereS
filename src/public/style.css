@@ -1967,7 +1967,8 @@ body.bright-body .chat-info-body {
   left: 50%;
   bottom: 16px;
   transform: translateX(-50%);
-  z-index: 3000;
+  /* Above the mobile sidebar, dialogs and menus; only alerts are higher. */
+  z-index: 99999998;
   width: min(520px, calc(100% - 32px));
   box-sizing: border-box;
   padding: 16px 18px;
@@ -2458,4 +2459,191 @@ body.bright-body .language-select {
   overflow: hidden;
   clip: rect(0 0 0 0);
   border: 0 !important;
+}
+
+/* ------------------------------------------------------- message actions */
+
+.message-edited {
+  margin-left: 6px;
+  font-size: 0.7rem;
+  opacity: 0.6;
+}
+
+.message-row {
+  -webkit-touch-callout: none;
+}
+
+.edit-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background-color: #1f2c34;
+  border-top: 2px solid #00a884;
+  color: #00a884;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.edit-bar.modal-hidden {
+  display: none;
+}
+
+.edit-cancel {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+body.bright-body .edit-bar {
+  background-color: #f0f2f5;
+}
+
+.message-info-preview {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background-color: #005c4b;
+  color: #e9edef;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.info-member {
+  padding: 8px 0;
+  border-top: 1px solid rgba(134, 150, 160, 0.2);
+}
+
+.info-member-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.info-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 0.85rem;
+  color: #8696a0;
+}
+
+.info-line.done .info-icon {
+  color: #53bdeb;
+}
+
+.info-label {
+  flex: 1;
+}
+
+/* Swipe-to-info hint on phones. */
+.message-row {
+  position: relative;
+}
+
+.message-row.swipe-ready::after {
+  content: "ℹ️";
+  position: absolute;
+  right: -34px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 1.1rem;
+}
+
+.messages-container {
+  overflow-x: hidden;
+}
+
+/* "is typing…" in the chat header and the chat list */
+.chat-subtitle.typing,
+.item-status.typing {
+  color: #00a884 !important;
+  font-style: italic;
+}
+
+.settings-hint {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+  color: #8696a0;
+}
+
+/* Ticks on own messages */
+.message-ticks {
+  margin-left: 6px;
+  font-size: 0.7rem;
+  letter-spacing: -2px;
+  color: #8696a0;
+  white-space: nowrap;
+}
+
+.message-ticks.read {
+  color: #53bdeb;
+}
+
+/* "… is typing" bubble with bouncing dots, bottom left above the input */
+.typing-bubble {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  margin: 0 0 6px 16px;
+  padding: 6px 12px;
+  border-radius: 16px 16px 16px 4px;
+  background-color: #202c33;
+  color: #8696a0;
+  font-size: 0.75rem;
+  animation: fade-in 0.2s ease-out;
+}
+
+.typing-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.typing-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #00a884;
+  animation: typing-bounce 1.2s infinite ease-in-out;
+}
+
+.typing-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+body.bright-body .typing-bubble {
+  background-color: #ffffff;
+  color: #54656f;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-dots i {
+    animation: none;
+    opacity: 0.8;
+  }
 }

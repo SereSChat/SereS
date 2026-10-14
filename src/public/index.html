@@ -34,8 +34,7 @@
         <div class="section-title chat-section-header" id="chats-header">
           <span data-i18n="app.chatsHeader">Direct Messages &amp; Groups</span>
           <span class="section-actions">
-            <button class="add-dm-button" type="button" id="btn-new-dm" title="New direct message" data-i18n-title="app.newDm">+</button>
-            <button class="add-dm-button" type="button" id="btn-new-group" title="New group" data-i18n-title="app.newGroup">#</button>
+            <button class="add-dm-button" type="button" id="btn-new-chat" title="New message" data-i18n-title="newChat.button">+</button>
           </span>
         </div>
         <div class="list-search-wrap">
@@ -103,6 +102,14 @@
         </div>
       </div>
 
+      <div class="typing-bubble modal-hidden" id="typing-bubble" aria-live="polite">
+        <span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span id="typing-bubble-text"></span>
+      </div>
+      <div class="edit-bar modal-hidden" id="edit-bar">
+        <span data-i18n="msg.editing">✏️ Editing message</span>
+        <button class="edit-cancel" type="button" id="edit-cancel" aria-label="Cancel" data-i18n-aria-label="common.cancel">✕</button>
+      </div>
       <div class="input-container modal-hidden" id="chat-input-area">
         <div class="input-box">
           <textarea id="message-input-field" rows="1" maxlength="4000" placeholder="Type a message..." data-i18n-placeholder="chat.placeholder"></textarea>
@@ -164,30 +171,17 @@
       </div>
     </div>
 
-    <!-- New direct message -->
-    <div class="modal-overlay modal-hidden" id="new-dm-modal">
+    <!-- New message: one friend = direct chat, several = group -->
+    <div class="modal-overlay modal-hidden" id="new-chat-modal">
       <div class="modal-box">
-        <h3 data-i18n="modal.newDmTitle">New chat</h3>
-        <p data-i18n="modal.newDmText">Pick a friend to start a direct message.</p>
-        <div class="picker-list" id="new-dm-list"></div>
-        <h4 class="modal-warning" id="warning-new-dm"></h4>
+        <h3 data-i18n="newChat.title">New message</h3>
+        <p data-i18n="newChat.text">Pick one friend for a direct chat, or several for a group chat.</p>
+        <div class="picker-list" id="new-chat-list"></div>
+        <input type="text" id="new-chat-name" class="modal-hidden" maxlength="64" placeholder="Group name" data-i18n-placeholder="newChat.groupName" />
+        <h4 class="modal-warning" id="warning-new-chat"></h4>
         <div class="modal-buttons">
           <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.cancel">Cancel</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- New group -->
-    <div class="modal-overlay modal-hidden" id="new-group-modal">
-      <div class="modal-box">
-        <h3 data-i18n="modal.newGroupTitle">New group</h3>
-        <input type="text" id="new-group-name" placeholder="Group name" data-i18n-placeholder="modal.groupName" maxlength="64" />
-        <p data-i18n="modal.groupMembers">Members (only friends can be added):</p>
-        <div class="picker-list" id="new-group-list"></div>
-        <h4 class="modal-warning" id="warning-new-group"></h4>
-        <div class="modal-buttons">
-          <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.cancel">Cancel</button>
-          <button class="modal-btn confirm-btn" type="button" id="confirm-new-group" data-i18n="common.create">Create</button>
+          <button class="modal-btn confirm-btn" type="button" id="confirm-new-chat" data-i18n="newChat.start">Start chat</button>
         </div>
       </div>
     </div>
@@ -197,6 +191,18 @@
       <div class="modal-box modal-wide">
         <h3 id="chat-info-title">Chat info</h3>
         <div id="chat-info-body" class="chat-info-body"></div>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.close">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Message info -->
+    <div class="modal-overlay modal-hidden" id="message-info-modal">
+      <div class="modal-box">
+        <h3 data-i18n="msgInfo.title">Message info</h3>
+        <div class="message-info-preview" id="message-info-preview"></div>
+        <div class="message-info-body" id="message-info-body"></div>
         <div class="modal-buttons">
           <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.close">Close</button>
         </div>
@@ -245,6 +251,7 @@
         <div class="settings-section">
           <p data-i18n="settings.cookiesText">Cookies:</p>
           <button class="modal-btn secondary-btn" type="button" id="cookie-settings-btn" data-i18n="settings.cookiesButton">🍪 Cookie settings</button>
+          <p class="settings-hint" id="cookie-status"></p>
         </div>
 
         <div class="settings-section">
