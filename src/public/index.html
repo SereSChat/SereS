@@ -89,10 +89,19 @@
           <span id="current-chat-name">Welcome</span>
           <span id="current-chat-sub" class="chat-subtitle"></span>
         </div>
+        <button class="header-icon-button modal-hidden" type="button" id="search-btn" title="Search in chat" data-i18n-title="search.open">🔍</button>
         <button class="header-icon-button modal-hidden" type="button" id="chat-info-btn" title="Chat info" data-i18n-title="app.chatInfo">ⓘ</button>
       </div>
 
       <div id="key-warning" class="key-warning modal-hidden"></div>
+      <div class="search-bar modal-hidden" id="search-bar">
+        <input type="search" id="search-input" placeholder="Search in this chat..." data-i18n-placeholder="search.placeholder" autocomplete="off" />
+        <span class="search-count" id="search-count"></span>
+        <button class="header-icon-button small" type="button" id="search-prev" title="Older" data-i18n-title="search.older">▲</button>
+        <button class="header-icon-button small" type="button" id="search-next" title="Newer" data-i18n-title="search.newer">▼</button>
+        <button class="header-icon-button small" type="button" id="search-close" title="Close" data-i18n-title="common.close">✕</button>
+      </div>
+      <div class="pinned-bar modal-hidden" id="pinned-bar" role="button" tabindex="0"></div>
 
       <div class="messages-container" id="messages">
         <div class="empty-state" id="empty-state">
@@ -102,6 +111,8 @@
         </div>
       </div>
 
+      <button class="jump-bottom modal-hidden" type="button" id="jump-bottom" aria-label="Jump to the newest message" data-i18n-aria-label="chat.jumpBottom">⌄</button>
+
       <div class="typing-bubble modal-hidden" id="typing-bubble" aria-live="polite">
         <span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
         <span id="typing-bubble-text"></span>
@@ -110,13 +121,38 @@
         <span data-i18n="msg.editing">✏️ Editing message</span>
         <button class="edit-cancel" type="button" id="edit-cancel" aria-label="Cancel" data-i18n-aria-label="common.cancel">✕</button>
       </div>
+      <div class="reply-bar modal-hidden" id="reply-bar">
+        <div class="reply-bar-content">
+          <strong id="reply-bar-name"></strong>
+          <span id="reply-bar-text"></span>
+        </div>
+        <button class="edit-cancel" type="button" id="reply-cancel" aria-label="Cancel" data-i18n-aria-label="common.cancel">✕</button>
+      </div>
+      <div class="attach-bar modal-hidden" id="attach-bar"></div>
+      <div class="mention-list modal-hidden" id="mention-list"></div>
+      <div class="emoji-slot modal-hidden" id="emoji-slot"></div>
+      <div class="record-bar modal-hidden" id="record-bar">
+        <span class="record-dot" aria-hidden="true"></span>
+        <span data-i18n="voice.recording">Recording</span>
+        <span class="record-time" id="record-time">0:00</span>
+        <button class="pill-btn secondary" type="button" id="record-cancel" data-i18n="common.cancel">Cancel</button>
+        <button class="pill-btn" type="button" id="record-send" data-i18n="chat.send">Send</button>
+      </div>
       <div class="input-container modal-hidden" id="chat-input-area">
+        <button class="input-icon-button" type="button" id="emoji-btn" title="Emoji" data-i18n-title="emoji.title">😊</button>
+        <button class="input-icon-button" type="button" id="attach-btn" title="Attach file" data-i18n-title="file.attach">📎</button>
+        <input type="file" id="attach-input" multiple hidden />
         <div class="input-box">
           <textarea id="message-input-field" rows="1" maxlength="4000" placeholder="Type a message..." data-i18n-placeholder="chat.placeholder"></textarea>
         </div>
         <button class="action-button icon-button" type="button" id="send-btn" aria-label="Send" data-i18n-aria-label="chat.send">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+          </svg>
+        </button>
+        <button class="action-button icon-button modal-hidden" type="button" id="record-btn" aria-label="Record a voice message" data-i18n-aria-label="voice.record" title="Record a voice message" data-i18n-title="voice.record">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"></path>
           </svg>
         </button>
       </div>
@@ -197,6 +233,41 @@
       </div>
     </div>
 
+    <!-- Forward a message -->
+    <div class="modal-overlay modal-hidden" id="forward-modal">
+      <div class="modal-box">
+        <h3 data-i18n="forward.title">Forward message</h3>
+        <div class="message-info-preview" id="forward-preview"></div>
+        <p data-i18n="forward.text">Pick the chats to send it to. It is encrypted again for their members.</p>
+        <div class="picker-list" id="forward-list"></div>
+        <h4 class="modal-warning" id="warning-forward"></h4>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.cancel">Cancel</button>
+          <button class="modal-btn confirm-btn" type="button" id="confirm-forward" data-i18n="forward.send">Forward</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pinned messages -->
+    <div class="modal-overlay modal-hidden" id="pins-modal">
+      <div class="modal-box modal-wide">
+        <h3 data-i18n="pins.title">📌 Pinned messages</h3>
+        <div class="pins-body" id="pins-body"></div>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.close">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Image viewer -->
+    <div class="lightbox modal-hidden" id="lightbox">
+      <img id="lightbox-img" alt="" />
+      <div class="lightbox-bar">
+        <span id="lightbox-name"></span>
+        <button class="pill-btn" type="button" id="lightbox-download" data-i18n="file.download">Download</button>
+      </div>
+    </div>
+
     <!-- Message info -->
     <div class="modal-overlay modal-hidden" id="message-info-modal">
       <div class="modal-box">
@@ -244,6 +315,14 @@
         </div>
 
         <div class="settings-section">
+          <p data-i18n="privacy.text">Privacy &amp; notifications:</p>
+          <button class="modal-btn secondary-btn" type="button" id="privacy-toggle"></button>
+          <p class="settings-hint" data-i18n="privacy.hint">If you hide your last seen, you can't see other people's either.</p>
+          <button class="modal-btn secondary-btn" type="button" id="notify-toggle"></button>
+          <button class="modal-btn secondary-btn" type="button" id="notify-preview-toggle"></button>
+        </div>
+
+        <div class="settings-section">
           <p data-i18n="settings.languageText">Language:</p>
           <div id="language-select-slot"></div>
         </div>
@@ -283,6 +362,8 @@
     <script src="i18n.js"></script>
     <script src="consent.js"></script>
     <script src="qr.js"></script>
+    <script src="emoji.js"></script>
+    <script src="format.js"></script>
     <script src="crypto.js"></script>
     <script src="index.js"></script>
   </body>
