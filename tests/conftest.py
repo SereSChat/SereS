@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.abspath(BACKEND))
 @pytest.fixture
 def app_module(tmp_path, monkeypatch):
     monkeypatch.setenv("SERES_DATA_DIR", str(tmp_path))
-    monkeypatch.delenv("URL", raising=False)
+    # An empty URL keeps .env from switching on the uptime heartbeat during tests.
+    monkeypatch.setenv("URL", "")
     for name in ("app", "db", "legacy_migration"):
         sys.modules.pop(name, None)
     module = importlib.import_module("app")

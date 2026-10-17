@@ -444,8 +444,29 @@ const SeresCrypto = (() => {
     return JSON.parse(decoder.decode(plain));
   }
 
+  // ------------------------------------------------------------ attachments
+  // Each file gets its own random AES-256-GCM key. The key and IV are put into
+  // the (encrypted and signed) message, the server only stores the ciphertext.
+
+  const FILE_AAD = encoder.encode("seres-file-v1");
+
+  async function encryptFile(data: ArrayBuffer): Promise<{ data: ArrayBuffer; key: string; iv: string }> {
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
+    const iv = randomBytes(12);
+    const ct = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: FILE_AAD }, key, data);
+    const raw = await subtle.exportKey("raw", key);
+    return { data: ct, key: toB64(raw), iv: toB64(iv) };
+  }
+
+  async function decryptFile(data: ArrayBuffer, keyB64: string, ivB64: string): Promise<ArrayBuffer> {
+    const key = await subtle.importKey("raw", fromB64(keyB64), "AES-GCM", false, ["decrypt"]);
+    return subtle.decrypt({ name: "AES-GCM", iv: fromB64(ivB64), additionalData: FILE_AAD }, key, data);
+  }
+
   return {
     DEFAULT_ITERATIONS,
+    encryptFile,
+    decryptFile,
     newSalt,
     deriveAccountKeys,
     createKeyBundle,

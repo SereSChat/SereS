@@ -154,6 +154,59 @@ def test_profile_and_mute(alice_bob):
     assert alice.get("/api/users/nobody/profile").status_code == 404
 
 
+def test_message_info_shows_delivered_and_read(alice_bob):
+    alice, bob = alice_bob
+    chat_id = alice.post("/api/chats", json={"type": "dm", "username": "bob"}).json["chat_id"]
+    message_id = str(uuid.uuid4())
+    alice.post(f"/api/chats/{chat_id}/messages", json={"id": message_id, "payload": envelope([alice.user_id, bob.user_id])})
+
+    info = alice.get(f"/api/chats/{chat_id}/messages/{message_id}/info").json
+    assert info["sent_at"] and info["members"][0]["delivered"] is False
+
+    receipts = alice.get(f"/api/chats/{chat_id}/messages").json["receipts"]
+    seq = bob.get(f"/api/chats/{chat_id}/messages").json["messages"][-1]["seq"]
+    assert receipts["delivered_seq"] < seq
+    member = alice.get(f"/api/chats/{chat_id}/messages/{message_id}/info").json["members"][0]
+    assert member["delivered"] and member["delivered_at"] and not member["read"]
+    receipts = alice.get(f"/api/chats/{chat_id}/messages").json["receipts"]
+    assert receipts["delivered_seq"] >= seq and receipts["read_seq"] < seq
+
+    bob.post(f"/api/chats/{chat_id}/read", json={"seq": seq})
+    assert alice.get(f"/api/chats/{chat_id}/messages").json["receipts"]["read_seq"] >= seq
+    member = alice.get(f"/api/chats/{chat_id}/messages/{message_id}/info").json["members"][0]
+    assert member["read"] and member["read_at"] and member["username"] == "bob"
+
+
+def test_edit_and_delete_message(alice_bob):
+    alice, bob = alice_bob
+    chat_id = alice.post("/api/chats", json={"type": "dm", "username": "bob"}).json["chat_id"]
+    message_id = str(uuid.uuid4())
+    members = [alice.user_id, bob.user_id]
+    alice.post(f"/api/chats/{chat_id}/messages", json={"id": message_id, "payload": envelope(members)})
+
+    new_payload = envelope(members)
+    assert bob.post(f"/api/chats/{chat_id}/messages/{message_id}/edit", json={"payload": new_payload}).status_code == 404
+    assert alice.post(f"/api/chats/{chat_id}/messages/{message_id}/edit", json={"payload": new_payload}).status_code == 200
+    message = bob.get(f"/api/chats/{chat_id}/messages").json["messages"][-1]
+    assert message["payload"] == new_payload and message["edited_at"]
+
+    alice.post(f"/api/chats/{chat_id}/messages/{message_id}/delete")
+    assert bob.get(f"/api/chats").json["chats"][0]["last_message"] is None
+    assert alice.post(f"/api/chats/{chat_id}/messages/{message_id}/edit", json={"payload": new_payload}).status_code == 404
+
+
+def test_typing_indicator(alice_bob):
+    alice, bob = alice_bob
+    chat_id = alice.post("/api/chats", json={"type": "dm", "username": "bob"}).json["chat_id"]
+    assert bob.get(f"/api/chats/{chat_id}/messages").json["typing"] == []
+    alice.post(f"/api/chats/{chat_id}/typing", json={"typing": True})
+    assert [u["username"] for u in bob.get(f"/api/chats/{chat_id}/messages").json["typing"]] == ["alice"]
+    assert alice.get(f"/api/chats/{chat_id}/messages").json["typing"] == []
+    assert bob.get("/api/chats").json["chats"][0]["typing"][0]["username"] == "alice"
+    alice.post(f"/api/chats/{chat_id}/typing", json={"typing": False})
+    assert bob.get(f"/api/chats/{chat_id}/messages").json["typing"] == []
+
+
 def test_security_headers(make_client):
     res = make_client().get("/api/online")
     assert "script-src 'self'" in res.headers["Content-Security-Policy"]
@@ -340,6 +393,7 @@ def test_legacy_account_and_chat_migration(tmp_path, monkeypatch):
     hist.close()
 
     monkeypatch.setenv("SERES_DATA_DIR", str(data))
+    monkeypatch.setenv("URL", "")
     for name in ("app", "db", "legacy_migration"):
         sys.modules.pop(name, None)
     module = importlib.import_module("app")

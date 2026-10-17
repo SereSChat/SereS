@@ -22,6 +22,7 @@ The **SereS Beta** is currently live and directly accessible on our official web
 - **Best of Both Worlds:** Combines the simple direct messaging of WhatsApp with the rich community structure of Discord.
 - **Real-time Engine:** Ultra-fast messaging, rich media sharing, and instant updates.
 - **Dynamic Spaces:** Effortlessly jump between private 1-on-1 chats and group chats.
+- **Rich Messaging:** Replies, emoji reactions, encrypted photos, files and voice messages, Discord-style formatting, @mentions, pinned messages, search and disappearing messages.
 - **End-to-End Encrypted:** Every message is encrypted in your browser. The server only ever sees ciphertext.
 
 ---
@@ -99,10 +100,14 @@ Optional environment variables: `PORT`, `HOST`, `SERES_DEBUG=1` (never in produc
   sender, ciphertext, wrapped keys) is signed with the sender's ECDSA key. The server checks that
   a message is encrypted for exactly the current members, but can neither read nor forge it.
 - **Groups:** new members only receive keys for messages sent after they joined.
+- **Attachments:** every file is encrypted in the browser with its own AES-256-GCM key. The
+  server only stores the ciphertext; the key travels inside the encrypted, signed message.
+  Reactions, replies and forwarded messages are encrypted the same way.
 - **Verification:** each chat shows a 60-digit security code (like WhatsApp/Signal). Compare it
   with your contact; contacts' key fingerprints are pinned on first use and you get a warning
   (and sending is blocked) if the server ever hands out a different key.
 - **Limits:** this is not the Signal protocol – there is no forward secrecy (a stolen password +
   server database exposes old messages), and metadata (who chats with whom, when) is visible to
-  the server. Messages from before v1.1 stay readable and are marked *not encrypted*.
+  the server (also that a message is a reaction, which messages are pinned and the
+  disappearing-messages timer). Messages from before v1.1 stay readable and are marked *not encrypted*.
 - Forgetting your password means losing access to your encrypted history – there is no recovery.

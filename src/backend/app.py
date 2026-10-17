@@ -1,4 +1,5 @@
 import base64
+import datetime
 import functools
 import hashlib
 import hmac
@@ -40,6 +41,14 @@ MAX_KDF_ITERATIONS = 5_000_000
 MAX_GROUP_MEMBERS = 50
 MAX_CIPHERTEXT_LEN = 64 * 1024
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
+# Encrypted attachments (images, files, voice messages). AES-GCM adds 16 bytes.
+MAX_FILE_BYTES = 16 * 1024 * 1024 + 1024
+MAX_FILES_PER_MESSAGE = 10
+FILES = os.path.join(DATA_DIR, "files")
+# Allowed timers for disappearing messages (seconds), 0 = off.
+DISAPPEAR_OPTIONS = (0, 3600, 86400, 7 * 86400, 90 * 86400)
+MAX_PINS = 50
+ONLINE_SECONDS = 45
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,20}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -47,7 +56,7 @@ B64_RE = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
 
 app = flask.Flask(__name__, static_folder="../public", static_url_path="/")
 app.config["DEBUG"] = False
-app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_BYTES + 64 * 1024
 ph = PasswordHasher(time_cost=4)
 # Used to keep login timing the same for unknown users.
 DUMMY_HASH = ph.hash(secrets.token_hex(16))
@@ -73,6 +82,7 @@ def close_db(exception):
 
 def init_app():
     os.makedirs(USER_DATA, exist_ok=True)
+    os.makedirs(FILES, exist_ok=True)
     conn = db.connect(DB)
     try:
         db.init_schema(conn)
@@ -178,14 +188,14 @@ def security_headers(response):
     response.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' blob: data:; media-src 'self'; object-src 'self'; "
+        "img-src 'self' blob: data:; media-src 'self' blob:; object-src 'self'; "
         "frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; "
         "frame-ancestors 'self'",
     )
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(self), geolocation=()")
     if flask.request.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
     if flask.request.is_secure:
@@ -251,7 +261,46 @@ def current_user():
             .fetchone()
         )
         g.user = row
+        if row is not None:
+            touch_last_seen(row)
     return g.user
+
+
+def touch_last_seen(user):
+    """Remembers the last activity for "online" / "last seen" (at most every 20 seconds)."""
+    now = db.now_iso()
+    last = user["last_seen"]
+    if last and seconds_between(last, now) < 20:
+        return
+    conn = get_db()
+    conn.execute("UPDATE users SET last_seen = ? WHERE id = ?", (now, user["id"]))
+    conn.commit()
+
+
+def parse_iso(value):
+    return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+
+
+def seconds_between(earlier, later):
+    try:
+        return (parse_iso(later) - parse_iso(earlier)).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def iso_in(seconds):
+    moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def presence(viewer, other):
+    """Online state / last seen, only if both people share it (like WhatsApp)."""
+    if not other or not viewer["show_last_seen"] or not other["show_last_seen"] or not other["last_seen"]:
+        return None
+    return {
+        "online": seconds_between(other["last_seen"], db.now_iso()) < ONLINE_SECONDS,
+        "last_seen": other["last_seen"],
+    }
 
 
 def login_required(view):
@@ -302,6 +351,7 @@ def own_user(row):
         "pub_ecdh": row["pub_ecdh"],
         "pub_sign": row["pub_sign"],
         "enc_private": row["enc_private"],
+        "show_last_seen": bool(row["show_last_seen"]),
     }
 
 
@@ -939,6 +989,7 @@ def user_profile(username):
         is not None,
         muted=is_muted(me_id, other["id"]),
         request=None if request_row is None else "outgoing" if request_row["from_id"] == me_id else "incoming",
+        presence=presence(current_user(), other) if can_see_user(me_id, other["id"]) and other["id"] != me_id else None,
     )
 
 
@@ -951,7 +1002,8 @@ def membership(chat_id, user_id):
     return (
         get_db()
         .execute(
-            """SELECT c.*, m.role, m.joined_seq, m.cleared_seq, m.last_read_seq, m.hidden
+            """SELECT c.*, m.role, m.joined_seq, m.cleared_seq, m.last_read_seq, m.hidden,
+                      m.pinned, m.archived
                FROM chats c JOIN chat_members m ON m.chat_id = c.id
                WHERE c.id = ? AND m.user_id = ?""",
             (chat_id, user_id),
@@ -969,7 +1021,8 @@ def require_membership(chat_id):
 
 def chat_members(chat_id):
     return get_db().execute(
-        """SELECT u.id, u.username, u.display_name, u.pub_ecdh, u.pub_sign, m.role
+        """SELECT u.id, u.username, u.display_name, u.pub_ecdh, u.pub_sign, m.role,
+                  u.last_seen, u.show_last_seen
            FROM chat_members m JOIN users u ON u.id = m.user_id
            WHERE m.chat_id = ? ORDER BY m.joined_at, u.username COLLATE NOCASE""",
         (chat_id,),
@@ -999,7 +1052,10 @@ def serialize_message(row):
         "kind": row["kind"],
         "payload": payload,
         "created_at": row["created_at"],
+        "edited_at": row["edited_at"],
         "deleted": bool(row["deleted"]),
+        "silent": bool(row["silent"]),
+        "expires_at": row["expires_at"],
     }
 
 
@@ -1028,12 +1084,13 @@ def chat_summary(chat, me_id):
     conn = get_db()
     floor = max(chat["joined_seq"], chat["cleared_seq"])
     last = conn.execute(
-        MESSAGE_SELECT + " WHERE m.chat_id = ? AND m.seq > ? ORDER BY m.seq DESC LIMIT 1",
+        MESSAGE_SELECT
+        + " WHERE m.chat_id = ? AND m.seq > ? AND m.deleted = 0 AND m.silent = 0 ORDER BY m.seq DESC LIMIT 1",
         (chat["id"], floor),
     ).fetchone()
     unread = conn.execute(
         """SELECT COUNT(*) AS c FROM messages WHERE chat_id = ? AND seq > ? AND deleted = 0
-           AND kind != 'system' AND (sender_id IS NULL OR sender_id != ?)""",
+           AND silent = 0 AND kind != 'system' AND (sender_id IS NULL OR sender_id != ?)""",
         (chat["id"], max(floor, chat["last_read_seq"]), me_id),
     ).fetchone()["c"]
     members = chat_members(chat["id"])
@@ -1047,6 +1104,9 @@ def chat_summary(chat, me_id):
         "last_message": serialize_message(last) if last else None,
         "unread": unread,
         "last_activity": chat["last_activity"],
+        "pinned": bool(chat["pinned"]),
+        "archived": bool(chat["archived"]),
+        "disappear_seconds": chat["disappear_seconds"],
     }
     if chat["type"] == "dm":
         others = [m for m in members if m["id"] != me_id]
@@ -1056,6 +1116,8 @@ def chat_summary(chat, me_id):
         summary["name"] = display_name(other) if other else summary["other_user"]
         summary["blocked"] = bool(other) and is_blocked_between(me_id, other["id"])
         summary["muted"] = bool(other) and is_muted(me_id, other["id"])
+        summary["presence"] = presence(current_user(), other)
+    summary["typing"] = typing_users(chat["id"], me_id)
     return summary
 
 
@@ -1065,11 +1127,17 @@ def chat_summary(chat, me_id):
 def list_chats():
     me_id = current_user()["id"]
     rows = get_db().execute(
-        """SELECT c.*, m.role, m.joined_seq, m.cleared_seq, m.last_read_seq, m.hidden
+        """SELECT c.*, m.role, m.joined_seq, m.cleared_seq, m.last_read_seq, m.hidden,
+                  m.pinned, m.archived
            FROM chats c JOIN chat_members m ON m.chat_id = c.id
            WHERE m.user_id = ? AND m.hidden = 0 ORDER BY c.last_activity DESC""",
         (me_id,),
     ).fetchall()
+    conn = get_db()
+    purge_expired(conn)
+    for row in rows:
+        advance_receipt(conn, row["id"], me_id, "delivered", max_seq(conn, row["id"]))
+    conn.commit()
     return ok(chats=[chat_summary(row, me_id) for row in rows])
 
 
@@ -1176,8 +1244,19 @@ def chat_details(chat_id):
     chat = require_membership(chat_id)
     me_id = current_user()["id"]
     summary = chat_summary(chat, me_id)
-    summary["members"] = [{**dict(row), "display_name": display_name(row)} for row in chat_members(chat_id)]
+    summary["members"] = [
+        {
+            "id": row["id"],
+            "username": row["username"],
+            "display_name": display_name(row),
+            "pub_ecdh": row["pub_ecdh"],
+            "pub_sign": row["pub_sign"],
+            "role": row["role"],
+        }
+        for row in chat_members(chat_id)
+    ]
     summary["owner_id"] = chat["owner_id"]
+    summary["pins"] = chat_pins(chat)
     return ok(chat=summary)
 
 
@@ -1189,6 +1268,7 @@ def get_chat_messages(chat_id):
     args = flask.request.args
     limit = min(max(args.get("limit", 50, type=int), 1), 200)
     conn = get_db()
+    purge_expired(conn)
     if args.get("since_rev") is not None:
         rows = conn.execute(
             MESSAGE_SELECT + " WHERE m.chat_id = ? AND m.seq > ? AND m.rev > ? ORDER BY m.rev ASC LIMIT ?",
@@ -1201,7 +1281,15 @@ def get_chat_messages(chat_id):
             + " WHERE m.chat_id = ? AND m.seq > ? AND m.seq < ? ORDER BY m.seq DESC LIMIT ?",
             (chat_id, floor, before if before else 2**62, limit),
         ).fetchall()[::-1]
-    return ok(messages=[serialize_message(row) for row in rows], has_more=len(rows) == limit)
+    if rows:
+        advance_receipt(conn, chat_id, current_user()["id"], "delivered", max(row["seq"] for row in rows))
+        conn.commit()
+    return ok(
+        messages=[serialize_message(row) for row in rows],
+        has_more=len(rows) == limit,
+        typing=typing_users(chat_id, current_user()["id"]),
+        receipts=member_receipts(chat_id, current_user()["id"]),
+    )
 
 
 @app.route("/api/get_messages")
@@ -1254,23 +1342,47 @@ def post_message(chat_id):
     problem = validate_envelope(data.get("payload"), [m["id"] for m in members])
     if problem:
         return error(problem, 409 if "members" in problem else 400)
+    # Silent messages (reactions) don't bump the chat or count as unread.
+    silent = data.get("silent") is True
+    file_ids = data.get("files") or []
+    if (
+        not isinstance(file_ids, list)
+        or len(file_ids) > MAX_FILES_PER_MESSAGE
+        or not all(isinstance(f, str) and len(f) <= 64 for f in file_ids)
+    ):
+        return error("Invalid files")
+    expires_at = iso_in(chat["disappear_seconds"]) if chat["disappear_seconds"] else None
 
     conn = get_db()
     try:
         with db.write_transaction(conn):
+            for file_id in file_ids:
+                attached = conn.execute(
+                    """UPDATE files SET message_id = ? WHERE id = ? AND chat_id = ? AND uploader_id = ?
+                       AND message_id IS NULL""",
+                    (message_id, file_id, chat_id, me_id),
+                )
+                if attached.rowcount == 0:
+                    raise LookupError(file_id)
             rev = db.next_rev(conn)
             cur = conn.execute(
-                "INSERT INTO messages (id, chat_id, sender_id, kind, payload, created_at, rev) VALUES (?, ?, ?, 'e2e', ?, ?, ?)",
-                (message_id, chat_id, me_id, json.dumps(data["payload"]), db.now_iso(), rev),
+                """INSERT INTO messages (id, chat_id, sender_id, kind, payload, created_at, rev, silent, expires_at)
+                   VALUES (?, ?, ?, 'e2e', ?, ?, ?, ?, ?)""",
+                (message_id, chat_id, me_id, json.dumps(data["payload"]), db.now_iso(), rev, int(silent), expires_at),
             )
-            conn.execute("UPDATE chats SET last_activity = ? WHERE id = ?", (db.now_iso(), chat_id))
-            conn.execute("UPDATE chat_members SET hidden = 0 WHERE chat_id = ?", (chat_id,))
+            if not silent:
+                conn.execute("UPDATE chats SET last_activity = ? WHERE id = ?", (db.now_iso(), chat_id))
+                conn.execute("UPDATE chat_members SET hidden = 0 WHERE chat_id = ?", (chat_id,))
             conn.execute(
-                "UPDATE chat_members SET last_read_seq = ? WHERE chat_id = ? AND user_id = ?",
-                (cur.lastrowid, chat_id, me_id),
+                "UPDATE chat_members SET last_read_seq = ?, delivered_seq = ? WHERE chat_id = ? AND user_id = ?",
+                (cur.lastrowid, cur.lastrowid, chat_id, me_id),
             )
     except sqlite3.IntegrityError:
         return error("Duplicate message id", 409)
+    except LookupError:
+        return error("Attachment not found, please upload it again", 400)
+    with typing_lock:
+        typing_state.pop((chat_id, me_id), None)
     return ok(message="Message sent successfully!", seq=cur.lastrowid, rev=rev)
 
 
@@ -1290,9 +1402,69 @@ def delete_message(chat_id, message_id):
             "UPDATE messages SET deleted = 1, payload = NULL, rev = ? WHERE id = ? AND chat_id = ? AND sender_id = ? AND deleted = 0",
             (db.next_rev(conn), message_id, chat_id, current_user()["id"]),
         )
+        if cur.rowcount:
+            forget_message_data(conn, chat_id, [message_id])
     if cur.rowcount == 0:
         return error("Message not found", 404)
     return ok(message="Message deleted")
+
+
+@app.route("/api/chats/<chat_id>/messages/<message_id>/edit", methods=["POST"])
+@login_required
+def edit_message(chat_id, message_id):
+    """Replaces the encrypted content of an own message (re-encrypted by the client)."""
+    me_id = current_user()["id"]
+    require_membership(chat_id)
+    members = chat_members(chat_id)
+    problem = validate_envelope(json_body().get("payload"), [m["id"] for m in members])
+    if problem:
+        return error(problem, 409 if "members" in problem else 400)
+    conn = get_db()
+    with db.write_transaction(conn):
+        cur = conn.execute(
+            """UPDATE messages SET payload = ?, edited_at = ?, rev = ?
+               WHERE id = ? AND chat_id = ? AND sender_id = ? AND kind = 'e2e' AND deleted = 0""",
+            (json.dumps(json_body()["payload"]), db.now_iso(), db.next_rev(conn), message_id, chat_id, me_id),
+        )
+    if cur.rowcount == 0:
+        return error("Message not found", 404)
+    return ok(message="Message edited")
+
+
+# Who is typing right now. Kept in memory only: it is short-lived and not worth storing.
+TYPING_SECONDS = 6
+typing_state = {}  # (chat_id, user_id) -> time.monotonic() of the last signal
+typing_lock = threading.Lock()
+
+
+def typing_users(chat_id, me_id):
+    now = time.monotonic()
+    with typing_lock:
+        ids = [
+            uid for (cid, uid), at in typing_state.items()
+            if cid == chat_id and uid != me_id and now - at < TYPING_SECONDS
+        ]
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    rows = get_db().execute(f"SELECT id, username, display_name FROM users WHERE id IN ({placeholders})", ids)
+    return [public_user(row) for row in rows]
+
+
+@app.route("/api/chats/<chat_id>/typing", methods=["POST"])
+@login_required
+def set_typing(chat_id):
+    require_membership(chat_id)
+    key = (chat_id, current_user()["id"])
+    now = time.monotonic()
+    with typing_lock:
+        if json_body().get("typing") is False:
+            typing_state.pop(key, None)
+        else:
+            typing_state[key] = now
+        for stale in [k for k, at in typing_state.items() if now - at >= TYPING_SECONDS]:
+            del typing_state[stale]
+    return ok()
 
 
 @app.route("/api/chats/<chat_id>/read", methods=["POST"])
@@ -1303,12 +1475,82 @@ def mark_read(chat_id):
     if not isinstance(seq, int):
         return error("Invalid seq")
     conn = get_db()
-    conn.execute(
-        "UPDATE chat_members SET last_read_seq = MAX(last_read_seq, MIN(?, ?)) WHERE chat_id = ? AND user_id = ?",
-        (seq, max_seq(conn, chat_id), chat_id, current_user()["id"]),
-    )
+    seq = min(seq, max_seq(conn, chat_id))
+    advance_receipt(conn, chat_id, current_user()["id"], "read", seq)
     conn.commit()
     return ok()
+
+
+def advance_receipt(conn, chat_id, user_id, kind, seq):
+    """Moves the member's delivered/read position forward and remembers when."""
+    kinds = ["delivered", "read"] if kind == "read" else ["delivered"]  # read implies delivered
+    for k in kinds:
+        column = "last_read_seq" if k == "read" else "delivered_seq"
+        cur = conn.execute(
+            f"UPDATE chat_members SET {column} = ? WHERE chat_id = ? AND user_id = ? AND {column} < ?",
+            (seq, chat_id, user_id, seq),
+        )
+        if cur.rowcount:
+            conn.execute(
+                "INSERT INTO receipts (chat_id, user_id, kind, seq, at) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, user_id, k, seq, db.now_iso()),
+            )
+
+
+def member_receipts(chat_id, me_id):
+    """Up to which message all other members have it delivered / have read it (for the ticks)."""
+    row = get_db().execute(
+        """SELECT MIN(delivered_seq) AS delivered, MIN(last_read_seq) AS read, COUNT(*) AS n
+           FROM chat_members WHERE chat_id = ? AND user_id != ?""",
+        (chat_id, me_id),
+    ).fetchone()
+    if not row["n"]:
+        return None
+    # Reading implies delivery (older rows may not have a delivered position yet).
+    return {"delivered_seq": max(row["delivered"], row["read"]), "read_seq": row["read"]}
+
+
+def receipt_time(conn, chat_id, user_id, kind, seq):
+    row = conn.execute(
+        "SELECT MIN(at) AS at FROM receipts WHERE chat_id = ? AND user_id = ? AND kind = ? AND seq >= ?",
+        (chat_id, user_id, kind, seq),
+    ).fetchone()
+    return row["at"]
+
+
+@app.route("/api/chats/<chat_id>/messages/<message_id>/info")
+@login_required
+def message_info(chat_id, message_id):
+    chat = require_membership(chat_id)
+    conn = get_db()
+    message = conn.execute(
+        "SELECT * FROM messages WHERE id = ? AND chat_id = ? AND deleted = 0 AND seq > ?",
+        (message_id, chat_id, max(chat["joined_seq"], chat["cleared_seq"])),
+    ).fetchone()
+    if message is None:
+        return error("Message not found", 404)
+    members = []
+    rows = conn.execute(
+        """SELECT u.id, u.username, u.display_name, m.delivered_seq, m.last_read_seq, m.joined_seq
+           FROM chat_members m JOIN users u ON u.id = m.user_id WHERE m.chat_id = ?""",
+        (chat_id,),
+    ).fetchall()
+    for row in rows:
+        # Skip the sender and people who joined after the message was sent.
+        if row["id"] == message["sender_id"] or row["joined_seq"] >= message["seq"]:
+            continue
+        read = row["last_read_seq"] >= message["seq"]
+        delivered = read or row["delivered_seq"] >= message["seq"]
+        members.append(
+            {
+                **public_user(row),
+                "delivered": delivered,
+                "delivered_at": receipt_time(conn, chat_id, row["id"], "delivered", message["seq"]) if delivered else None,
+                "read": read,
+                "read_at": receipt_time(conn, chat_id, row["id"], "read", message["seq"]) if read else None,
+            }
+        )
+    return ok(sent_at=message["created_at"], members=members)
 
 
 def require_group(chat, owner_only=False):
@@ -1343,6 +1585,10 @@ def leave_chat(conn, chat, user):
     conn.execute("DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user["id"]))
     remaining = chat_members(chat_id)
     if not remaining:
+        for row in conn.execute("SELECT id FROM files WHERE chat_id = ?", (chat_id,)).fetchall():
+            remove_file_blob(row["id"])
+        conn.execute("DELETE FROM files WHERE chat_id = ?", (chat_id,))
+        conn.execute("DELETE FROM pinned_messages WHERE chat_id = ?", (chat_id,))
         conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
         conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
         return
@@ -1405,6 +1651,243 @@ def delete_chat(chat_id):
                 (max_seq(conn, chat_id), chat_id, me["id"]),
             )
     return ok(message="Chat deleted successfully")
+
+
+# --------------------------------------------------------------------------
+# Attachments, pins, chat preferences, disappearing messages, privacy
+# --------------------------------------------------------------------------
+
+
+def file_path(file_id):
+    return os.path.join(FILES, file_id)
+
+
+def remove_file_blob(file_id):
+    try:
+        os.remove(file_path(file_id))
+    except FileNotFoundError:
+        pass
+
+
+def forget_message_data(conn, chat_id, message_ids):
+    """Removes attachments and pins of deleted or expired messages."""
+    for message_id in message_ids:
+        for row in conn.execute("SELECT id FROM files WHERE message_id = ?", (message_id,)).fetchall():
+            remove_file_blob(row["id"])
+        conn.execute("DELETE FROM files WHERE message_id = ?", (message_id,))
+        conn.execute(
+            "DELETE FROM pinned_messages WHERE chat_id = ? AND message_id = ?", (chat_id, message_id)
+        )
+
+
+_last_purge = [0.0]
+
+
+def purge_expired(conn, force=False):
+    """Deletes disappearing messages that expired and uploads nobody sent."""
+    now = time.monotonic()
+    if not force and now - _last_purge[0] < 5:
+        return
+    _last_purge[0] = now
+    stamp = db.now_iso()
+    expired = conn.execute(
+        "SELECT id, chat_id FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ? AND deleted = 0",
+        (stamp,),
+    ).fetchall()
+    stale_uploads = conn.execute(
+        "SELECT id FROM files WHERE message_id IS NULL AND created_at <= ?", (iso_in(-86400),)
+    ).fetchall()
+    if not expired and not stale_uploads:
+        return
+    with db.write_transaction(conn):
+        for row in expired:
+            conn.execute(
+                "UPDATE messages SET deleted = 1, payload = NULL, rev = ? WHERE id = ?",
+                (db.next_rev(conn), row["id"]),
+            )
+            forget_message_data(conn, row["chat_id"], [row["id"]])
+        for row in stale_uploads:
+            remove_file_blob(row["id"])
+            conn.execute("DELETE FROM files WHERE id = ?", (row["id"],))
+
+
+@app.route("/api/chats/<chat_id>/files", methods=["POST"])
+@login_required
+def upload_file(chat_id):
+    """Stores an encrypted attachment. The body is the raw ciphertext."""
+    me_id = current_user()["id"]
+    require_membership(chat_id)
+    if rate_limited(("upload", me_id), 30, 60):
+        return error("You are uploading too fast", 429)
+    conn = get_db()
+    pending = conn.execute(
+        "SELECT COUNT(*) AS c FROM files WHERE uploader_id = ? AND message_id IS NULL", (me_id,)
+    ).fetchone()["c"]
+    if pending >= 30:
+        return error("Too many unsent attachments, please try again later", 429)
+    data = flask.request.get_data(cache=False)
+    if not data:
+        return error("Empty file")
+    if len(data) > MAX_FILE_BYTES:
+        return error("Files can be at most 16 MB", 413)
+    file_id = uuid.uuid4().hex
+    with open(file_path(file_id), "wb") as f:
+        f.write(data)
+    conn.execute(
+        "INSERT INTO files (id, chat_id, uploader_id, message_id, size, created_at) VALUES (?, ?, ?, NULL, ?, ?)",
+        (file_id, chat_id, me_id, len(data), db.now_iso()),
+    )
+    conn.commit()
+    return ok(file_id=file_id)
+
+
+@app.route("/api/chats/<chat_id>/files/<file_id>")
+@login_required
+def download_file(chat_id, file_id):
+    chat = require_membership(chat_id)
+    me_id = current_user()["id"]
+    row = (
+        get_db()
+        .execute(
+            """SELECT f.*, m.seq FROM files f LEFT JOIN messages m ON m.id = f.message_id
+               WHERE f.id = ? AND f.chat_id = ?""",
+            (file_id, chat_id),
+        )
+        .fetchone()
+    )
+    visible = row is not None and (
+        (row["message_id"] is None and row["uploader_id"] == me_id)
+        or (row["seq"] is not None and row["seq"] > max(chat["joined_seq"], chat["cleared_seq"]))
+    )
+    if not visible or not os.path.exists(file_path(file_id)):
+        return error("File not found", 404)
+    response = flask.send_file(file_path(file_id), mimetype="application/octet-stream", max_age=0)
+    # Ciphertext never changes; the browser may keep it, but no shared cache.
+    response.headers["Cache-Control"] = "private, max-age=604800, immutable"
+    return response
+
+
+@app.route("/api/chats/<chat_id>/messages/<message_id>")
+@login_required
+def get_single_message(chat_id, message_id):
+    """One message, e.g. to show a pinned or quoted message that is not loaded yet."""
+    chat = require_membership(chat_id)
+    row = (
+        get_db()
+        .execute(
+            MESSAGE_SELECT + " WHERE m.id = ? AND m.chat_id = ? AND m.seq > ?",
+            (message_id, chat_id, max(chat["joined_seq"], chat["cleared_seq"])),
+        )
+        .fetchone()
+    )
+    if row is None:
+        return error("Message not found", 404)
+    return ok(message=serialize_message(row))
+
+
+def chat_pins(chat):
+    floor = max(chat["joined_seq"], chat["cleared_seq"])
+    rows = get_db().execute(
+        """SELECT p.message_id, p.pinned_at, m.seq, u.username, u.display_name
+           FROM pinned_messages p JOIN messages m ON m.id = p.message_id
+           LEFT JOIN users u ON u.id = p.pinned_by
+           WHERE p.chat_id = ? AND m.deleted = 0 AND m.seq > ? ORDER BY p.pinned_at DESC""",
+        (chat["id"], floor),
+    ).fetchall()
+    return [
+        {
+            "message_id": row["message_id"],
+            "seq": row["seq"],
+            "pinned_at": row["pinned_at"],
+            "pinned_by": display_name(row) if row["username"] else None,
+        }
+        for row in rows
+    ]
+
+
+@app.route("/api/chats/<chat_id>/pins", methods=["POST"])
+@login_required
+def pin_message(chat_id):
+    me = current_user()
+    chat = require_membership(chat_id)
+    data = json_body()
+    message_id = str_field(data, "message_id", 64)
+    pinned = data.get("pinned") is not False
+    conn = get_db()
+    message = conn.execute(
+        "SELECT seq FROM messages WHERE id = ? AND chat_id = ? AND deleted = 0 AND silent = 0 AND kind != 'system' AND seq > ?",
+        (message_id, chat_id, max(chat["joined_seq"], chat["cleared_seq"])),
+    ).fetchone()
+    if message is None:
+        return error("Message not found", 404)
+    with db.write_transaction(conn):
+        if pinned:
+            count = conn.execute(
+                "SELECT COUNT(*) AS c FROM pinned_messages WHERE chat_id = ?", (chat_id,)
+            ).fetchone()["c"]
+            if count >= MAX_PINS:
+                flask.abort(flask.make_response(error(f"At most {MAX_PINS} pinned messages")))
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO pinned_messages (chat_id, message_id, pinned_by, pinned_at) VALUES (?, ?, ?, ?)",
+                (chat_id, message_id, me["id"], db.now_iso()),
+            )
+            if cur.rowcount:
+                add_system_message(conn, chat_id, "pinned", actor=display_name(me))
+        else:
+            conn.execute(
+                "DELETE FROM pinned_messages WHERE chat_id = ? AND message_id = ?", (chat_id, message_id)
+            )
+    return ok(pins=chat_pins(membership(chat_id, me["id"])))
+
+
+@app.route("/api/chats/<chat_id>/prefs", methods=["POST"])
+@login_required
+def chat_prefs(chat_id):
+    """Personal settings of a chat: pinned to the top, archived."""
+    require_membership(chat_id)
+    data = json_body()
+    conn = get_db()
+    for column in ("pinned", "archived"):
+        if column in data:
+            if not isinstance(data[column], bool):
+                return error(f"Invalid '{column}'")
+            conn.execute(
+                f"UPDATE chat_members SET {column} = ? WHERE chat_id = ? AND user_id = ?",
+                (int(data[column]), chat_id, current_user()["id"]),
+            )
+    conn.commit()
+    return ok()
+
+
+@app.route("/api/chats/<chat_id>/disappearing", methods=["POST"])
+@login_required
+def set_disappearing(chat_id):
+    me = current_user()
+    chat = require_membership(chat_id)
+    if chat["type"] == "group" and chat["role"] != "owner":
+        return error("Only the group owner can do that", 403)
+    seconds = json_body().get("seconds")
+    if seconds not in DISAPPEAR_OPTIONS or isinstance(seconds, bool):
+        return error("Invalid timer")
+    if seconds == chat["disappear_seconds"]:
+        return ok(disappear_seconds=seconds)
+    conn = get_db()
+    with db.write_transaction(conn):
+        conn.execute("UPDATE chats SET disappear_seconds = ? WHERE id = ?", (seconds, chat_id))
+        add_system_message(conn, chat_id, "disappearing", actor=display_name(me), seconds=seconds)
+    return ok(disappear_seconds=seconds)
+
+
+@app.route("/api/profile/privacy", methods=["POST"])
+@login_required
+def set_privacy():
+    value = json_body().get("show_last_seen")
+    if not isinstance(value, bool):
+        return error("Invalid 'show_last_seen'")
+    conn = get_db()
+    conn.execute("UPDATE users SET show_last_seen = ? WHERE id = ?", (int(value), current_user()["id"]))
+    conn.commit()
+    return ok(show_last_seen=value)
 
 
 @app.route("/api/remove_chat", methods=["POST"])
