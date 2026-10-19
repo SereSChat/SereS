@@ -55,7 +55,11 @@
           : t("login.failedCredentials"),
       );
     }
-    const user = res.data.user;
+    await finishLogin(res.data.user, wrapKey);
+  }
+
+  /** Unlocks the private keys after a successful login and opens the chats. */
+  async function finishLogin(user: any, wrapKey: CryptoKey, extraParams: Record<string, string> = {}) {
     let identity: SeresIdentity;
     try {
       identity = await SeresCrypto.unlockIdentity(
@@ -71,8 +75,10 @@
     }
     await SeresCrypto.clearIdentities();
     await SeresCrypto.saveIdentity(identity);
+    const params = new URLSearchParams({ login: "true", ...extraParams });
     const invite = new URLSearchParams(window.location.search).get("invite");
-    window.location.href = "index.html?login=true" + (invite ? "&invite=" + encodeURIComponent(invite) : "");
+    if (invite) params.set("invite", invite);
+    window.location.href = "index.html?" + params.toString();
   }
 
   async function login() {
