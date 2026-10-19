@@ -3532,3 +3532,62 @@ body.bright-body .codes-list {
 #codes-status.warn {
   color: #f0b232;
 }
+
+/* Forgot password */
+.forgot-link {
+  display: block;
+  margin-top: 4px;
+  text-align: center;
+  font-size: 0.85rem;
+  color: #53bdeb;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.forgot-link:hover {
+  text-decoration: underline;
+}
+
+.recover-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.recover-tab {
+  flex: 1;
+  padding: 8px 10px !important;
+  border: 1px solid #2f3b43 !important;
+  border-radius: 999px !important;
+  background-color: #2a3942 !important;
+  color: #e9edef !important;
+  font-size: 0.8rem !important;
+  cursor: pointer;
+}
+
+.recover-tab.active {
+  background-color: #00a884 !important;
+  border-color: #00a884 !important;
+}
+
+.recover-hint {
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: #8696a0;
+  margin: 8px 0;
+}
+
+.recover-hint.warn {
+  color: #f0b232;
+}
+
+#recover-code {
+  font-family: "Consolas", "Courier New", monospace;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.bright-login-f .recover-tab:not(.active) {
+  background-color: #f0f2f5 !important;
+  border-color: #e1e9eb !important;
+  color: #111b21 !important;
+}

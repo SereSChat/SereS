@@ -141,6 +141,89 @@
     }
   }
 
+  // ------------------------------------------------------ forgot password
+
+  function showPanel(panel: "login" | "recover") {
+    el("login-panel").classList.toggle("modal-hidden", panel !== "login");
+    el("recover-panel").classList.toggle("modal-hidden", panel !== "recover");
+    el("landr").textContent = t(panel === "recover" ? "recover.title" : mode === "register" ? "login.registerTitle" : "login.title");
+    el("recover-warning").textContent = "";
+    if (panel === "recover") {
+      const typed = el<HTMLInputElement>("email").value.trim();
+      if (typed) el<HTMLInputElement>("recover-name").value = typed;
+      el<HTMLInputElement>(typed ? "recover-code" : "recover-name").focus();
+    }
+  }
+
+  function selectRecoverTab(tab: string) {
+    document.querySelectorAll<HTMLElement>(".recover-tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    document.querySelectorAll<HTMLElement>(".recover-pane").forEach((p) => p.classList.toggle("modal-hidden", p.dataset.pane !== tab));
+    el("recover-warning").textContent = "";
+  }
+
+  /**
+   * Sets a new password with a backup code. The code unlocks the private keys
+   * in the browser, they are encrypted again with the new password, so all
+   * chats stay readable.
+   */
+  async function recoverWithCode() {
+    if (busy) return;
+    const warning = el("recover-warning");
+    const nameomail = el<HTMLInputElement>("recover-name").value.trim();
+    const parsed = SeresCrypto.normalizeCode(el<HTMLInputElement>("recover-code").value);
+    const password = el<HTMLInputElement>("recover-new").value;
+    if (!nameomail) {
+      warning.textContent = t("login.missingFields");
+      return;
+    }
+    if (!parsed) {
+      warning.textContent = t("recover.invalidCode");
+      return;
+    }
+    if (password.length < 8) {
+      warning.textContent = t("login.passwordTooShort");
+      return;
+    }
+    if (password !== el<HTMLInputElement>("recover-new2").value) {
+      warning.textContent = t("recover.mismatch");
+      return;
+    }
+    busy = true;
+    el<HTMLButtonElement>("recover-submit").disabled = true;
+    warning.textContent = t("recover.working");
+    try {
+      const pre = await postJson("/api/recovery/prelogin", { nameomail, slot: parsed.slot });
+      if (!pre.ok) throw new Error(pre.data.message || t("recover.failed"));
+      const codeKeys = await SeresCrypto.deriveCodeKeys(parsed.code, pre.data.kdf_salt);
+      const check = { nameomail, slot: parsed.slot, auth_hash: codeKeys.authHash };
+      const unlocked = await postJson("/api/recovery/unlock", check);
+      if (!unlocked.ok) throw new Error(unlocked.status === 429 ? unlocked.data.message : t("recover.failed"));
+
+      const salt = SeresCrypto.newSalt();
+      const iterations = SeresCrypto.DEFAULT_ITERATIONS;
+      const newKeys = await SeresCrypto.deriveAccountKeys(password, salt, iterations);
+      let encPrivate: string;
+      try {
+        encPrivate = await SeresCrypto.rewrapPrivateKeys(unlocked.data.enc_private, codeKeys.wrapKey, newKeys.wrapKey);
+      } catch {
+        throw new Error(t("recover.failed"));
+      }
+      const reset = await postJson("/api/recovery/reset", {
+        ...check,
+        new_auth_hash: newKeys.authHash,
+        kdf_salt: salt,
+        kdf_iterations: iterations,
+        enc_private: encPrivate,
+      });
+      if (!reset.ok) throw new Error(reset.status === 429 ? reset.data.message : t("recover.failed"));
+      await finishLogin(reset.data.user, newKeys.wrapKey, { recovered: "code" });
+    } catch (error) {
+      warning.textContent = error instanceof Error ? error.message : t("common.unreachable");
+      busy = false;
+      el<HTMLButtonElement>("recover-submit").disabled = false;
+    }
+  }
+
   function showMode(next: "login" | "register") {
     mode = next;
     const isRegister = next === "register";
@@ -151,6 +234,7 @@
     el("username").style.display = isRegister ? "block" : "none";
     el("tos-container").style.display = isRegister ? "flex" : "none";
     loginButton.style.display = isRegister ? "none" : "block";
+    el("forgot-link").style.display = isRegister ? "none" : "block";
     mainButton.className = isRegister ? "action-button" : "";
     mainButton.disabled = isRegister && !el<HTMLInputElement>("tos-checkbox").checked;
     el<HTMLInputElement>("email").placeholder = t(isRegister ? "login.email" : "login.usernameOrEmail");
@@ -211,6 +295,21 @@
     });
     el("tos-modal").addEventListener("click", (event) => {
       if (event.target === el("tos-modal")) el("tos-modal").style.display = "none";
+    });
+    el("forgot-link").addEventListener("click", (event) => {
+      event.preventDefault();
+      showPanel("recover");
+    });
+    el("recover-back").addEventListener("click", (event) => {
+      event.preventDefault();
+      showPanel("login");
+    });
+    document.querySelectorAll<HTMLElement>(".recover-tab").forEach((tab) => {
+      tab.addEventListener("click", () => selectRecoverTab(tab.dataset.tab!));
+    });
+    el("recover-submit").addEventListener("click", recoverWithCode);
+    el("recover-new2").addEventListener("keydown", (event) => {
+      if ((event as KeyboardEvent).key === "Enter") recoverWithCode();
     });
     el("password").addEventListener("keydown", (event) => {
       if ((event as KeyboardEvent).key === "Enter") {
