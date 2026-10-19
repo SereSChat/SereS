@@ -22,6 +22,7 @@ from flask import g
 from PIL import Image, UnidentifiedImageError
 
 import db
+import mailer
 from legacy_migration import migrate_legacy_files
 
 dotenv.load_dotenv()
@@ -754,6 +755,144 @@ def recovery_reset():
         )
         # Whoever had the old password is logged out everywhere.
         conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user["id"],))
+    return login_response(user["id"])
+
+
+# --------------------------------------------------------------------------
+# Password reset by e-mail
+# --------------------------------------------------------------------------
+# Without the password (or a backup code) the old private keys can't be
+# unlocked, so a reset by e-mail creates new keys: the account, friends and
+# chats stay, but the user can't read their old encrypted messages anymore.
+
+RESET_MINUTES = 60
+
+RESET_MAIL = {
+    "en": (
+        "Reset your SereS password",
+        "Hi {name},\n\nsomeone (hopefully you) asked to reset the password of your SereS account.\n"
+        "Open this link within {minutes} minutes to choose a new password:\n\n{link}\n\n"
+        "Important: because your chats are end-to-end encrypted, you won't be able to read your old "
+        "messages after a reset by e-mail. If you still have a backup code, use \"Forgot password?\" "
+        "with the code instead – then you keep everything.\n\n"
+        "If you didn't ask for this, you can ignore this e-mail. Your password stays the same.\n",
+    ),
+    "de": (
+        "SereS-Passwort zurücksetzen",
+        "Hallo {name},\n\njemand (hoffentlich du) möchte das Passwort deines SereS-Kontos zurücksetzen.\n"
+        "Öffne diesen Link innerhalb von {minutes} Minuten, um ein neues Passwort zu wählen:\n\n{link}\n\n"
+        "Wichtig: Da deine Chats Ende-zu-Ende-verschlüsselt sind, kannst du deine alten Nachrichten nach "
+        "einem Zurücksetzen per E-Mail nicht mehr lesen. Wenn du noch einen Backup-Code hast, nutze lieber "
+        "\"Passwort vergessen?\" mit dem Code – dann bleibt alles erhalten.\n\n"
+        "Falls du das nicht warst, ignoriere diese E-Mail einfach. Dein Passwort bleibt unverändert.\n",
+    ),
+    "fr": (
+        "Réinitialiser ton mot de passe SereS",
+        "Bonjour {name},\n\nquelqu'un (toi, espérons-le) a demandé à réinitialiser le mot de passe de ton compte SereS.\n"
+        "Ouvre ce lien dans les {minutes} minutes pour choisir un nouveau mot de passe :\n\n{link}\n\n"
+        "Important : comme tes discussions sont chiffrées de bout en bout, tu ne pourras plus lire tes anciens "
+        "messages après une réinitialisation par e-mail. Si tu as encore un code de secours, utilise plutôt "
+        "« Mot de passe oublié ? » avec le code – tu gardes alors tout.\n\n"
+        "Si ce n'était pas toi, ignore simplement cet e-mail. Ton mot de passe reste inchangé.\n",
+    ),
+}
+
+
+def public_base_url():
+    return (os.getenv("PUBLIC_URL") or flask.request.host_url).rstrip("/")
+
+
+@app.route("/api/password_reset/request", methods=["POST"])
+def request_password_reset():
+    """Sends a reset link. The answer is the same whether the account exists or not."""
+    data = json_body()
+    nameomail = str_field(data, "nameomail", 254).strip()
+    lang = data.get("lang") if data.get("lang") in RESET_MAIL else "en"
+    if not mailer.configured():
+        return error("Password reset by e-mail is not set up on this server", 503)
+    if rate_limited(("reset-ip", client_ip()), 10, 3600) or rate_limited(
+        ("reset-account", nameomail.lower()), 3, 3600
+    ):
+        return error("Too many attempts, please try again later", 429)
+    user = find_user_by_login(nameomail)
+    if user is not None and user["email"] and EMAIL_RE.match(user["email"]):
+        token = secrets.token_urlsafe(32)
+        conn = get_db()
+        # Only the newest link works.
+        conn.execute("DELETE FROM password_resets WHERE user_id = ?", (user["id"],))
+        conn.execute(
+            "INSERT INTO password_resets (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (hash_token(token), user["id"], db.now_iso(), iso_in(RESET_MINUTES * 60)),
+        )
+        conn.commit()
+        subject, body = RESET_MAIL[lang]
+        link = f"{public_base_url()}/login.html?reset={token}"
+        mailer.send_async(
+            user["email"], subject, body.format(name=display_name(user), minutes=RESET_MINUTES, link=link)
+        )
+    return ok(message="If the account exists, an e-mail with a link is on its way.")
+
+
+def reset_user(token):
+    if not isinstance(token, str) or not 20 <= len(token) <= 100:
+        return None
+    return (
+        get_db()
+        .execute(
+            """SELECT u.* FROM password_resets r JOIN users u ON u.id = r.user_id
+               WHERE r.token_hash = ? AND r.used_at IS NULL AND r.expires_at > ?""",
+            (hash_token(token), db.now_iso()),
+        )
+        .fetchone()
+    )
+
+
+@app.route("/api/password_reset/check", methods=["POST"])
+def check_password_reset():
+    if rate_limited(("reset-check", client_ip()), 30, 600):
+        return error("Too many attempts, please try again later", 429)
+    user = reset_user(json_body().get("token"))
+    if user is None:
+        return error("This link is invalid or expired", 404)
+    return ok(username=user["username"], display_name=display_name(user))
+
+
+@app.route("/api/password_reset/confirm", methods=["POST"])
+def confirm_password_reset():
+    """New password and new keys. Old messages stay for the others but are hidden for this user."""
+    data = json_body()
+    if rate_limited(("reset-check", client_ip()), 30, 600):
+        return error("Too many attempts, please try again later", 429)
+    user = reset_user(data.get("token"))
+    if user is None:
+        return error("This link is invalid or expired", 404)
+    auth_hash = b64_field(data, "auth_hash", 128)
+    kdf_salt, kdf_iterations = validate_kdf(data)
+    keys = validate_key_bundle(data)
+    conn = get_db()
+    with db.write_transaction(conn):
+        used = conn.execute(
+            "UPDATE password_resets SET used_at = ? WHERE token_hash = ? AND used_at IS NULL",
+            (db.now_iso(), hash_token(data["token"])),
+        )
+        if used.rowcount == 0:
+            flask.abort(flask.make_response(error("This link is invalid or expired", 404)))
+        conn.execute(
+            """UPDATE users SET passwd = ?, auth_version = 1, kdf_salt = ?, kdf_iterations = ?,
+                      pub_ecdh = ?, pub_sign = ?, enc_private = ? WHERE id = ?""",
+            (ph.hash(auth_hash), kdf_salt, kdf_iterations, keys["pub_ecdh"], keys["pub_sign"],
+             keys["enc_private"], user["id"]),
+        )
+        # Backup codes wrapped the old keys, they are useless now.
+        conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user["id"],))
+        conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user["id"],))
+        for chat in conn.execute("SELECT chat_id FROM chat_members WHERE user_id = ?", (user["id"],)).fetchall():
+            # The old messages can't be decrypted with the new keys: hide them for this user only.
+            conn.execute(
+                "UPDATE chat_members SET cleared_seq = ? WHERE chat_id = ? AND user_id = ?",
+                (max_seq(conn, chat["chat_id"]), chat["chat_id"], user["id"]),
+            )
+            add_system_message(conn, chat["chat_id"], "keys_reset", actor=display_name(user))
     return login_response(user["id"])
 
 
