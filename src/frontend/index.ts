@@ -9,6 +9,7 @@
 
   interface Me extends UserRef {
     email: string;
+    show_last_seen?: boolean;
     pub_ecdh: string;
     pub_sign: string;
     enc_private: string;
@@ -32,6 +33,46 @@
     created_at: string;
     edited_at?: string | null;
     deleted: boolean;
+    silent?: boolean;
+    expires_at?: string | null;
+  }
+
+  /** An encrypted attachment; key and iv only exist inside the encrypted message. */
+  interface FileRef {
+    id: string;
+    key: string;
+    iv: string;
+    name: string;
+    mime: string;
+    size: number;
+    kind: "image" | "video" | "audio" | "voice" | "file";
+    duration?: number;
+    width?: number;
+    height?: number;
+  }
+
+  /** What is inside an encrypted message. */
+  interface Content {
+    text?: string;
+    reply?: { id: string; sender_id: string | null; preview: string };
+    file?: FileRef;
+    forwarded?: boolean;
+    // Reactions are silent messages pointing at another message.
+    type?: "reaction";
+    target?: string;
+    emoji?: string;
+  }
+
+  interface Presence {
+    online: boolean;
+    last_seen: string;
+  }
+
+  interface Pin {
+    message_id: string;
+    seq: number;
+    pinned_at: string;
+    pinned_by: string | null;
   }
 
   interface ChatSummary {
@@ -50,11 +91,17 @@
     typing?: UserRef[];
     members?: Member[];
     owner_id?: string;
+    pinned?: boolean;
+    archived?: boolean;
+    disappear_seconds?: number;
+    presence?: Presence | null;
+    pins?: Pin[];
   }
 
   interface Shown {
     type: "text" | "legacy" | "system" | "deleted" | "error";
     text: string;
+    content?: Content;
   }
 
   interface OpenChat {
@@ -71,6 +118,8 @@
     typing: UserRef[];
     // Up to which message all other members got / read it (for the ticks).
     receipts: { delivered_seq: number; read_seq: number } | null;
+    // Search in the chat: matching message ids and the selected one.
+    search: { query: string; hits: string[]; index: number } | null;
   }
 
   class ApiError extends Error {
@@ -99,16 +148,46 @@
   let friendsSignature = "";
   let sending = false;
   // The own message that is being edited in the input field.
-  let editing: { chatId: string; message: Message } | null = null;
+  let editing: { chatId: string; message: Message; content: Content } | null = null;
   // Invite token from a link like /?invite=..., kept across the login redirect.
   const pendingInvite = new URLSearchParams(window.location.search).get("invite");
+  // Set by the login page after a password reset ("code" or "mail").
+  const recoveredBy = new URLSearchParams(window.location.search).get("recovered");
   let inviteToAccept: { token: string; name: string } | null = null;
 
-  const userKeys = new Map<string, { id: string; username: string; pub_ecdh: string | null; pub_sign: string | null }>();
+  // Message that is being answered (shown above the input field).
+  let replyTo: { chatId: string; message: Message; preview: string } | null = null;
+  // Unsent text per chat. Kept in memory only, so no plaintext is stored on the device.
+  const drafts = new Map<string, string>();
+  // Attachments picked but not sent yet.
+  let pendingFiles: File[] = [];
+  let showArchived = false;
+  // Unread counts from the last refresh, to notice new messages for notifications.
+  let lastUnread: Map<string, number> | null = null;
+  // Decrypted attachments as blob: URLs, by file id.
+  const fileUrls = new Map<string, Promise<string>>();
+
+  interface KnownKeys {
+    id: string;
+    username: string;
+    pub_ecdh: string | null;
+    pub_sign: string | null;
+    // Keys replaced by a password reset, oldest first, valid until "until".
+    previous_keys?: { pub_ecdh: string; pub_sign: string; until: string }[];
+  }
+  const userKeys = new Map<string, KnownKeys>();
+
+  /** The sender's keys that were valid when the message was written. */
+  function keysAt(user: KnownKeys, createdAt: string) {
+    const previous = (user.previous_keys || []).find((old) => createdAt <= old.until);
+    return previous || { pub_ecdh: user.pub_ecdh, pub_sign: user.pub_sign };
+  }
   const shownCache = new Map<string, Promise<Shown>>();
   const avatarState = new Map<string, "yes" | "no">();
 
   const MESSAGE_LIMIT = 4000;
+  const MAX_FILE_SIZE = 16 * 1024 * 1024;
+  const DISAPPEAR_OPTIONS = [0, 3600, 86400, 7 * 86400, 90 * 86400];
   const t = SeresI18n.t;
 
   // ------------------------------------------------------------- utilities
@@ -350,11 +429,17 @@
       case "removed":
       case "left":
       case "renamed":
+      case "pinned":
+      case "keys_reset":
         return t("system." + payload.event, {
           actor: payload.actor ?? "",
           target: payload.target ?? "",
           name: payload.name ?? "",
         });
+      case "disappearing":
+        return payload.seconds
+          ? t("system.disappearingOn", { actor: payload.actor ?? "", time: disappearLabel(payload.seconds) })
+          : t("system.disappearingOff", { actor: payload.actor ?? "" });
       default:
         return "";
     }
@@ -370,7 +455,8 @@
         if (message.kind === "legacy") return { type: "legacy", text: String(message.payload?.text ?? "") };
         try {
           await ensureUserKeys([message.sender_id!]);
-          const sender = userKeys.get(message.sender_id!);
+          const known = userKeys.get(message.sender_id!);
+          const sender = known ? { id: known.id, ...keysAt(known, message.created_at) } : null;
           if (!sender || !sender.pub_ecdh || !sender.pub_sign) throw new Error("unknown sender");
           const content = await SeresCrypto.decryptMessage(
             identity,
@@ -379,7 +465,8 @@
             { id: sender.id, pub_ecdh: sender.pub_ecdh, pub_sign: sender.pub_sign },
             message.payload,
           );
-          return { type: "text", text: String(content.text ?? "") };
+          const parsed: Content = content && typeof content === "object" ? content : {};
+          return { type: "text", text: String(parsed.text ?? ""), content: parsed };
         } catch (error) {
           console.warn("Could not decrypt message", message.id, error);
           return { type: "error", text: t("msg.decryptError") };
@@ -394,11 +481,16 @@
 
   async function loadChats() {
     const data = await api("/api/chats");
-    chats = data.chats;
+    // Pinned chats first, otherwise by last activity (as sent by the server).
+    chats = (data.chats as ChatSummary[])
+      .map((chat, index) => ({ chat, index }))
+      .sort((a, b) => Number(!!b.chat.pinned) - Number(!!a.chat.pinned) || a.index - b.index)
+      .map((entry) => entry.chat);
     const previews = await Promise.all(
       chats.map(async (chat) => (chat.last_message ? showMessage(chat.id, chat.last_message) : null)),
     );
-    const signature = JSON.stringify([chats, previews.map((p) => p && p.text)]);
+    notifyNewMessages(previews);
+    const signature = JSON.stringify([chats, previews.map((p) => p && p.text), [...drafts], showArchived]);
     updateBadges();
     if (signature === chatsSignature) return;
     chatsSignature = signature;
@@ -413,21 +505,127 @@
     }
   }
 
+  // ------------------------------------------------------- notifications
+
+  function notificationsEnabled() {
+    return (
+      "Notification" in window && Notification.permission === "granted" && readStore("settings").notify === "on"
+    );
+  }
+
+  /** Shows a desktop notification for chats that got new messages while you were away. */
+  function notifyNewMessages(previews: (Shown | null)[]) {
+    const counts = new Map(chats.map((chat) => [chat.id, chat.unread] as [string, number]));
+    const before = lastUnread;
+    lastUnread = counts;
+    if (!before || !notificationsEnabled()) return;
+    chats.forEach((chat, index) => {
+      const old = before.get(chat.id) ?? 0;
+      if (chat.unread <= old || chat.muted || chat.archived) return;
+      if (document.visibilityState === "visible" && current && current.id === chat.id) return;
+      const body = readStore("settings").preview === "off" ? t("notify.newMessage") : previewText(chat, previews[index]);
+      try {
+        const note = new Notification(chat.name, { body, tag: chat.id, icon: "assets/favicon.png" });
+        note.onclick = () => {
+          window.focus();
+          switchView("chats");
+          openChat(chat.id);
+          note.close();
+        };
+      } catch {
+        /* notifications not supported here (e.g. some mobile browsers) */
+      }
+    });
+  }
+
+  async function toggleNotifications() {
+    const settings = readStore("settings");
+    if (settings.notify === "on") {
+      settings.notify = "off";
+    } else {
+      if (!("Notification" in window)) {
+        showAlert(t("notify.unsupported"));
+        return;
+      }
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        showAlert(t("notify.denied"));
+        return;
+      }
+      settings.notify = "on";
+    }
+    writeStore("settings", settings);
+    renderSettingsToggles();
+  }
+
   function previewText(chat: ChatSummary, shown: Shown | null) {
     if (!chat.last_message || !shown) return chat.type === "group" ? t("list.members", { count: chat.member_count }) : t("list.noMessages");
     const message = chat.last_message;
     if (shown.type === "system") return shown.text;
     const prefix = message.sender_id === me.id ? t("list.you") : chat.type === "group" && message.sender ? (message.sender_display || message.sender) + ": " : "";
     if (shown.type === "deleted") return prefix + t("list.deleted");
-    return prefix + shown.text.replace(/\s+/g, " ");
+    return prefix + contentPreview(shown);
+  }
+
+  /** One line describing a message: its text, or what was attached. */
+  function contentPreview(shown: Shown) {
+    const file = shown.content?.file;
+    const text = SeresFormat.plain(shown.text);
+    if (!file) return text;
+    const label =
+      file.kind === "image"
+        ? t("file.photo")
+        : file.kind === "video"
+          ? t("file.video")
+          : file.kind === "voice"
+            ? t("file.voice", { duration: formatDuration(file.duration || 0) })
+            : file.kind === "audio"
+              ? "🎵 " + file.name
+              : "📎 " + file.name;
+    return text ? label + " · " + text : label;
+  }
+
+  function formatDuration(seconds: number) {
+    const s = Math.max(0, Math.round(seconds));
+    return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  }
+
+  function formatSize(bytes: number) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + " KB";
+    return (bytes / 1024 / 1024).toFixed(1) + " MB";
+  }
+
+  function disappearLabel(seconds: number) {
+    if (!seconds) return t("disappear.off");
+    if (seconds < 86400) return t("disappear.hours", { count: seconds / 3600 });
+    return t("disappear.days", { count: seconds / 86400 });
   }
 
   function renderChatList(previews: (Shown | null)[]) {
     const list = $("dm-list");
     const filter = (($("list-search") as HTMLInputElement).value || "").toLowerCase();
     list.textContent = "";
+    const archivedCount = chats.filter((chat) => chat.archived).length;
+    if (archivedCount && !filter) {
+      const toggle = h("div", { className: "list-item archive-toggle" }, [
+        h("div", { className: "avatar archive-icon", text: showArchived ? "←" : "🗄️" }),
+        h("div", { className: "item-info" }, [
+          h("span", { className: "item-name", text: showArchived ? t("archive.back") : t("archive.title") }),
+          h("span", { className: "item-status", text: t("archive.count", { count: archivedCount }) }),
+        ]),
+      ]);
+      toggle.addEventListener("click", () => {
+        showArchived = !showArchived;
+        chatsSignature = "";
+        loadChats().catch(() => {});
+      });
+      list.appendChild(toggle);
+    }
     chats.forEach((chat, index) => {
       if (filter && !chat.name.toLowerCase().includes(filter)) return;
+      // The search looks through all chats, otherwise only the current section is shown.
+      if (!filter && !!chat.archived !== showArchived) return;
       const item = h("div", {
         className: "list-item chat-list-item" + (current && current.id === chat.id ? " active" : ""),
         attrs: { "data-chatid": chat.id },
@@ -438,13 +636,23 @@
         h("span", { className: "item-name" }, [
           document.createTextNode(chat.name),
           chat.muted ? h("span", { className: "muted-icon", text: "🔕", title: t("chat.muted") }) : null,
+          chat.disappear_seconds ? h("span", { className: "muted-icon", text: "⏱️", title: t("disappear.title") }) : null,
         ]),
-        h("span", { className: "item-time", text: formatListTime(chat.last_activity) }),
+        h("span", { className: "item-time" }, [
+          chat.pinned ? h("span", { className: "pin-icon", text: "📌", title: t("chatMenu.pinned") }) : null,
+          document.createTextNode(formatListTime(chat.last_activity)),
+        ]),
       ]);
+      const draft = current && current.id === chat.id ? "" : drafts.get(chat.id);
       const statusRow = h("div", { className: "item-row" }, [
         chat.typing && chat.typing.length
           ? h("span", { className: "item-status typing", text: t("typing.short") })
-          : h("span", { className: "item-status", text: previewText(chat, previews[index]) }),
+          : draft
+            ? h("span", { className: "item-status" }, [
+                h("span", { className: "draft-label", text: t("list.draft") }),
+                document.createTextNode(" " + draft.replace(/\s+/g, " ")),
+              ])
+            : h("span", { className: "item-status", text: previewText(chat, previews[index]) }),
         chat.unread > 0 ? h("span", { className: "unread-badge" + (chat.muted ? " muted" : ""), text: chat.unread > 99 ? "99+" : String(chat.unread) }) : null,
       ]);
       item.appendChild(h("div", { className: "item-info" }, [nameRow, statusRow]));
@@ -456,7 +664,7 @@
       onLongPress(item, (x, y) => openChatMenu(chat, x, y));
       list.appendChild(item);
     });
-    if (!list.childElementCount) {
+    if (!list.querySelector(".chat-list-item")) {
       list.appendChild(
         h("div", { className: "list-empty" }, [
           h("p", { text: t(filter ? "list.noChatsFound" : "list.noChats") }),
@@ -658,6 +866,34 @@
         ? button(t("profile.view"), "floating-item", () => openProfile(chat.other_user!))
         : null,
       button(
+        chat.pinned ? t("chatMenu.unpin") : t("chatMenu.pin"),
+        "floating-item",
+        action("pin", async () => {
+          closeFloatingMenus();
+          await post(`/api/chats/${encodeURIComponent(chat.id)}/prefs`, { pinned: !chat.pinned });
+          chatsSignature = "";
+        }),
+      ),
+      button(
+        chat.archived ? t("chatMenu.unarchive") : t("chatMenu.archive"),
+        "floating-item",
+        action("archive", async () => {
+          closeFloatingMenus();
+          await post(`/api/chats/${encodeURIComponent(chat.id)}/prefs`, { archived: !chat.archived });
+          chatsSignature = "";
+        }),
+      ),
+      chat.unread
+        ? button(t("chatMenu.markRead"), "floating-item", () => {
+            closeFloatingMenus();
+            const seq = chat.last_message ? chat.last_message.seq : 0;
+            // The server caps the position at the newest message.
+            post(`/api/chats/${encodeURIComponent(chat.id)}/read`, { seq: Math.max(seq, 2 ** 31 - 1) })
+              .then(() => loadChats())
+              .catch((error) => showAlert(errorText(error)));
+          })
+        : null,
+      button(
         isGroup ? "🚪 " + t("info.leave") : "🗑️ " + t("info.deleteChat"),
         "floating-item danger",
         action(
@@ -767,6 +1003,11 @@
   async function openChat(chatId: string) {
     cancelEdit();
     sendTyping(false);
+    saveDraft();
+    cancelReply();
+    clearPendingFiles();
+    closeSearch();
+    closeEmojiPicker();
     current = {
       id: chatId,
       details: null,
@@ -780,8 +1021,11 @@
       subtitle: "",
       typing: [],
       receipts: null,
+      search: null,
     };
     const opened = current;
+    $("pinned-bar").classList.add("modal-hidden");
+    $("search-btn").classList.remove("modal-hidden");
     document.querySelectorAll(".chat-list-item").forEach((item) => {
       item.classList.toggle("active", (item as HTMLElement).dataset.chatid === chatId);
     });
@@ -791,6 +1035,10 @@
     $("chat-input-area").classList.remove("modal-hidden");
     $("chat-info-btn").classList.remove("modal-hidden");
     $("messages").textContent = "";
+    const input = $("message-input-field") as HTMLTextAreaElement;
+    input.value = drafts.get(chatId) || "";
+    autoGrow(input);
+    updateSendButton();
 
     if (window.innerWidth <= 768) document.querySelector(".sidebar")?.classList.remove("open");
 
@@ -809,9 +1057,27 @@
     }
   }
 
+  /** Remembers what was typed in the open chat (in memory only). */
+  function saveDraft() {
+    if (!current || editing) return;
+    const text = ($("message-input-field") as HTMLTextAreaElement).value;
+    if (text.trim()) drafts.set(current.id, text);
+    else drafts.delete(current.id);
+    chatsSignature = "";
+  }
+
   function closeChat() {
     cancelEdit();
     sendTyping(false);
+    saveDraft();
+    cancelReply();
+    clearPendingFiles();
+    closeSearch();
+    closeEmojiPicker();
+    ($("message-input-field") as HTMLTextAreaElement).value = "";
+    $("pinned-bar").classList.add("modal-hidden");
+    $("search-btn").classList.add("modal-hidden");
+    $("jump-bottom").classList.add("modal-hidden");
     $("typing-bubble").classList.add("modal-hidden");
     current = null;
     $("current-chat-name").textContent = t("app.welcomeUser", { name: nameOf(me) });
@@ -849,9 +1115,121 @@
         ? t("chat.groupSub", { count: details.member_count })
         : details.blocked
           ? t("chat.blocked")
-          : t("chat.dmSub");
+          : details.presence
+            ? presenceText(details.presence)
+            : t("chat.dmSub");
+    if (details.disappear_seconds) opened.subtitle = "⏱️ " + disappearLabel(details.disappear_seconds) + " · " + opened.subtitle;
     renderSubtitle();
     renderKeyWarning();
+    renderPinnedBar().catch(() => {});
+  }
+
+  /** "online" or "last seen today at 12:30". */
+  function presenceText(presence: Presence) {
+    if (presence.online) return t("presence.online");
+    const date = parseTime(presence.last_seen);
+    const day = formatDay(date);
+    return t("presence.lastSeen", { day: day.toLowerCase(), time: formatTime(presence.last_seen) });
+  }
+
+  // ------------------------------------------------------- pinned messages
+
+  /** Loads a message that is not in the loaded window (pinned or quoted). */
+  async function fetchMessage(opened: OpenChat, messageId: string): Promise<Message | null> {
+    const loaded = opened.messages.get(messageId);
+    if (loaded) return loaded;
+    try {
+      const data = await api(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(messageId)}`);
+      return data.message;
+    } catch {
+      return null;
+    }
+  }
+
+  async function renderPinnedBar() {
+    const opened = current;
+    const bar = $("pinned-bar");
+    const pins = opened && opened.details ? opened.details.pins || [] : [];
+    if (!opened || !pins.length) {
+      bar.classList.add("modal-hidden");
+      return;
+    }
+    const message = await fetchMessage(opened, pins[0].message_id);
+    if (current !== opened) return;
+    const shown = message ? await showMessage(opened.id, message) : null;
+    bar.textContent = "";
+    bar.append(
+      h("span", { className: "pinned-icon", text: "📌" }),
+      h("div", { className: "pinned-text" }, [
+        h("strong", { text: pins.length > 1 ? t("pins.count", { count: pins.length }) : t("pins.one") }),
+        h("span", { text: shown ? contentPreview(shown) : "…" }),
+      ]),
+    );
+    bar.classList.remove("modal-hidden");
+  }
+
+  async function openPinsModal() {
+    const opened = current;
+    if (!opened || !opened.details) return;
+    const pins = opened.details.pins || [];
+    const body = $("pins-body");
+    body.textContent = "";
+    if (!pins.length) body.appendChild(h("p", { className: "list-hint", text: t("pins.none") }));
+    for (const pin of pins) {
+      const message = await fetchMessage(opened, pin.message_id);
+      if (!message) continue;
+      const shown = await showMessage(opened.id, message);
+      const row = h("div", { className: "pin-row" }, [
+        h("div", { className: "pin-meta" }, [
+          h("strong", { text: message.sender_id === me.id ? t("msg.you") : message.sender_display || message.sender || "" }),
+          h("span", { text: formatDateTime(message.created_at) }),
+        ]),
+        h("div", { className: "pin-preview", text: contentPreview(shown) }),
+        h("div", { className: "pin-actions" }, [
+          button(t("pins.jump"), "pill-btn", () => {
+            closeAllModals();
+            jumpToMessage(pin.message_id);
+          }),
+          button(t("pins.unpin"), "pill-btn secondary", async () => {
+            await togglePin(opened, message, false);
+            openPinsModal();
+          }),
+        ]),
+      ]);
+      body.appendChild(row);
+    }
+    openModal("pins-modal");
+  }
+
+  async function togglePin(opened: OpenChat, message: Message, pinned: boolean) {
+    try {
+      const data = await post(`/api/chats/${encodeURIComponent(opened.id)}/pins`, { message_id: message.id, pinned });
+      if (opened.details) opened.details.pins = data.pins;
+      showAlert(t(pinned ? "pins.pinned" : "pins.unpinned"));
+      await renderPinnedBar();
+      await syncCurrent();
+    } catch (error) {
+      showAlert(errorText(error));
+    }
+  }
+
+  /** Scrolls to a message, loading older pages if needed, and flashes it. */
+  async function jumpToMessage(messageId: string) {
+    const opened = current;
+    if (!opened) return;
+    for (let page = 0; page < 20 && !opened.messages.has(messageId) && opened.hasMore; page++) {
+      await loadOlder();
+      if (current !== opened) return;
+    }
+    const row = document.querySelector<HTMLElement>(`.message-row[data-id="${CSS.escape(messageId)}"]`);
+    if (!row) {
+      showAlert(t("msg.notFound"));
+      return;
+    }
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    row.classList.remove("flash");
+    void row.offsetWidth;
+    row.classList.add("flash");
   }
 
   function typingText(users: UserRef[]) {
@@ -979,13 +1357,36 @@
       .catch(() => {});
   }
 
+  // Latest reaction of each member per message: target id -> sender id -> emoji.
+  type Reactions = Map<string, Map<string, { emoji: string; seq: number }>>;
+
   async function renderMessages(options: { forceBottom?: boolean; keepPosition?: boolean }) {
     if (!current) return;
     const opened = current;
     const container = $("messages");
-    const ordered = [...opened.messages.values()].filter((m) => !m.deleted).sort((a, b) => a.seq - b.seq);
-    const shown = await Promise.all(ordered.map((message) => showMessage(opened.id, message)));
+    const all = [...opened.messages.values()].filter((m) => !m.deleted).sort((a, b) => a.seq - b.seq);
+    const allShown = await Promise.all(all.map((message) => showMessage(opened.id, message)));
     if (current !== opened) return;
+
+    // Reactions are silent messages; collect them instead of showing them as rows.
+    const reactions: Reactions = new Map();
+    const ordered: Message[] = [];
+    const shown: Shown[] = [];
+    all.forEach((message, index) => {
+      const view = allShown[index];
+      if (message.silent) {
+        const content = view.content;
+        if (content && content.type === "reaction" && content.target && message.sender_id) {
+          const perSender = reactions.get(content.target) || new Map();
+          const previous = perSender.get(message.sender_id);
+          if (!previous || previous.seq < message.seq) perSender.set(message.sender_id, { emoji: content.emoji || "", seq: message.seq });
+          reactions.set(content.target, perSender);
+        }
+        return;
+      }
+      ordered.push(message);
+      shown.push(view);
+    });
 
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     const nearBottom = distanceFromBottom < 120;
@@ -1025,24 +1426,33 @@
         previous !== null &&
         previous.sender_id === message.sender_id &&
         date.getTime() - parseTime(previous.created_at).getTime() < 5 * 60 * 1000;
-      fragment.appendChild(messageRow(opened, message, view, compact));
+      fragment.appendChild(messageRow(opened, message, view, compact, reactions.get(message.id)));
       previous = message;
     });
 
     container.textContent = "";
     container.appendChild(fragment);
     applyTheme();
+    markSearchHits();
 
     if (options.keepPosition) {
       container.scrollTop = container.scrollHeight - container.clientHeight - distanceFromBottom;
     } else if (options.forceBottom || nearBottom) {
       container.scrollTop = container.scrollHeight;
     }
+    updateJumpButton();
   }
 
-  function messageRow(opened: OpenChat, message: Message, view: Shown, compact: boolean) {
+  function messageRow(
+    opened: OpenChat,
+    message: Message,
+    view: Shown,
+    compact: boolean,
+    reactions?: Map<string, { emoji: string; seq: number }>,
+  ) {
     const own = message.sender_id === me.id;
     const sender = message.sender_display || message.sender || t("msg.unknown");
+    const content = view.content || {};
     const row = h("div", {
       className: "message-row" + (own ? " message-own" : "") + (compact ? " message-compact" : ""),
       attrs: { "data-id": message.id },
@@ -1070,30 +1480,219 @@
       wrapper.appendChild(header);
     }
 
-    const textDiv = h("div", { className: "message-text" });
+    const bubble = h("div", { className: "message-text" });
+    if (content.forwarded) bubble.appendChild(h("div", { className: "message-forwarded", text: t("msg.forwarded") }));
+    if (content.reply) bubble.appendChild(replyQuote(opened, content.reply));
+    if (content.file) bubble.appendChild(renderFile(opened, content.file));
+
     if (view.type === "deleted" || view.type === "error") {
-      textDiv.classList.add("message-muted");
-      textDiv.textContent = view.type === "deleted" ? "🚫 " + view.text : view.text;
-    } else {
-      textDiv.appendChild(richText(view.text));
+      bubble.classList.add("message-muted");
+      bubble.appendChild(document.createTextNode(view.type === "deleted" ? "🚫 " + view.text : view.text));
+    } else if (view.text) {
+      const myNames = [me.username.toLowerCase(), nameOf(me).toLowerCase()];
+      const formatted = SeresFormat.render(view.text, { myNames, onMention: (name) => openProfile(name) });
+      const body = h("div", { className: "message-body" + (formatted.emojiOnly && !content.file ? " emoji-only" : "") });
+      body.appendChild(formatted.fragment);
+      bubble.appendChild(body);
+      if (formatted.mentioned && !own) row.classList.add("mentioned");
     }
-    if (message.edited_at) textDiv.appendChild(h("span", { className: "message-edited", text: t("msg.edited") }));
-    if (own && message.kind === "e2e") textDiv.appendChild(ticks(opened, message));
-    textDiv.title = parseTime(message.created_at).toLocaleString(SeresI18n.getLanguage());
-    wrapper.appendChild(textDiv);
+
+    const meta = h("span", { className: "message-meta" });
+    if (message.expires_at) meta.appendChild(h("span", { className: "message-expiry", text: "⏱️", title: t("disappear.expires", { time: formatDateTime(message.expires_at) }) }));
+    if (message.edited_at) meta.appendChild(h("span", { className: "message-edited", text: t("msg.edited") }));
+    if (compact) meta.appendChild(h("span", { className: "message-time-inline", text: formatTime(message.created_at) }));
+    if (own && message.kind === "e2e") meta.appendChild(ticks(opened, message));
+    bubble.appendChild(meta);
+    bubble.title = parseTime(message.created_at).toLocaleString(SeresI18n.getLanguage());
+    wrapper.appendChild(bubble);
+    if (reactions) {
+      const chips = reactionChips(opened, message, reactions);
+      if (chips) wrapper.appendChild(chips);
+    }
     row.appendChild(wrapper);
 
     row.addEventListener("contextmenu", (event) => {
+      if ((event.target as Element).closest("a, audio, video")) return;
       event.preventDefault();
       openMessageMenu(opened, message, view, event.clientX, event.clientY);
     });
+    row.addEventListener("dblclick", (event) => {
+      if ((event.target as Element).closest("a, audio, video, .md-spoiler, img")) return;
+      if (view.type === "text" || view.type === "legacy") startReply(opened, message, view);
+    });
     onLongPress(row, (x, y) => openMessageMenu(opened, message, view, x, y));
-    if (own && message.kind === "e2e") onSwipeLeft(row, () => openMessageInfo(opened, message, view));
+    onSwipe(row, {
+      // Swipe right to answer, swipe left (own messages) for the info, like WhatsApp.
+      right: view.type === "text" || view.type === "legacy" ? () => startReply(opened, message, view) : undefined,
+      left: own && message.kind === "e2e" ? () => openMessageInfo(opened, message, view) : undefined,
+    });
     return row;
   }
 
-  /** Phones: dragging a message to the left (like in WhatsApp) calls handler. */
-  function onSwipeLeft(element: HTMLElement, handler: () => void) {
+  function replyQuote(opened: OpenChat, reply: NonNullable<Content["reply"]>) {
+    const original = opened.messages.get(reply.id);
+    const author =
+      reply.sender_id === me.id
+        ? t("msg.you")
+        : original
+          ? original.sender_display || original.sender || ""
+          : memberName(opened, reply.sender_id);
+    const quote = h("div", { className: "reply-quote" }, [
+      h("strong", { text: author }),
+      h("span", { text: reply.preview }),
+    ]);
+    quote.addEventListener("click", (event) => {
+      event.stopPropagation();
+      jumpToMessage(reply.id);
+    });
+    return quote;
+  }
+
+  function memberName(opened: OpenChat, userId: string | null) {
+    const member = opened.details?.members?.find((m) => m.id === userId);
+    return member ? nameOf(member) : "";
+  }
+
+  function reactionChips(opened: OpenChat, message: Message, perSender: Map<string, { emoji: string; seq: number }>) {
+    const groups = new Map<string, string[]>();
+    perSender.forEach((value, senderId) => {
+      if (!value.emoji) return;
+      const names = groups.get(value.emoji) || [];
+      names.push(senderId);
+      groups.set(value.emoji, names);
+    });
+    if (!groups.size) return null;
+    const box = h("div", { className: "reactions" });
+    const mine = perSender.get(me.id)?.emoji || "";
+    groups.forEach((senderIds, emoji) => {
+      const names = senderIds.map((id) => (id === me.id ? t("msg.you") : memberName(opened, id) || "?")).join(", ");
+      const chip = button(
+        emoji + (senderIds.length > 1 ? " " + senderIds.length : ""),
+        "reaction-chip" + (emoji === mine ? " mine" : ""),
+        () => sendReaction(opened, message, emoji === mine ? "" : emoji),
+        names,
+      );
+      box.appendChild(chip);
+    });
+    return box;
+  }
+
+  async function sendReaction(opened: OpenChat, message: Message, emoji: string) {
+    if (!opened.details || opened.changedKeys.length || opened.missingKeys.length) {
+      showAlert(t(opened.changedKeys.length ? "msg.keyChanged" : "msg.missingKeys"));
+      return;
+    }
+    try {
+      const members = (opened.details.members || []).map((m) => ({ id: m.id, pub_ecdh: m.pub_ecdh!, pub_sign: m.pub_sign! }));
+      const id = newMessageId();
+      const payload = await SeresCrypto.encryptMessage(identity, opened.id, id, { type: "reaction", target: message.id, emoji }, members);
+      await post(`/api/chats/${encodeURIComponent(opened.id)}/messages`, { id, payload, silent: true });
+      if (emoji) SeresEmoji.remember(emoji);
+      await syncCurrent();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) await refreshCurrentDetails().catch(() => {});
+      showAlert(errorText(error));
+    }
+  }
+
+  // ------------------------------------------------------------ attachments
+
+  const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp"];
+  const VIDEO_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime"];
+
+  /** Downloads and decrypts an attachment once; returns a blob: URL. */
+  function fileUrl(chatId: string, file: FileRef): Promise<string> {
+    let url = fileUrls.get(file.id);
+    if (!url) {
+      url = (async () => {
+        const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}/files/${encodeURIComponent(file.id)}`, {
+          credentials: "same-origin",
+        });
+        if (!response.ok) throw new Error(t("file.missing"));
+        const plain = await SeresCrypto.decryptFile(await response.arrayBuffer(), file.key, file.iv);
+        // Only media types the page shows itself keep their type; everything else is a plain download.
+        const media = IMAGE_TYPES.includes(file.mime) || VIDEO_TYPES.includes(file.mime) || file.mime.startsWith("audio/");
+        return URL.createObjectURL(new Blob([plain], { type: media ? file.mime : "application/octet-stream" }));
+      })();
+      fileUrls.set(file.id, url);
+      url.catch(() => fileUrls.delete(file.id));
+    }
+    return url;
+  }
+
+  function renderFile(opened: OpenChat, file: FileRef) {
+    const chatId = opened.id;
+    if (file.kind === "image" && IMAGE_TYPES.includes(file.mime)) {
+      const wrap = h("div", { className: "message-image loading" });
+      if (file.width && file.height) wrap.style.aspectRatio = `${file.width} / ${file.height}`;
+      const img = h("img", { attrs: { alt: file.name } });
+      wrap.appendChild(img);
+      fileUrl(chatId, file)
+        .then((url) => {
+          img.src = url;
+          wrap.classList.remove("loading");
+        })
+        .catch(() => {
+          wrap.classList.remove("loading");
+          wrap.classList.add("failed");
+          wrap.textContent = t("file.missing");
+        });
+      wrap.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (img.src) openLightbox(img.src, file);
+      });
+      return wrap;
+    }
+    if ((file.kind === "voice" || file.kind === "audio" || file.kind === "video") && (file.mime.startsWith("audio/") || VIDEO_TYPES.includes(file.mime))) {
+      const isVideo = file.kind === "video";
+      const media = h(isVideo ? "video" : "audio", { className: isVideo ? "message-video" : "message-audio", attrs: { controls: "", preload: "metadata" } });
+      const wrap = h("div", { className: "message-media" + (file.kind === "voice" ? " voice" : "") }, [
+        file.kind === "voice" ? h("span", { className: "voice-icon", text: "🎤" }) : null,
+        media,
+      ]);
+      fileUrl(chatId, file)
+        .then((url) => ((media as HTMLMediaElement).src = url))
+        .catch(() => wrap.appendChild(h("span", { className: "list-hint", text: t("file.missing") })));
+      return wrap;
+    }
+    const card = h("div", { className: "file-card" }, [
+      h("span", { className: "file-icon", text: "📄" }),
+      h("div", { className: "file-info" }, [
+        h("strong", { text: file.name }),
+        h("span", { text: formatSize(file.size) }),
+      ]),
+      button(t("file.download"), "pill-btn", async () => {
+        try {
+          downloadUrl(await fileUrl(chatId, file), file.name);
+        } catch (error) {
+          showAlert(errorText(error));
+        }
+      }),
+    ]);
+    return card;
+  }
+
+  function downloadUrl(url: string, name: string) {
+    const link = h("a", { attrs: { href: url, download: name || "file" } });
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  function openLightbox(url: string, file: FileRef) {
+    const box = $("lightbox");
+    ($("lightbox-img") as HTMLImageElement).src = url;
+    $("lightbox-name").textContent = file.name;
+    $("lightbox-download").onclick = (event) => {
+      event.stopPropagation();
+      downloadUrl(url, file.name);
+    };
+    box.classList.remove("modal-hidden");
+  }
+
+  /** Phones: swiping a message left or right (like in WhatsApp) calls the handler. */
+  function onSwipe(element: HTMLElement, handlers: { left?: () => void; right?: () => void }) {
+    if (!handlers.left && !handlers.right) return;
     const MAX = 90;
     const TRIGGER = 60;
     let startX = 0;
@@ -1117,17 +1716,20 @@
         const moveX = event.touches[0].clientX - startX;
         const moveY = event.touches[0].clientY - startY;
         if (mode === "idle" && Math.abs(moveX) + Math.abs(moveY) > 8) {
-          mode = moveX < 0 && Math.abs(moveX) > Math.abs(moveY) ? "swipe" : "scroll";
+          const horizontal = Math.abs(moveX) > Math.abs(moveY);
+          const allowed = moveX < 0 ? !!handlers.left : !!handlers.right;
+          mode = horizontal && allowed ? "swipe" : "scroll";
         }
         if (mode !== "swipe") return;
-        dx = Math.max(-MAX, Math.min(0, moveX));
+        dx = Math.max(handlers.left ? -MAX : 0, Math.min(handlers.right ? MAX : 0, moveX));
         element.style.transform = `translateX(${dx}px)`;
-        element.classList.toggle("swipe-ready", dx <= -TRIGGER);
+        element.classList.toggle("swipe-ready", Math.abs(dx) >= TRIGGER);
       },
       { passive: true },
     );
     const end = () => {
-      if (mode === "swipe" && dx <= -TRIGGER) handler();
+      if (mode === "swipe" && dx <= -TRIGGER && handlers.left) handlers.left();
+      if (mode === "swipe" && dx >= TRIGGER && handlers.right) handlers.right();
       element.style.transition = "transform 0.2s ease-out";
       element.style.transform = "";
       element.classList.remove("swipe-ready");
@@ -1149,38 +1751,84 @@
     });
   }
 
-  /** Right-click / long-press menu of a message. */
+  /** Right-click / long-press menu of a message: react, reply, copy, forward, pin, edit, info, delete. */
   function openMessageMenu(opened: OpenChat, message: Message, view: Shown, x: number, y: number) {
     closeFloatingMenus();
+    if (view.type === "system" || view.type === "deleted") return;
     const own = message.sender_id === me.id && message.kind === "e2e";
-    if (!own) return;
+    const readable = view.type === "text" || view.type === "legacy";
+    const pinned = !!opened.details?.pins?.some((pin) => pin.message_id === message.id);
     const url = `/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(message.id)}`;
-    const menu = h("div", { className: "floating-menu" }, [
-      button(t("msg.menuInfo"), "floating-item", () => {
+    const item = (label: string, fn: () => void, danger = false) =>
+      button(label, "floating-item" + (danger ? " danger" : ""), () => {
         closeFloatingMenus();
-        openMessageInfo(opened, message, view);
-      }),
-      view.type === "text"
-        ? button(t("msg.menuEdit"), "floating-item", () => {
+        fn();
+      });
+
+    const quick = h("div", { className: "quick-reactions" });
+    if (readable) {
+      for (const emoji of SeresEmoji.QUICK) {
+        quick.appendChild(button(emoji, "quick-reaction", () => {
+          closeFloatingMenus();
+          sendReaction(opened, message, emoji);
+        }));
+      }
+      quick.appendChild(
+        button("＋", "quick-reaction more", () => {
+          const picker = SeresEmoji.picker((emoji) => {
             closeFloatingMenus();
-            startEdit(opened, message, view.text);
+            sendReaction(opened, message, emoji);
+          }, t("emoji.recent"));
+          menu.textContent = "";
+          menu.appendChild(picker);
+          placeMenu(menu, x, y);
+        }, t("emoji.more")),
+      );
+    }
+
+    const text = view.text;
+    const menu = h("div", { className: "floating-menu message-menu" }, [
+      readable ? quick : null,
+      readable ? item(t("msg.menuReply"), () => startReply(opened, message, view)) : null,
+      readable && text
+        ? item(t("msg.menuCopy"), () => {
+            navigator.clipboard
+              .writeText(text)
+              .then(() => showAlert(t("msg.copied")))
+              .catch(() => showAlert(t("msg.copyFailed")));
           })
         : null,
-      button(t("msg.menuDelete"), "floating-item danger", async () => {
-        closeFloatingMenus();
-        if (!window.confirm(t("msg.deleteConfirm"))) return;
-        try {
-          await post(url + "/delete");
-          if (editing && editing.message.id === message.id) cancelEdit();
-          await syncCurrent();
-          chatsSignature = "";
-          loadChats().catch(() => {});
-        } catch (error) {
-          showAlert(errorText(error));
-        }
-      }),
+      readable && message.kind === "e2e" ? item(t("msg.menuForward"), () => openForwardModal(opened, message, view)) : null,
+      readable ? item(pinned ? t("msg.menuUnpin") : t("msg.menuPin"), () => togglePin(opened, message, !pinned)) : null,
+      own && view.type === "text" && !view.content?.file?.kind?.startsWith("voice")
+        ? item(t("msg.menuEdit"), () => startEdit(opened, message, view))
+        : null,
+      own ? item(t("msg.menuInfo"), () => openMessageInfo(opened, message, view)) : null,
+      own
+        ? item(
+            t("msg.menuDelete"),
+            async () => {
+              if (!window.confirm(t("msg.deleteConfirm"))) return;
+              try {
+                await post(url + "/delete");
+                if (editing && editing.message.id === message.id) cancelEdit();
+                await syncCurrent();
+                chatsSignature = "";
+                loadChats().catch(() => {});
+              } catch (error) {
+                showAlert(errorText(error));
+              }
+            },
+            true,
+          )
+        : null,
     ]);
     document.body.appendChild(menu);
+    placeMenu(menu, x, y);
+  }
+
+  /** Keeps a floating menu inside the viewport. */
+  function placeMenu(menu: HTMLElement, x: number, y: number) {
     menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + "px";
     menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + "px";
   }
@@ -1224,11 +1872,13 @@
     openModal("message-info-modal");
   }
 
-  function startEdit(opened: OpenChat, message: Message, text: string) {
-    editing = { chatId: opened.id, message };
+  function startEdit(opened: OpenChat, message: Message, view: Shown) {
+    cancelReply();
+    editing = { chatId: opened.id, message, content: view.content || {} };
     const input = $("message-input-field") as HTMLTextAreaElement;
-    input.value = text;
+    input.value = view.text;
     autoGrow(input);
+    updateSendButton();
     $("edit-bar").classList.remove("modal-hidden");
     input.focus();
   }
@@ -1239,7 +1889,24 @@
     const input = $("message-input-field") as HTMLTextAreaElement;
     input.value = "";
     autoGrow(input);
+    updateSendButton();
     $("edit-bar").classList.add("modal-hidden");
+  }
+
+  function startReply(opened: OpenChat, message: Message, view: Shown) {
+    cancelEdit();
+    const preview = contentPreview(view).slice(0, 120) || "…";
+    replyTo = { chatId: opened.id, message, preview };
+    const author = message.sender_id === me.id ? t("msg.you") : message.sender_display || message.sender || "";
+    $("reply-bar-name").textContent = t("reply.to", { name: author });
+    $("reply-bar-text").textContent = preview;
+    $("reply-bar").classList.remove("modal-hidden");
+    ($("message-input-field") as HTMLTextAreaElement).focus();
+  }
+
+  function cancelReply() {
+    replyTo = null;
+    $("reply-bar").classList.add("modal-hidden");
   }
 
   // ---------------------------------------------------------------- send
@@ -1253,10 +1920,56 @@
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
+  function encryptionMembers(details: ChatSummary) {
+    return (details.members || []).map((m) => ({ id: m.id, pub_ecdh: m.pub_ecdh!, pub_sign: m.pub_sign! }));
+  }
+
+  /** Throws when the open chat can't receive encrypted messages right now. */
+  async function readyToSend(opened: OpenChat, refresh: boolean) {
+    if (!opened.details || refresh) await refreshCurrentDetails();
+    if (current !== opened || !opened.details) throw new Error(t("common.requestFailed"));
+    if (opened.changedKeys.length) throw new Error(t("msg.keyChanged"));
+    if (opened.missingKeys.length) throw new Error(t("msg.missingKeys"));
+    return opened.details;
+  }
+
+  /**
+   * Encrypts content for the members of the open chat and sends it (or replaces
+   * an own message). If the member list changed meanwhile (409) it encrypts again.
+   */
+  async function sendContent(
+    opened: OpenChat,
+    content: Content,
+    extra: { files?: string[]; silent?: boolean; editId?: string } = {},
+  ) {
+    for (let attempt = 0; ; attempt++) {
+      const details = await readyToSend(opened, attempt > 0);
+      const messageId = extra.editId || newMessageId();
+      const payload = await SeresCrypto.encryptMessage(identity, opened.id, messageId, content, encryptionMembers(details));
+      try {
+        if (extra.editId) {
+          await post(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(messageId)}/edit`, { payload });
+        } else {
+          await post(`/api/chats/${encodeURIComponent(opened.id)}/messages`, {
+            id: messageId,
+            payload,
+            silent: !!extra.silent,
+            files: extra.files || [],
+          });
+        }
+        return messageId;
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 409 && attempt === 0) continue;
+        throw error;
+      }
+    }
+  }
+
   async function sendMessage() {
     const input = $("message-input-field") as HTMLTextAreaElement;
     const text = input.value.trim();
-    if (!text || !current || sending) return;
+    if (!current || sending) return;
+    if (!text && !pendingFiles.length) return;
     if (text.length > MESSAGE_LIMIT) {
       showAlert(t("msg.tooLong", { limit: MESSAGE_LIMIT }));
       return;
@@ -1264,45 +1977,43 @@
     const opened = current;
     sending = true;
     ($("send-btn") as HTMLButtonElement).disabled = true;
+    closeEmojiPicker();
+    closeMentionList();
     try {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        if (!opened.details || attempt > 0) await refreshCurrentDetails();
-        if (current !== opened || !opened.details) return;
-        if (opened.changedKeys.length) {
-          showAlert(t("msg.keyChanged"));
-          return;
-        }
-        if (opened.missingKeys.length) {
-          showAlert(t("msg.missingKeys"));
-          return;
-        }
-        const members = (opened.details.members || []).map((m) => ({
-          id: m.id,
-          pub_ecdh: m.pub_ecdh!,
-          pub_sign: m.pub_sign!,
-        }));
-        const edit = editing && editing.chatId === opened.id ? editing.message : null;
-        const messageId = edit ? edit.id : newMessageId();
-        const payload = await SeresCrypto.encryptMessage(identity, opened.id, messageId, { text }, members);
-        try {
-          if (edit) {
-            await post(`/api/chats/${encodeURIComponent(opened.id)}/messages/${encodeURIComponent(messageId)}/edit`, { payload });
-            cancelEdit();
-          } else {
-            await post(`/api/chats/${encodeURIComponent(opened.id)}/messages`, { id: messageId, payload });
+      const edit = editing && editing.chatId === opened.id ? editing : null;
+      if (edit) {
+        if (!text && !edit.content.file) return;
+        await sendContent(opened, { ...edit.content, text }, { editId: edit.message.id });
+        cancelEdit();
+      } else {
+        const reply =
+          replyTo && replyTo.chatId === opened.id
+            ? { id: replyTo.message.id, sender_id: replyTo.message.sender_id, preview: replyTo.preview }
+            : undefined;
+        const files = pendingFiles.slice();
+        if (files.length) {
+          // One message per file; the text goes with the last one.
+          for (let i = 0; i < files.length; i++) {
+            const ref = await uploadFile(opened.id, files[i], files[i].name);
+            const content: Content = { file: ref };
+            if (i === 0 && reply) content.reply = reply;
+            if (i === files.length - 1 && text) content.text = text;
+            await sendContent(opened, content, { files: [ref.id] });
           }
-          input.value = "";
-          autoGrow(input);
-          typingChat = null; // the server forgets it when a message arrives
-          await syncCurrent();
-          loadChats().catch(() => {});
-          return;
-        } catch (error) {
-          // 409: the member list changed in the meantime, encrypt again for the new members.
-          if (error instanceof ApiError && error.status === 409 && attempt === 0) continue;
-          throw error;
+          clearPendingFiles();
+        } else {
+          await sendContent(opened, reply ? { text, reply } : { text });
         }
+        cancelReply();
       }
+      input.value = "";
+      drafts.delete(opened.id);
+      autoGrow(input);
+      updateSendButton();
+      typingChat = null; // the server forgets it when a message arrives
+      await syncCurrent();
+      chatsSignature = "";
+      loadChats().catch(() => {});
     } catch (error) {
       showAlert(errorText(error));
     } finally {
@@ -1311,8 +2022,449 @@
     }
   }
 
+  function fileKind(mime: string): FileRef["kind"] {
+    if (IMAGE_TYPES.includes(mime)) return "image";
+    if (VIDEO_TYPES.includes(mime)) return "video";
+    if (mime.startsWith("audio/")) return "audio";
+    return "file";
+  }
+
+  /** Encrypts a file in the browser and uploads only the ciphertext. */
+  async function uploadFile(chatId: string, blob: Blob, name: string, extra: Partial<FileRef> = {}): Promise<FileRef> {
+    if (blob.size > MAX_FILE_SIZE) throw new Error(t("file.tooLarge", { name }));
+    const mime = (blob.type || "application/octet-stream").split(";")[0];
+    const kind = extra.kind || fileKind(mime);
+    let width: number | undefined;
+    let height: number | undefined;
+    if (kind === "image") {
+      try {
+        const bitmap = await createImageBitmap(blob);
+        width = bitmap.width;
+        height = bitmap.height;
+        bitmap.close();
+      } catch {
+        /* size unknown, the image is shown without a placeholder */
+      }
+    }
+    const encrypted = await SeresCrypto.encryptFile(await blob.arrayBuffer());
+    const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}/files`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: encrypted.data,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.success) throw new ApiError(data.message || t("file.uploadFailed"), response.status);
+    const ref: FileRef = {
+      id: data.file_id,
+      key: encrypted.key,
+      iv: encrypted.iv,
+      name: name.slice(0, 200) || "file",
+      mime,
+      size: blob.size,
+      kind,
+      ...extra,
+    };
+    if (width && height) {
+      ref.width = width;
+      ref.height = height;
+    }
+    // Show own uploads right away without downloading them again.
+    const media = kind !== "file";
+    fileUrls.set(ref.id, Promise.resolve(URL.createObjectURL(media ? blob : new Blob([blob], { type: "application/octet-stream" }))));
+    return ref;
+  }
+
+  // ------------------------------------------------- picking attachments
+
+  function addPendingFiles(files: FileList | File[]) {
+    if (!current) return;
+    for (const file of Array.from(files)) {
+      if (file.size > MAX_FILE_SIZE) {
+        showAlert(t("file.tooLarge", { name: file.name }));
+        continue;
+      }
+      if (pendingFiles.length >= 10) break;
+      pendingFiles.push(file);
+    }
+    renderPendingFiles();
+  }
+
+  function clearPendingFiles() {
+    pendingFiles = [];
+    renderPendingFiles();
+  }
+
+  function renderPendingFiles() {
+    const bar = $("attach-bar");
+    bar.textContent = "";
+    pendingFiles.forEach((file, index) => {
+      const chip = h("div", { className: "attach-chip" });
+      if (IMAGE_TYPES.includes(file.type)) {
+        const img = h("img", { attrs: { alt: "" } });
+        img.src = URL.createObjectURL(file);
+        img.addEventListener("load", () => URL.revokeObjectURL(img.src), { once: true });
+        chip.appendChild(img);
+      } else {
+        chip.appendChild(h("span", { className: "file-icon", text: "📄" }));
+      }
+      chip.appendChild(h("span", { className: "attach-name", text: file.name }));
+      chip.appendChild(h("span", { className: "attach-size", text: formatSize(file.size) }));
+      chip.appendChild(
+        button("✕", "attach-remove", () => {
+          pendingFiles.splice(index, 1);
+          renderPendingFiles();
+        }, t("common.cancel")),
+      );
+      bar.appendChild(chip);
+    });
+    bar.classList.toggle("modal-hidden", !pendingFiles.length);
+    updateSendButton();
+  }
+
+  /** Shows the microphone when there is nothing to send (like WhatsApp). */
+  function updateSendButton() {
+    const empty = !($("message-input-field") as HTMLTextAreaElement).value.trim() && !pendingFiles.length && !editing;
+    $("send-btn").classList.toggle("modal-hidden", empty && voiceSupported());
+    $("record-btn").classList.toggle("modal-hidden", !(empty && voiceSupported()));
+  }
+
+  // ------------------------------------------------------- voice messages
+
+  let recording: {
+    recorder: MediaRecorder;
+    stream: MediaStream;
+    chunks: Blob[];
+    started: number;
+    timer: number;
+    send: boolean;
+  } | null = null;
+  const MAX_RECORDING_SECONDS = 300;
+
+  function voiceSupported() {
+    return typeof MediaRecorder !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+  }
+
+  async function startRecording() {
+    if (!current || recording) return;
+    const opened = current;
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      showAlert(t("voice.noMicrophone"));
+      return;
+    }
+    const type = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"].find(
+      (candidate) => MediaRecorder.isTypeSupported(candidate),
+    );
+    const recorder = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+    const state = {
+      recorder,
+      stream,
+      chunks: [] as Blob[],
+      started: Date.now(),
+      timer: 0,
+      send: false,
+    };
+    recording = state;
+    recorder.addEventListener("dataavailable", (event) => {
+      if (event.data.size) state.chunks.push(event.data);
+    });
+    recorder.addEventListener("stop", async () => {
+      stream.getTracks().forEach((track) => track.stop());
+      clearInterval(state.timer);
+      recording = null;
+      $("record-bar").classList.add("modal-hidden");
+      $("chat-input-area").classList.remove("recording");
+      if (!state.send || current !== opened) return;
+      const duration = (Date.now() - state.started) / 1000;
+      if (duration < 0.7) return;
+      const mime = (recorder.mimeType || type || "audio/webm").split(";")[0];
+      const blob = new Blob(state.chunks, { type: mime });
+      try {
+        const ref = await uploadFile(opened.id, blob, t("voice.fileName") + "." + (mime.split("/")[1] || "webm"), {
+          kind: "voice",
+          duration,
+        });
+        await sendContent(opened, { file: ref }, { files: [ref.id] });
+        await syncCurrent();
+        loadChats().catch(() => {});
+      } catch (error) {
+        showAlert(errorText(error));
+      }
+    });
+    recorder.start(250);
+    $("record-time").textContent = "0:00";
+    $("record-bar").classList.remove("modal-hidden");
+    $("chat-input-area").classList.add("recording");
+    state.timer = window.setInterval(() => {
+      const seconds = (Date.now() - state.started) / 1000;
+      $("record-time").textContent = formatDuration(seconds);
+      if (seconds >= MAX_RECORDING_SECONDS) stopRecording(true);
+    }, 250);
+  }
+
+  function stopRecording(send: boolean) {
+    if (!recording) return;
+    recording.send = send;
+    if (recording.recorder.state !== "inactive") recording.recorder.stop();
+  }
+
+  // ------------------------------------------------------------ forwarding
+
+  let forwarding: { from: OpenChat; message: Message; view: Shown } | null = null;
+
+  function openForwardModal(opened: OpenChat, message: Message, view: Shown) {
+    forwarding = { from: opened, message, view };
+    const list = $("forward-list");
+    list.textContent = "";
+    $("warning-forward").textContent = "";
+    for (const chat of chats) {
+      if (chat.blocked) continue;
+      const checkbox = h("input", { attrs: { type: "checkbox", value: chat.id } });
+      list.appendChild(
+        h("label", { className: "picker-item" }, [
+          checkbox,
+          avatarEl(chat.type === "dm" && chat.other_user ? chat.other_user : chat.name, { group: chat.type === "group", label: chat.name }),
+          h("span", { className: "item-name", text: chat.name }),
+        ]),
+      );
+    }
+    $("forward-preview").textContent = contentPreview(view);
+    openModal("forward-modal");
+  }
+
+  async function confirmForward() {
+    if (!forwarding) return;
+    const { from, view } = forwarding;
+    const targets = [...$("forward-list").querySelectorAll<HTMLInputElement>("input:checked")].map((box) => box.value);
+    const warning = $("warning-forward");
+    if (!targets.length) {
+      warning.textContent = t("forward.pick");
+      return;
+    }
+    warning.textContent = t("forward.sending");
+    let sent = 0;
+    for (const chatId of targets) {
+      try {
+        const data = await api(`/api/chats/${encodeURIComponent(chatId)}`);
+        const details: ChatSummary = data.chat;
+        const { changed, missing } = await checkPins(details.members || []);
+        if (changed.length || missing.length) throw new Error(t(changed.length ? "msg.keyChanged" : "msg.missingKeys"));
+        const content: Content = { forwarded: true };
+        if (view.text) content.text = view.text;
+        const files: string[] = [];
+        const file = view.content?.file;
+        if (file) {
+          // Re-upload the same ciphertext into the other chat; key and iv stay the same.
+          const response = await fetch(`/api/chats/${encodeURIComponent(from.id)}/files/${encodeURIComponent(file.id)}`, {
+            credentials: "same-origin",
+          });
+          if (!response.ok) throw new Error(t("file.missing"));
+          const upload = await fetch(`/api/chats/${encodeURIComponent(chatId)}/files`, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: await response.arrayBuffer(),
+          });
+          const uploaded = await upload.json().catch(() => ({}));
+          if (!upload.ok || !uploaded.success) throw new Error(uploaded.message || t("file.uploadFailed"));
+          content.file = { ...file, id: uploaded.file_id };
+          files.push(uploaded.file_id);
+        }
+        const id = newMessageId();
+        const payload = await SeresCrypto.encryptMessage(identity, chatId, id, content, encryptionMembers(details));
+        await post(`/api/chats/${encodeURIComponent(chatId)}/messages`, { id, payload, files });
+        sent++;
+      } catch (error) {
+        const chat = chats.find((c) => c.id === chatId);
+        showAlert((chat ? chat.name + ": " : "") + errorText(error));
+      }
+    }
+    forwarding = null;
+    closeAllModals();
+    if (sent) showAlert(t("forward.done", { count: sent }));
+    if (current && targets.includes(current.id)) await syncCurrent();
+    chatsSignature = "";
+    loadChats().catch(() => {});
+  }
+
+  // ----------------------------------------------------------- emoji picker
+
+  function toggleEmojiPicker() {
+    const slot = $("emoji-slot");
+    if (slot.childElementCount) {
+      closeEmojiPicker();
+      return;
+    }
+    const input = $("message-input-field") as HTMLTextAreaElement;
+    slot.appendChild(
+      SeresEmoji.picker((emoji) => {
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? input.value.length;
+        input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
+        input.selectionStart = input.selectionEnd = start + emoji.length;
+        autoGrow(input);
+        updateSendButton();
+        input.focus();
+      }, t("emoji.recent")),
+    );
+    slot.classList.remove("modal-hidden");
+  }
+
+  function closeEmojiPicker() {
+    const slot = $("emoji-slot");
+    slot.textContent = "";
+    slot.classList.add("modal-hidden");
+  }
+
+  // --------------------------------------------------------------- mentions
+
+  /** In groups, typing "@na" suggests members; Tab/Enter or a click inserts the username. */
+  function updateMentionList() {
+    const input = $("message-input-field") as HTMLTextAreaElement;
+    const list = $("mention-list");
+    const details = current?.details;
+    const before = input.value.slice(0, input.selectionStart ?? input.value.length);
+    const match = /(?:^|\s)@([A-Za-z0-9_-]{0,32})$/.exec(before);
+    if (!details || details.type !== "group" || !match) {
+      closeMentionList();
+      return;
+    }
+    const query = match[1].toLowerCase();
+    const members = (details.members || []).filter(
+      (m) => m.id !== me.id && (m.username.toLowerCase().startsWith(query) || nameOf(m).toLowerCase().startsWith(query)),
+    );
+    list.textContent = "";
+    if (!members.length) {
+      closeMentionList();
+      return;
+    }
+    members.slice(0, 6).forEach((member, index) => {
+      const item = h("div", { className: "mention-item" + (index === 0 ? " active" : ""), attrs: { "data-username": member.username } }, [
+        avatarEl(member.username, { label: nameOf(member) }),
+        h("strong", { text: nameOf(member) }),
+        h("span", { text: "@" + member.username }),
+      ]);
+      item.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        insertMention(member.username);
+      });
+      list.appendChild(item);
+    });
+    list.classList.remove("modal-hidden");
+  }
+
+  function insertMention(username: string) {
+    const input = $("message-input-field") as HTMLTextAreaElement;
+    const caret = input.selectionStart ?? input.value.length;
+    const before = input.value.slice(0, caret).replace(/@([A-Za-z0-9_-]{0,32})$/, "@" + username + " ");
+    input.value = before + input.value.slice(caret);
+    input.selectionStart = input.selectionEnd = before.length;
+    closeMentionList();
+    input.focus();
+  }
+
+  function closeMentionList() {
+    $("mention-list").classList.add("modal-hidden");
+    $("mention-list").textContent = "";
+  }
+
+  // ---------------------------------------------------------------- search
+
+  function openSearch() {
+    if (!current) return;
+    $("search-bar").classList.remove("modal-hidden");
+    const input = $("search-input") as HTMLInputElement;
+    input.value = "";
+    $("search-count").textContent = "";
+    input.focus();
+  }
+
+  function closeSearch() {
+    $("search-bar").classList.add("modal-hidden");
+    if (current) current.search = null;
+    markSearchHits();
+  }
+
+  let searchTimer: number | null = null;
+
+  function onSearchInput() {
+    if (searchTimer !== null) clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => runSearch().catch((error) => showAlert(errorText(error))), 250);
+  }
+
+  /** Searches the decrypted messages on this device; older history is loaded for it (up to ~1000 messages). */
+  async function runSearch() {
+    const opened = current;
+    if (!opened) return;
+    const query = ($("search-input") as HTMLInputElement).value.trim().toLowerCase();
+    if (!query) {
+      opened.search = null;
+      $("search-count").textContent = "";
+      markSearchHits();
+      return;
+    }
+    $("search-count").textContent = t("search.searching");
+    for (let page = 0; page < 20 && opened.hasMore; page++) {
+      await loadOlder();
+      if (current !== opened) return;
+    }
+    const ordered = [...opened.messages.values()].filter((m) => !m.deleted && !m.silent && m.kind !== "system").sort((a, b) => a.seq - b.seq);
+    const hits: string[] = [];
+    for (const message of ordered) {
+      const view = await showMessage(opened.id, message);
+      const haystack = (view.text + " " + (view.content?.file?.name || "")).toLowerCase();
+      if (haystack.includes(query)) hits.push(message.id);
+    }
+    if (current !== opened) return;
+    opened.search = { query, hits, index: hits.length - 1 };
+    showSearchHit();
+  }
+
+  function moveSearch(step: number) {
+    const search = current?.search;
+    if (!search || !search.hits.length) return;
+    search.index = (search.index + step + search.hits.length) % search.hits.length;
+    showSearchHit();
+  }
+
+  function showSearchHit() {
+    const search = current?.search;
+    if (!search) return;
+    $("search-count").textContent = search.hits.length
+      ? t("search.count", { index: search.index + 1, total: search.hits.length })
+      : t("search.none");
+    markSearchHits();
+    const id = search.hits[search.index];
+    if (id) {
+      document.querySelector(`.message-row[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+
+  function markSearchHits() {
+    const search = current?.search;
+    const hits = new Set(search ? search.hits : []);
+    const selected = search ? search.hits[search.index] : null;
+    document.querySelectorAll<HTMLElement>(".message-row").forEach((row) => {
+      row.classList.toggle("search-hit", hits.has(row.dataset.id!));
+      row.classList.toggle("search-current", row.dataset.id === selected);
+    });
+  }
+
+  // ---------------------------------------------------------- jump button
+
+  function updateJumpButton() {
+    const container = $("messages");
+    const away = container.scrollHeight - container.scrollTop - container.clientHeight > 300;
+    $("jump-bottom").classList.toggle("modal-hidden", !current || !away);
+  }
+
   function autoGrow(textarea: HTMLTextAreaElement) {
     textarea.style.height = "auto";
+    // While the input area is hidden there is nothing to measure.
+    if (!textarea.scrollHeight) return;
     textarea.style.height = Math.min(textarea.scrollHeight, 160) + "px";
   }
 
@@ -1438,6 +2590,46 @@
     const myFp = await SeresCrypto.fingerprint(identity.pubEcdh, identity.pubSign);
     const verified = readStore("verified");
     const members = details.members || [];
+
+    // Shortcuts and the disappearing messages timer (for groups only the owner may change it).
+    body.appendChild(
+      h("div", { className: "info-actions" }, [
+        button(t("pins.title") + (details.pins && details.pins.length ? ` (${details.pins.length})` : ""), "pill-btn secondary", () => {
+          closeAllModals();
+          openPinsModal();
+        }),
+        button(t("search.open"), "pill-btn secondary", () => {
+          closeAllModals();
+          openSearch();
+        }),
+      ]),
+    );
+    const canChangeTimer = details.type === "dm" || details.role === "owner";
+    const timer = h("select", { className: "language-select" }) as HTMLSelectElement;
+    for (const seconds of DISAPPEAR_OPTIONS) {
+      const option = h("option", { text: disappearLabel(seconds), attrs: { value: String(seconds) } }) as HTMLOptionElement;
+      option.selected = seconds === (details.disappear_seconds || 0);
+      timer.appendChild(option);
+    }
+    timer.disabled = !canChangeTimer;
+    timer.addEventListener("change", async () => {
+      try {
+        await post(`/api/chats/${encodeURIComponent(details.id)}/disappearing`, { seconds: Number(timer.value) });
+        await refreshCurrentDetails();
+        await syncCurrent();
+        chatsSignature = "";
+        loadChats().catch(() => {});
+      } catch (error) {
+        showAlert(errorText(error));
+      }
+    });
+    body.appendChild(
+      h("div", { className: "settings-section" }, [
+        h("p", { text: t("disappear.info") }),
+        timer,
+        canChangeTimer ? null : h("p", { className: "settings-hint", text: t("disappear.ownerOnly") }),
+      ]),
+    );
 
     if (details.type === "dm") {
       const other = members.find((m) => m.id !== me.id);
@@ -1641,6 +2833,11 @@
       h("span", { className: "profile-username", text: "@" + user.username }),
       h("span", { className: "profile-status", text: (data.muted ? "🔕 " : "") + status }),
     );
+    if (data.presence) {
+      head.appendChild(
+        h("span", { className: "profile-presence" + (data.presence.online ? " online" : ""), text: presenceText(data.presence) }),
+      );
+    }
 
     const actions = $("profile-actions");
     actions.textContent = "";
@@ -1907,7 +3104,77 @@
     );
   }
 
+  /** Texts of the on/off switches in the settings. */
+  function renderSettingsToggles() {
+    const settings = readStore("settings");
+    $("privacy-toggle").textContent = t(me.show_last_seen === false ? "privacy.showOff" : "privacy.showOn");
+    $("notify-toggle").textContent = t(settings.notify === "on" && notificationsEnabled() ? "notify.on" : "notify.off");
+    $("notify-preview-toggle").textContent = t(settings.preview === "off" ? "notify.previewOff" : "notify.previewOn");
+    $("notify-preview-toggle").classList.toggle("modal-hidden", settings.notify !== "on");
+  }
+
+  async function togglePrivacy() {
+    try {
+      const data = await post("/api/profile/privacy", { show_last_seen: me.show_last_seen === false });
+      me.show_last_seen = data.show_last_seen;
+      renderSettingsToggles();
+      showAlert(t(data.show_last_seen ? "privacy.savedOn" : "privacy.savedOff"));
+    } catch (error) {
+      showAlert(errorText(error));
+    }
+  }
+
+  async function loadCodesStatus() {
+    try {
+      const data = await api("/api/recovery/codes");
+      $("codes-status").textContent = data.total
+        ? t("settings.codesLeft", { unused: data.unused, total: data.total })
+        : t("settings.codesNone");
+      $("codes-status").classList.toggle("warn", !data.unused);
+    } catch {
+      $("codes-status").textContent = "";
+    }
+  }
+
+  /** Makes 10 new backup codes (old ones stop working) and shows them once. */
+  async function generateCodes() {
+    const warning = $("settings-warning");
+    const passwordInput = $("codes-password") as HTMLInputElement;
+    const password = passwordInput.value;
+    warning.textContent = "";
+    if (!password) {
+      warning.textContent = t("settings.codesNeedPassword");
+      passwordInput.focus();
+      return;
+    }
+    const button = $("codes-generate") as HTMLButtonElement;
+    button.disabled = true;
+    warning.textContent = t("settings.codesCreating");
+    try {
+      const fresh: Me = (await api("/api/me")).user;
+      const pre = await post("/api/prelogin", { nameomail: me.username });
+      const keys = await SeresCrypto.deriveAccountKeys(password, pre.kdf_salt, pre.kdf_iterations);
+      let created: { codes: string[]; stored: object[] };
+      try {
+        created = await SeresCrypto.createRecoveryCodes(fresh.enc_private, keys.wrapKey);
+      } catch {
+        throw new Error(t("settings.codesWrongPassword"));
+      }
+      await post("/api/recovery/codes", { old_auth_hash: keys.authHash, codes: created.stored });
+      passwordInput.value = "";
+      warning.textContent = "";
+      await loadCodesStatus();
+      SeresCodes.show(created.codes, me.username);
+    } catch (error) {
+      warning.textContent = errorText(error);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   async function openSettings() {
+    loadCodesStatus();
+    renderSettingsToggles();
     $("user-dropdown-menu").classList.add("modal-hidden");
     $("settings-warning").textContent = "";
     ($("display-name-input") as HTMLInputElement).value = nameOf(me);
@@ -2039,6 +3306,62 @@
     });
     $("send-btn").addEventListener("click", sendMessage);
     $("edit-cancel").addEventListener("click", cancelEdit);
+    $("reply-cancel").addEventListener("click", cancelReply);
+    $("record-btn").addEventListener("click", startRecording);
+    $("record-cancel").addEventListener("click", () => stopRecording(false));
+    $("record-send").addEventListener("click", () => stopRecording(true));
+    $("emoji-btn").addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleEmojiPicker();
+    });
+    $("attach-btn").addEventListener("click", () => ($("attach-input") as HTMLInputElement).click());
+    $("attach-input").addEventListener("change", () => {
+      const picker = $("attach-input") as HTMLInputElement;
+      if (picker.files) addPendingFiles(picker.files);
+      picker.value = "";
+    });
+    $("search-btn").addEventListener("click", openSearch);
+    $("search-input").addEventListener("input", onSearchInput);
+    $("search-input").addEventListener("keydown", (event) => {
+      const key = (event as KeyboardEvent).key;
+      if (key === "Enter") moveSearch((event as KeyboardEvent).shiftKey ? 1 : -1);
+      if (key === "Escape") closeSearch();
+    });
+    $("search-prev").addEventListener("click", () => moveSearch(-1));
+    $("search-next").addEventListener("click", () => moveSearch(1));
+    $("search-close").addEventListener("click", closeSearch);
+    $("pinned-bar").addEventListener("click", openPinsModal);
+    $("confirm-forward").addEventListener("click", confirmForward);
+    $("jump-bottom").addEventListener("click", () => {
+      const container = $("messages");
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    });
+    $("messages").addEventListener("scroll", updateJumpButton, { passive: true });
+    $("lightbox").addEventListener("click", () => $("lightbox").classList.add("modal-hidden"));
+    $("privacy-toggle").addEventListener("click", togglePrivacy);
+    $("notify-toggle").addEventListener("click", () => toggleNotifications().catch(() => {}));
+    $("notify-preview-toggle").addEventListener("click", () => {
+      const settings = readStore("settings");
+      settings.preview = settings.preview === "off" ? "on" : "off";
+      writeStore("settings", settings);
+      renderSettingsToggles();
+    });
+    // Drop files onto the chat or paste images to attach them.
+    const chatArea = document.querySelector(".main-chat") as HTMLElement;
+    chatArea.addEventListener("dragover", (event) => {
+      if (!current || !event.dataTransfer?.types.includes("Files")) return;
+      event.preventDefault();
+      chatArea.classList.add("drag-over");
+    });
+    chatArea.addEventListener("dragleave", (event) => {
+      if (event.target === chatArea || !chatArea.contains(event.relatedTarget as Node)) chatArea.classList.remove("drag-over");
+    });
+    chatArea.addEventListener("drop", (event) => {
+      chatArea.classList.remove("drag-over");
+      if (!current || !event.dataTransfer?.files.length) return;
+      event.preventDefault();
+      addPendingFiles(event.dataTransfer.files);
+    });
     $("menu-toggle").addEventListener("click", () => document.querySelector(".sidebar")?.classList.toggle("open"));
     $("user-menu-trigger").addEventListener("click", () => $("user-dropdown-menu").classList.toggle("modal-hidden"));
     $("menu-settings").addEventListener("click", (event) => {
@@ -2068,6 +3391,10 @@
     });
     $("upload-avatar-btn").addEventListener("click", uploadAvatar);
     $("theme-toggle-btn").addEventListener("click", toggleTheme);
+    $("codes-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (window.confirm(t("settings.codesConfirm"))) generateCodes();
+    });
     $("password-form").addEventListener("submit", (event) => {
       event.preventDefault();
       changePassword();
@@ -2101,19 +3428,56 @@
 
     const input = $("message-input-field") as HTMLTextAreaElement;
     input.addEventListener("keydown", (event) => {
+      const mentionOpen = !$("mention-list").classList.contains("modal-hidden");
+      if (mentionOpen && (event.key === "Enter" || event.key === "Tab")) {
+        const first = $("mention-list").querySelector<HTMLElement>(".mention-item");
+        if (first) {
+          event.preventDefault();
+          insertMention(first.dataset.username!);
+          return;
+        }
+      }
+      if (event.key === "Escape") {
+        closeMentionList();
+        if (replyTo) cancelReply();
+        else if (editing) cancelEdit();
+      }
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         sendMessage();
       }
+      // Arrow up in an empty field edits the own last message (like Discord).
+      if (event.key === "ArrowUp" && !input.value && current) {
+        const own = [...current.messages.values()]
+          .filter((m) => m.sender_id === me.id && m.kind === "e2e" && !m.deleted && !m.silent)
+          .sort((a, b) => b.seq - a.seq)[0];
+        const opened = current;
+        if (own) {
+          event.preventDefault();
+          showMessage(opened.id, own).then((view) => {
+            if (view.type === "text" && current === opened) startEdit(opened, own, view);
+          });
+        }
+      }
     });
     input.addEventListener("input", () => {
       autoGrow(input);
+      updateSendButton();
+      updateMentionList();
       sendTyping(input.value.trim().length > 0);
+    });
+    input.addEventListener("paste", (event) => {
+      const files = [...(event.clipboardData?.files || [])];
+      if (files.length) {
+        event.preventDefault();
+        addPendingFiles(files);
+      }
     });
 
     document.addEventListener("click", (event) => {
       const target = event.target as Element;
       if (!target.closest(".floating-menu")) closeFloatingMenus();
+      if (!target.closest("#emoji-slot") && !target.closest("#emoji-btn")) closeEmojiPicker();
       if (!target.closest(".user-menu-container")) $("user-dropdown-menu").classList.add("modal-hidden");
       const sidebar = document.querySelector(".sidebar");
       if (
@@ -2132,6 +3496,8 @@
       if (event.key === "Escape") {
         closeAllModals();
         closeFloatingMenus();
+        closeEmojiPicker();
+        $("lightbox").classList.add("modal-hidden");
       }
     });
     document.addEventListener("visibilitychange", () => {
@@ -2174,6 +3540,12 @@
     if (window.innerWidth <= 768) document.querySelector(".sidebar")?.classList.add("open");
 
     await refreshAll();
+    if (recoveredBy === "code") {
+      // Point to the backup codes, one of them was just used.
+      await openSettings();
+      $("settings-warning").textContent = t("recover.doneCode");
+      $("codes-form").scrollIntoView({ block: "center" });
+    }
     if (pendingInvite) {
       // Remove the token from the address bar so a reload doesn't ask again.
       window.history.replaceState({}, document.title, window.location.pathname);
@@ -2186,6 +3558,10 @@
     window.setInterval(() => {
       if (document.visibilityState === "visible") refreshAll();
     }, 6000);
+    // In the background only the chat list is checked, for desktop notifications.
+    window.setInterval(() => {
+      if (document.visibilityState !== "visible" && notificationsEnabled()) loadChats().catch(() => {});
+    }, 20000);
   }
 
   document.addEventListener("DOMContentLoaded", () => {

@@ -393,6 +393,7 @@ def test_legacy_account_and_chat_migration(tmp_path, monkeypatch):
     hist.close()
 
     monkeypatch.setenv("SERES_DATA_DIR", str(data))
+    monkeypatch.setenv("URL", "")
     for name in ("app", "db", "legacy_migration"):
         sys.modules.pop(name, None)
     module = importlib.import_module("app")

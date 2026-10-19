@@ -104,6 +104,61 @@ SCHEMA = [
         key TEXT PRIMARY KEY,
         value TEXT
     )""",
+    # Pinned messages of a chat (like Discord). Only ids: the content stays encrypted.
+    """CREATE TABLE IF NOT EXISTS pinned_messages (
+        chat_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        pinned_by TEXT NOT NULL,
+        pinned_at TEXT NOT NULL,
+        PRIMARY KEY (chat_id, message_id)
+    )""",
+    # Encrypted attachments. The server only stores ciphertext; the key travels
+    # inside the (also encrypted) message that references the file.
+    """CREATE TABLE IF NOT EXISTS files (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        uploader_id TEXT NOT NULL,
+        message_id TEXT,
+        size INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_files_message ON files(message_id)",
+    # Backup codes (like Discord): each one can unlock the account once. The
+    # private keys are stored encrypted with a key derived from each code, so a
+    # code restores the account *with* its encrypted history. Only the slot (the
+    # public first part of a code) is stored in plain text.
+    """CREATE TABLE IF NOT EXISTS recovery_codes (
+        user_id TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        kdf_salt TEXT NOT NULL,
+        auth_hash TEXT NOT NULL,
+        enc_private TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        used_at TEXT,
+        PRIMARY KEY (user_id, slot)
+    )""",
+    # Public keys a user had before a reset by e-mail. Messages sent before
+    # `replaced_at` are checked with these keys, so others keep their history.
+    """CREATE TABLE IF NOT EXISTS user_key_history (
+        user_id TEXT NOT NULL,
+        pub_ecdh TEXT NOT NULL,
+        pub_sign TEXT NOT NULL,
+        replaced_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_key_history_user ON user_key_history(user_id)",
+    # Password reset links sent by e-mail. Only a hash of the token is stored.
+    """CREATE TABLE IF NOT EXISTS password_resets (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT
+    )""",
+]
+
+# Indexes on columns that are added by `_migrate_columns`.
+LATE_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages(expires_at) WHERE expires_at IS NOT NULL",
 ]
 
 USER_COLUMNS = {
@@ -116,6 +171,9 @@ USER_COLUMNS = {
     "created_at": "TEXT",
     # Shown instead of the username; does not have to be unique.
     "display_name": "TEXT",
+    # Last authenticated request, for "online" / "last seen".
+    "last_seen": "TEXT",
+    "show_last_seen": "INTEGER NOT NULL DEFAULT 1",
 }
 
 
@@ -136,8 +194,21 @@ EXTRA_COLUMNS = {
     "users": USER_COLUMNS,
     # Remembers a friendship so unblocking restores it.
     "blocks": {"was_friend": "INTEGER NOT NULL DEFAULT 0"},
-    "chat_members": {"delivered_seq": "INTEGER NOT NULL DEFAULT 0"},
-    "messages": {"edited_at": "TEXT"},
+    "chat_members": {
+        "delivered_seq": "INTEGER NOT NULL DEFAULT 0",
+        # Per member: chat pinned to the top / moved to the archive.
+        "pinned": "INTEGER NOT NULL DEFAULT 0",
+        "archived": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "messages": {
+        "edited_at": "TEXT",
+        # Silent messages (e.g. reactions) don't count as unread or as the last message.
+        "silent": "INTEGER NOT NULL DEFAULT 0",
+        # Disappearing messages are deleted by the server after this time.
+        "expires_at": "TEXT",
+    },
+    # Disappearing messages timer of the chat, 0 = off.
+    "chats": {"disappear_seconds": "INTEGER NOT NULL DEFAULT 0"},
 }
 
 
@@ -153,6 +224,8 @@ def init_schema(conn):
     for statement in SCHEMA:
         conn.execute(statement)
     _migrate_columns(conn)
+    for statement in LATE_INDEXES:
+        conn.execute(statement)
     try:
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase ON users(username COLLATE NOCASE)"

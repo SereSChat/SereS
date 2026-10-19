@@ -1,4 +1,5 @@
 import base64
+import datetime
 import functools
 import hashlib
 import hmac
@@ -21,6 +22,7 @@ from flask import g
 from PIL import Image, UnidentifiedImageError
 
 import db
+import mailer
 from legacy_migration import migrate_legacy_files
 
 dotenv.load_dotenv()
@@ -40,6 +42,14 @@ MAX_KDF_ITERATIONS = 5_000_000
 MAX_GROUP_MEMBERS = 50
 MAX_CIPHERTEXT_LEN = 64 * 1024
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
+# Encrypted attachments (images, files, voice messages). AES-GCM adds 16 bytes.
+MAX_FILE_BYTES = 16 * 1024 * 1024 + 1024
+MAX_FILES_PER_MESSAGE = 10
+FILES = os.path.join(DATA_DIR, "files")
+# Allowed timers for disappearing messages (seconds), 0 = off.
+DISAPPEAR_OPTIONS = (0, 3600, 86400, 7 * 86400, 90 * 86400)
+MAX_PINS = 50
+ONLINE_SECONDS = 45
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,20}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -47,7 +57,7 @@ B64_RE = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
 
 app = flask.Flask(__name__, static_folder="../public", static_url_path="/")
 app.config["DEBUG"] = False
-app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_BYTES + 64 * 1024
 ph = PasswordHasher(time_cost=4)
 # Used to keep login timing the same for unknown users.
 DUMMY_HASH = ph.hash(secrets.token_hex(16))
@@ -73,6 +83,7 @@ def close_db(exception):
 
 def init_app():
     os.makedirs(USER_DATA, exist_ok=True)
+    os.makedirs(FILES, exist_ok=True)
     conn = db.connect(DB)
     try:
         db.init_schema(conn)
@@ -178,14 +189,14 @@ def security_headers(response):
     response.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' blob: data:; media-src 'self'; object-src 'self'; "
+        "img-src 'self' blob: data:; media-src 'self' blob:; object-src 'self'; "
         "frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; "
         "frame-ancestors 'self'",
     )
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(self), geolocation=()")
     if flask.request.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
     if flask.request.is_secure:
@@ -251,7 +262,46 @@ def current_user():
             .fetchone()
         )
         g.user = row
+        if row is not None:
+            touch_last_seen(row)
     return g.user
+
+
+def touch_last_seen(user):
+    """Remembers the last activity for "online" / "last seen" (at most every 20 seconds)."""
+    now = db.now_iso()
+    last = user["last_seen"]
+    if last and seconds_between(last, now) < 20:
+        return
+    conn = get_db()
+    conn.execute("UPDATE users SET last_seen = ? WHERE id = ?", (now, user["id"]))
+    conn.commit()
+
+
+def parse_iso(value):
+    return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+
+
+def seconds_between(earlier, later):
+    try:
+        return (parse_iso(later) - parse_iso(earlier)).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def iso_in(seconds):
+    moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def presence(viewer, other):
+    """Online state / last seen, only if both people share it (like WhatsApp)."""
+    if not other or not viewer["show_last_seen"] or not other["show_last_seen"] or not other["last_seen"]:
+        return None
+    return {
+        "online": seconds_between(other["last_seen"], db.now_iso()) < ONLINE_SECONDS,
+        "last_seen": other["last_seen"],
+    }
 
 
 def login_required(view):
@@ -302,6 +352,7 @@ def own_user(row):
         "pub_ecdh": row["pub_ecdh"],
         "pub_sign": row["pub_sign"],
         "enc_private": row["enc_private"],
+        "show_last_seen": bool(row["show_last_seen"]),
     }
 
 
@@ -453,7 +504,12 @@ def login():
             verify_hash(None, auth_hash)
         return error("Login not succesfull")
 
-    user = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    return login_response(user["id"])
+
+
+def login_response(user_id):
+    """Starts a session and returns what the client needs to unlock its keys."""
+    user = get_db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     response = flask.make_response(
         {
             "message": "Login succesfull!",
@@ -538,6 +594,314 @@ def change_password():
     return {"message": "Password changed", "success": True}, 200
 
 
+# --------------------------------------------------------------------------
+# Backup codes
+# --------------------------------------------------------------------------
+
+RECOVERY_CODE_COUNT = 10
+# The public first part of a code, e.g. "K7QF" of "K7QF-2M9X-HP4C-ZT8B".
+SLOT_RE = re.compile(r"^[A-HJ-NP-Z2-9]{4}$")
+
+
+def validate_recovery_codes(data):
+    codes = data.get("codes")
+    if not isinstance(codes, list) or len(codes) != RECOVERY_CODE_COUNT:
+        flask.abort(flask.make_response(error(f"Exactly {RECOVERY_CODE_COUNT} codes are needed")))
+    result = []
+    for code in codes:
+        if not isinstance(code, dict):
+            flask.abort(flask.make_response(error("Invalid code")))
+        slot = code.get("slot")
+        if not isinstance(slot, str) or not SLOT_RE.match(slot):
+            flask.abort(flask.make_response(error("Invalid code slot")))
+        result.append(
+            {
+                "slot": slot,
+                "kdf_salt": b64_field(code, "kdf_salt", 64),
+                "auth_hash": b64_field(code, "auth_hash", 128),
+                "enc_private": str_field(code, "enc_private", 8192),
+            }
+        )
+    if len({c["slot"] for c in result}) != len(result):
+        flask.abort(flask.make_response(error("Code slots must be different")))
+    return result
+
+
+@app.route("/api/recovery/codes")
+@login_required
+def recovery_status():
+    """How many backup codes are left. The codes themselves are never shown again."""
+    row = (
+        get_db()
+        .execute(
+            """SELECT COUNT(*) AS total, SUM(used_at IS NULL) AS unused, MAX(created_at) AS created_at
+               FROM recovery_codes WHERE user_id = ?""",
+            (current_user()["id"],),
+        )
+        .fetchone()
+    )
+    return ok(total=row["total"], unused=row["unused"] or 0, created_at=row["created_at"])
+
+
+@app.route("/api/recovery/codes", methods=["POST"])
+@login_required
+def replace_recovery_codes():
+    """Stores 10 new backup codes (made in the browser); all old codes stop working."""
+    user = current_user()
+    data = json_body()
+    old_hash = b64_field(data, "old_auth_hash", 128)
+    codes = validate_recovery_codes(data)
+    if rate_limited(("recovery-codes", user["id"]), 5, 300):
+        return error("Too many attempts, please wait a few minutes", 429)
+    if not verify_hash(user["passwd"], old_hash):
+        return error("Password is wrong")
+    conn = get_db()
+    now = db.now_iso()
+    with db.write_transaction(conn):
+        conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user["id"],))
+        for code in codes:
+            conn.execute(
+                """INSERT INTO recovery_codes (user_id, slot, kdf_salt, auth_hash, enc_private, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (user["id"], code["slot"], code["kdf_salt"], ph.hash(code["auth_hash"]), code["enc_private"], now),
+            )
+    return ok(total=len(codes), unused=len(codes), created_at=now)
+
+
+def find_recovery_code(data):
+    """The user and unused code addressed by a request (or None, None)."""
+    nameomail = str_field(data, "nameomail", 254).strip()
+    slot = str_field(data, "slot", 8).strip().upper()
+    user = find_user_by_login(nameomail)
+    if user is None or not SLOT_RE.match(slot):
+        return None, None
+    code = (
+        get_db()
+        .execute(
+            "SELECT * FROM recovery_codes WHERE user_id = ? AND slot = ? AND used_at IS NULL",
+            (user["id"], slot),
+        )
+        .fetchone()
+    )
+    return (user, code) if code else (None, None)
+
+
+def recovery_rate_limited(data):
+    account = str(data.get("nameomail", "")).strip().lower()
+    return rate_limited(("recovery-ip", client_ip()), 20, 900) or rate_limited(
+        ("recovery-account", account), 10, 900
+    )
+
+
+@app.route("/api/recovery/prelogin", methods=["POST"])
+def recovery_prelogin():
+    """Salt of a backup code. Unknown accounts/codes get a stable fake salt."""
+    data = json_body()
+    if recovery_rate_limited(data):
+        return error("Too many attempts, please wait a few minutes", 429)
+    _, code = find_recovery_code(data)
+    if code is None:
+        fake = fake_salt("recovery|" + str(data.get("nameomail", "")) + "|" + str(data.get("slot", "")))
+        return ok(kdf_salt=fake)
+    return ok(kdf_salt=code["kdf_salt"])
+
+
+def verified_recovery_code(data):
+    user, code = find_recovery_code(data)
+    auth_hash = b64_field(data, "auth_hash", 128)
+    if code is None:
+        verify_hash(None, auth_hash)
+        return None, None
+    if not verify_hash(code["auth_hash"], auth_hash):
+        return None, None
+    return user, code
+
+
+@app.route("/api/recovery/unlock", methods=["POST"])
+def recovery_unlock():
+    """Checks a backup code and returns the keys encrypted with that code."""
+    data = json_body()
+    if recovery_rate_limited(data):
+        return error("Too many attempts, please wait a few minutes", 429)
+    user, code = verified_recovery_code(data)
+    if code is None:
+        return error("Username or backup code is wrong")
+    return ok(enc_private=code["enc_private"], pub_ecdh=user["pub_ecdh"], pub_sign=user["pub_sign"])
+
+
+@app.route("/api/recovery/reset", methods=["POST"])
+def recovery_reset():
+    """Sets a new password with a backup code. The code can't be used again."""
+    data = json_body()
+    if recovery_rate_limited(data):
+        return error("Too many attempts, please wait a few minutes", 429)
+    user, code = verified_recovery_code(data)
+    if code is None:
+        return error("Username or backup code is wrong")
+    new_hash = b64_field(data, "new_auth_hash", 128)
+    kdf_salt, kdf_iterations = validate_kdf(data)
+    enc_private = str_field(data, "enc_private", 8192)
+    conn = get_db()
+    with db.write_transaction(conn):
+        used = conn.execute(
+            "UPDATE recovery_codes SET used_at = ? WHERE user_id = ? AND slot = ? AND used_at IS NULL",
+            (db.now_iso(), user["id"], code["slot"]),
+        )
+        if used.rowcount == 0:
+            flask.abort(flask.make_response(error("Username or backup code is wrong")))
+        conn.execute(
+            "UPDATE users SET passwd = ?, kdf_salt = ?, kdf_iterations = ?, enc_private = ? WHERE id = ?",
+            (ph.hash(new_hash), kdf_salt, kdf_iterations, enc_private, user["id"]),
+        )
+        # Whoever had the old password is logged out everywhere.
+        conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user["id"],))
+    return login_response(user["id"])
+
+
+# --------------------------------------------------------------------------
+# Password reset by e-mail
+# --------------------------------------------------------------------------
+# Without the password (or a backup code) the old private keys can't be
+# unlocked, so a reset by e-mail creates new keys: the account, friends and
+# chats stay, but the user can't read their old encrypted messages anymore.
+
+RESET_MINUTES = 60
+
+RESET_MAIL = {
+    "en": (
+        "Reset your SereS password",
+        "Hi {name},\n\nsomeone (hopefully you) asked to reset the password of your SereS account.\n"
+        "Open this link within {minutes} minutes to choose a new password:\n\n{link}\n\n"
+        "Important: because your chats are end-to-end encrypted, you won't be able to read your old "
+        "messages after a reset by e-mail. If you still have a backup code, use \"Forgot password?\" "
+        "with the code instead – then you keep everything.\n\n"
+        "If you didn't ask for this, you can ignore this e-mail. Your password stays the same.\n",
+    ),
+    "de": (
+        "SereS-Passwort zurücksetzen",
+        "Hallo {name},\n\njemand (hoffentlich du) möchte das Passwort deines SereS-Kontos zurücksetzen.\n"
+        "Öffne diesen Link innerhalb von {minutes} Minuten, um ein neues Passwort zu wählen:\n\n{link}\n\n"
+        "Wichtig: Da deine Chats Ende-zu-Ende-verschlüsselt sind, kannst du deine alten Nachrichten nach "
+        "einem Zurücksetzen per E-Mail nicht mehr lesen. Wenn du noch einen Backup-Code hast, nutze lieber "
+        "\"Passwort vergessen?\" mit dem Code – dann bleibt alles erhalten.\n\n"
+        "Falls du das nicht warst, ignoriere diese E-Mail einfach. Dein Passwort bleibt unverändert.\n",
+    ),
+    "fr": (
+        "Réinitialiser ton mot de passe SereS",
+        "Bonjour {name},\n\nquelqu'un (toi, espérons-le) a demandé à réinitialiser le mot de passe de ton compte SereS.\n"
+        "Ouvre ce lien dans les {minutes} minutes pour choisir un nouveau mot de passe :\n\n{link}\n\n"
+        "Important : comme tes discussions sont chiffrées de bout en bout, tu ne pourras plus lire tes anciens "
+        "messages après une réinitialisation par e-mail. Si tu as encore un code de secours, utilise plutôt "
+        "« Mot de passe oublié ? » avec le code – tu gardes alors tout.\n\n"
+        "Si ce n'était pas toi, ignore simplement cet e-mail. Ton mot de passe reste inchangé.\n",
+    ),
+}
+
+
+def public_base_url():
+    return (os.getenv("PUBLIC_URL") or flask.request.host_url).rstrip("/")
+
+
+@app.route("/api/password_reset/request", methods=["POST"])
+def request_password_reset():
+    """Sends a reset link. The answer is the same whether the account exists or not."""
+    data = json_body()
+    nameomail = str_field(data, "nameomail", 254).strip()
+    lang = data.get("lang") if data.get("lang") in RESET_MAIL else "en"
+    if not mailer.configured():
+        return error("Password reset by e-mail is not set up on this server", 503)
+    if rate_limited(("reset-ip", client_ip()), 10, 3600) or rate_limited(
+        ("reset-account", nameomail.lower()), 3, 3600
+    ):
+        return error("Too many attempts, please try again later", 429)
+    user = find_user_by_login(nameomail)
+    if user is not None and user["email"] and EMAIL_RE.match(user["email"]):
+        token = secrets.token_urlsafe(32)
+        conn = get_db()
+        # Only the newest link works.
+        conn.execute("DELETE FROM password_resets WHERE user_id = ?", (user["id"],))
+        conn.execute(
+            "INSERT INTO password_resets (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (hash_token(token), user["id"], db.now_iso(), iso_in(RESET_MINUTES * 60)),
+        )
+        conn.commit()
+        subject, body = RESET_MAIL[lang]
+        link = f"{public_base_url()}/login.html?reset={token}"
+        mailer.send_async(
+            user["email"], subject, body.format(name=display_name(user), minutes=RESET_MINUTES, link=link)
+        )
+    return ok(message="If the account exists, an e-mail with a link is on its way.")
+
+
+def reset_user(token):
+    if not isinstance(token, str) or not 20 <= len(token) <= 100:
+        return None
+    return (
+        get_db()
+        .execute(
+            """SELECT u.* FROM password_resets r JOIN users u ON u.id = r.user_id
+               WHERE r.token_hash = ? AND r.used_at IS NULL AND r.expires_at > ?""",
+            (hash_token(token), db.now_iso()),
+        )
+        .fetchone()
+    )
+
+
+@app.route("/api/password_reset/check", methods=["POST"])
+def check_password_reset():
+    if rate_limited(("reset-check", client_ip()), 30, 600):
+        return error("Too many attempts, please try again later", 429)
+    user = reset_user(json_body().get("token"))
+    if user is None:
+        return error("This link is invalid or expired", 404)
+    return ok(username=user["username"], display_name=display_name(user))
+
+
+@app.route("/api/password_reset/confirm", methods=["POST"])
+def confirm_password_reset():
+    """New password and new keys. Old messages stay for the others but are hidden for this user."""
+    data = json_body()
+    if rate_limited(("reset-check", client_ip()), 30, 600):
+        return error("Too many attempts, please try again later", 429)
+    user = reset_user(data.get("token"))
+    if user is None:
+        return error("This link is invalid or expired", 404)
+    auth_hash = b64_field(data, "auth_hash", 128)
+    kdf_salt, kdf_iterations = validate_kdf(data)
+    keys = validate_key_bundle(data)
+    conn = get_db()
+    with db.write_transaction(conn):
+        used = conn.execute(
+            "UPDATE password_resets SET used_at = ? WHERE token_hash = ? AND used_at IS NULL",
+            (db.now_iso(), hash_token(data["token"])),
+        )
+        if used.rowcount == 0:
+            flask.abort(flask.make_response(error("This link is invalid or expired", 404)))
+        if user["pub_ecdh"] and user["pub_sign"]:
+            # Others still verify the old messages with the old keys.
+            conn.execute(
+                "INSERT INTO user_key_history (user_id, pub_ecdh, pub_sign, replaced_at) VALUES (?, ?, ?, ?)",
+                (user["id"], user["pub_ecdh"], user["pub_sign"], db.now_iso()),
+            )
+        conn.execute(
+            """UPDATE users SET passwd = ?, auth_version = 1, kdf_salt = ?, kdf_iterations = ?,
+                      pub_ecdh = ?, pub_sign = ?, enc_private = ? WHERE id = ?""",
+            (ph.hash(auth_hash), kdf_salt, kdf_iterations, keys["pub_ecdh"], keys["pub_sign"],
+             keys["enc_private"], user["id"]),
+        )
+        # Backup codes wrapped the old keys, they are useless now.
+        conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user["id"],))
+        conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user["id"],))
+        for chat in conn.execute("SELECT chat_id FROM chat_members WHERE user_id = ?", (user["id"],)).fetchall():
+            # The old messages can't be decrypted with the new keys: hide them for this user only.
+            conn.execute(
+                "UPDATE chat_members SET cleared_seq = ? WHERE chat_id = ? AND user_id = ?",
+                (max_seq(conn, chat["chat_id"]), chat["chat_id"], user["id"]),
+            )
+            add_system_message(conn, chat["chat_id"], "keys_reset", actor=display_name(user))
+    return login_response(user["id"])
+
+
 @app.route("/api/users/keys")
 @login_required
 def user_keys():
@@ -548,7 +912,31 @@ def user_keys():
     rows = get_db().execute(
         f"SELECT id, username, display_name, pub_ecdh, pub_sign FROM users WHERE id IN ({placeholders})", ids
     )
-    return ok(users=[{**dict(row), "display_name": display_name(row)} for row in rows])
+    history = previous_keys(ids)
+    return ok(
+        users=[
+            {**dict(row), "display_name": display_name(row), "previous_keys": history.get(row["id"], [])}
+            for row in rows
+        ]
+    )
+
+
+def previous_keys(user_ids):
+    """Keys replaced by a reset, oldest first: {user_id: [{pub_ecdh, pub_sign, until}]}."""
+    if not user_ids:
+        return {}
+    placeholders = ",".join("?" * len(user_ids))
+    rows = get_db().execute(
+        f"""SELECT user_id, pub_ecdh, pub_sign, replaced_at FROM user_key_history
+            WHERE user_id IN ({placeholders}) ORDER BY replaced_at""",
+        list(user_ids),
+    )
+    result = {}
+    for row in rows:
+        result.setdefault(row["user_id"], []).append(
+            {"pub_ecdh": row["pub_ecdh"], "pub_sign": row["pub_sign"], "until": row["replaced_at"]}
+        )
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -939,6 +1327,7 @@ def user_profile(username):
         is not None,
         muted=is_muted(me_id, other["id"]),
         request=None if request_row is None else "outgoing" if request_row["from_id"] == me_id else "incoming",
+        presence=presence(current_user(), other) if can_see_user(me_id, other["id"]) and other["id"] != me_id else None,
     )
 
 
@@ -951,7 +1340,8 @@ def membership(chat_id, user_id):
     return (
         get_db()
         .execute(
-            """SELECT c.*, m.role, m.joined_seq, m.cleared_seq, m.last_read_seq, m.hidden
+            """SELECT c.*, m.role, m.joined_seq, m.cleared_seq, m.last_read_seq, m.hidden,
+                      m.pinned, m.archived
                FROM chats c JOIN chat_members m ON m.chat_id = c.id
                WHERE c.id = ? AND m.user_id = ?""",
             (chat_id, user_id),
@@ -969,7 +1359,8 @@ def require_membership(chat_id):
 
 def chat_members(chat_id):
     return get_db().execute(
-        """SELECT u.id, u.username, u.display_name, u.pub_ecdh, u.pub_sign, m.role
+        """SELECT u.id, u.username, u.display_name, u.pub_ecdh, u.pub_sign, m.role,
+                  u.last_seen, u.show_last_seen
            FROM chat_members m JOIN users u ON u.id = m.user_id
            WHERE m.chat_id = ? ORDER BY m.joined_at, u.username COLLATE NOCASE""",
         (chat_id,),
@@ -1001,6 +1392,8 @@ def serialize_message(row):
         "created_at": row["created_at"],
         "edited_at": row["edited_at"],
         "deleted": bool(row["deleted"]),
+        "silent": bool(row["silent"]),
+        "expires_at": row["expires_at"],
     }
 
 
@@ -1029,12 +1422,13 @@ def chat_summary(chat, me_id):
     conn = get_db()
     floor = max(chat["joined_seq"], chat["cleared_seq"])
     last = conn.execute(
-        MESSAGE_SELECT + " WHERE m.chat_id = ? AND m.seq > ? AND m.deleted = 0 ORDER BY m.seq DESC LIMIT 1",
+        MESSAGE_SELECT
+        + " WHERE m.chat_id = ? AND m.seq > ? AND m.deleted = 0 AND m.silent = 0 ORDER BY m.seq DESC LIMIT 1",
         (chat["id"], floor),
     ).fetchone()
     unread = conn.execute(
         """SELECT COUNT(*) AS c FROM messages WHERE chat_id = ? AND seq > ? AND deleted = 0
-           AND kind != 'system' AND (sender_id IS NULL OR sender_id != ?)""",
+           AND silent = 0 AND kind != 'system' AND (sender_id IS NULL OR sender_id != ?)""",
         (chat["id"], max(floor, chat["last_read_seq"]), me_id),
     ).fetchone()["c"]
     members = chat_members(chat["id"])
@@ -1048,6 +1442,9 @@ def chat_summary(chat, me_id):
         "last_message": serialize_message(last) if last else None,
         "unread": unread,
         "last_activity": chat["last_activity"],
+        "pinned": bool(chat["pinned"]),
+        "archived": bool(chat["archived"]),
+        "disappear_seconds": chat["disappear_seconds"],
     }
     if chat["type"] == "dm":
         others = [m for m in members if m["id"] != me_id]
@@ -1057,6 +1454,7 @@ def chat_summary(chat, me_id):
         summary["name"] = display_name(other) if other else summary["other_user"]
         summary["blocked"] = bool(other) and is_blocked_between(me_id, other["id"])
         summary["muted"] = bool(other) and is_muted(me_id, other["id"])
+        summary["presence"] = presence(current_user(), other)
     summary["typing"] = typing_users(chat["id"], me_id)
     return summary
 
@@ -1067,12 +1465,14 @@ def chat_summary(chat, me_id):
 def list_chats():
     me_id = current_user()["id"]
     rows = get_db().execute(
-        """SELECT c.*, m.role, m.joined_seq, m.cleared_seq, m.last_read_seq, m.hidden
+        """SELECT c.*, m.role, m.joined_seq, m.cleared_seq, m.last_read_seq, m.hidden,
+                  m.pinned, m.archived
            FROM chats c JOIN chat_members m ON m.chat_id = c.id
            WHERE m.user_id = ? AND m.hidden = 0 ORDER BY c.last_activity DESC""",
         (me_id,),
     ).fetchall()
     conn = get_db()
+    purge_expired(conn)
     for row in rows:
         advance_receipt(conn, row["id"], me_id, "delivered", max_seq(conn, row["id"]))
     conn.commit()
@@ -1182,8 +1582,22 @@ def chat_details(chat_id):
     chat = require_membership(chat_id)
     me_id = current_user()["id"]
     summary = chat_summary(chat, me_id)
-    summary["members"] = [{**dict(row), "display_name": display_name(row)} for row in chat_members(chat_id)]
+    members = chat_members(chat_id)
+    history = previous_keys([row["id"] for row in members])
+    summary["members"] = [
+        {
+            "id": row["id"],
+            "username": row["username"],
+            "display_name": display_name(row),
+            "pub_ecdh": row["pub_ecdh"],
+            "pub_sign": row["pub_sign"],
+            "previous_keys": history.get(row["id"], []),
+            "role": row["role"],
+        }
+        for row in members
+    ]
     summary["owner_id"] = chat["owner_id"]
+    summary["pins"] = chat_pins(chat)
     return ok(chat=summary)
 
 
@@ -1195,6 +1609,7 @@ def get_chat_messages(chat_id):
     args = flask.request.args
     limit = min(max(args.get("limit", 50, type=int), 1), 200)
     conn = get_db()
+    purge_expired(conn)
     if args.get("since_rev") is not None:
         rows = conn.execute(
             MESSAGE_SELECT + " WHERE m.chat_id = ? AND m.seq > ? AND m.rev > ? ORDER BY m.rev ASC LIMIT ?",
@@ -1268,23 +1683,45 @@ def post_message(chat_id):
     problem = validate_envelope(data.get("payload"), [m["id"] for m in members])
     if problem:
         return error(problem, 409 if "members" in problem else 400)
+    # Silent messages (reactions) don't bump the chat or count as unread.
+    silent = data.get("silent") is True
+    file_ids = data.get("files") or []
+    if (
+        not isinstance(file_ids, list)
+        or len(file_ids) > MAX_FILES_PER_MESSAGE
+        or not all(isinstance(f, str) and len(f) <= 64 for f in file_ids)
+    ):
+        return error("Invalid files")
+    expires_at = iso_in(chat["disappear_seconds"]) if chat["disappear_seconds"] else None
 
     conn = get_db()
     try:
         with db.write_transaction(conn):
+            for file_id in file_ids:
+                attached = conn.execute(
+                    """UPDATE files SET message_id = ? WHERE id = ? AND chat_id = ? AND uploader_id = ?
+                       AND message_id IS NULL""",
+                    (message_id, file_id, chat_id, me_id),
+                )
+                if attached.rowcount == 0:
+                    raise LookupError(file_id)
             rev = db.next_rev(conn)
             cur = conn.execute(
-                "INSERT INTO messages (id, chat_id, sender_id, kind, payload, created_at, rev) VALUES (?, ?, ?, 'e2e', ?, ?, ?)",
-                (message_id, chat_id, me_id, json.dumps(data["payload"]), db.now_iso(), rev),
+                """INSERT INTO messages (id, chat_id, sender_id, kind, payload, created_at, rev, silent, expires_at)
+                   VALUES (?, ?, ?, 'e2e', ?, ?, ?, ?, ?)""",
+                (message_id, chat_id, me_id, json.dumps(data["payload"]), db.now_iso(), rev, int(silent), expires_at),
             )
-            conn.execute("UPDATE chats SET last_activity = ? WHERE id = ?", (db.now_iso(), chat_id))
-            conn.execute("UPDATE chat_members SET hidden = 0 WHERE chat_id = ?", (chat_id,))
+            if not silent:
+                conn.execute("UPDATE chats SET last_activity = ? WHERE id = ?", (db.now_iso(), chat_id))
+                conn.execute("UPDATE chat_members SET hidden = 0 WHERE chat_id = ?", (chat_id,))
             conn.execute(
                 "UPDATE chat_members SET last_read_seq = ?, delivered_seq = ? WHERE chat_id = ? AND user_id = ?",
                 (cur.lastrowid, cur.lastrowid, chat_id, me_id),
             )
     except sqlite3.IntegrityError:
         return error("Duplicate message id", 409)
+    except LookupError:
+        return error("Attachment not found, please upload it again", 400)
     with typing_lock:
         typing_state.pop((chat_id, me_id), None)
     return ok(message="Message sent successfully!", seq=cur.lastrowid, rev=rev)
@@ -1306,6 +1743,8 @@ def delete_message(chat_id, message_id):
             "UPDATE messages SET deleted = 1, payload = NULL, rev = ? WHERE id = ? AND chat_id = ? AND sender_id = ? AND deleted = 0",
             (db.next_rev(conn), message_id, chat_id, current_user()["id"]),
         )
+        if cur.rowcount:
+            forget_message_data(conn, chat_id, [message_id])
     if cur.rowcount == 0:
         return error("Message not found", 404)
     return ok(message="Message deleted")
@@ -1487,6 +1926,10 @@ def leave_chat(conn, chat, user):
     conn.execute("DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user["id"]))
     remaining = chat_members(chat_id)
     if not remaining:
+        for row in conn.execute("SELECT id FROM files WHERE chat_id = ?", (chat_id,)).fetchall():
+            remove_file_blob(row["id"])
+        conn.execute("DELETE FROM files WHERE chat_id = ?", (chat_id,))
+        conn.execute("DELETE FROM pinned_messages WHERE chat_id = ?", (chat_id,))
         conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
         conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
         return
@@ -1549,6 +1992,243 @@ def delete_chat(chat_id):
                 (max_seq(conn, chat_id), chat_id, me["id"]),
             )
     return ok(message="Chat deleted successfully")
+
+
+# --------------------------------------------------------------------------
+# Attachments, pins, chat preferences, disappearing messages, privacy
+# --------------------------------------------------------------------------
+
+
+def file_path(file_id):
+    return os.path.join(FILES, file_id)
+
+
+def remove_file_blob(file_id):
+    try:
+        os.remove(file_path(file_id))
+    except FileNotFoundError:
+        pass
+
+
+def forget_message_data(conn, chat_id, message_ids):
+    """Removes attachments and pins of deleted or expired messages."""
+    for message_id in message_ids:
+        for row in conn.execute("SELECT id FROM files WHERE message_id = ?", (message_id,)).fetchall():
+            remove_file_blob(row["id"])
+        conn.execute("DELETE FROM files WHERE message_id = ?", (message_id,))
+        conn.execute(
+            "DELETE FROM pinned_messages WHERE chat_id = ? AND message_id = ?", (chat_id, message_id)
+        )
+
+
+_last_purge = [0.0]
+
+
+def purge_expired(conn, force=False):
+    """Deletes disappearing messages that expired and uploads nobody sent."""
+    now = time.monotonic()
+    if not force and now - _last_purge[0] < 5:
+        return
+    _last_purge[0] = now
+    stamp = db.now_iso()
+    expired = conn.execute(
+        "SELECT id, chat_id FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ? AND deleted = 0",
+        (stamp,),
+    ).fetchall()
+    stale_uploads = conn.execute(
+        "SELECT id FROM files WHERE message_id IS NULL AND created_at <= ?", (iso_in(-86400),)
+    ).fetchall()
+    if not expired and not stale_uploads:
+        return
+    with db.write_transaction(conn):
+        for row in expired:
+            conn.execute(
+                "UPDATE messages SET deleted = 1, payload = NULL, rev = ? WHERE id = ?",
+                (db.next_rev(conn), row["id"]),
+            )
+            forget_message_data(conn, row["chat_id"], [row["id"]])
+        for row in stale_uploads:
+            remove_file_blob(row["id"])
+            conn.execute("DELETE FROM files WHERE id = ?", (row["id"],))
+
+
+@app.route("/api/chats/<chat_id>/files", methods=["POST"])
+@login_required
+def upload_file(chat_id):
+    """Stores an encrypted attachment. The body is the raw ciphertext."""
+    me_id = current_user()["id"]
+    require_membership(chat_id)
+    if rate_limited(("upload", me_id), 30, 60):
+        return error("You are uploading too fast", 429)
+    conn = get_db()
+    pending = conn.execute(
+        "SELECT COUNT(*) AS c FROM files WHERE uploader_id = ? AND message_id IS NULL", (me_id,)
+    ).fetchone()["c"]
+    if pending >= 30:
+        return error("Too many unsent attachments, please try again later", 429)
+    data = flask.request.get_data(cache=False)
+    if not data:
+        return error("Empty file")
+    if len(data) > MAX_FILE_BYTES:
+        return error("Files can be at most 16 MB", 413)
+    file_id = uuid.uuid4().hex
+    with open(file_path(file_id), "wb") as f:
+        f.write(data)
+    conn.execute(
+        "INSERT INTO files (id, chat_id, uploader_id, message_id, size, created_at) VALUES (?, ?, ?, NULL, ?, ?)",
+        (file_id, chat_id, me_id, len(data), db.now_iso()),
+    )
+    conn.commit()
+    return ok(file_id=file_id)
+
+
+@app.route("/api/chats/<chat_id>/files/<file_id>")
+@login_required
+def download_file(chat_id, file_id):
+    chat = require_membership(chat_id)
+    me_id = current_user()["id"]
+    row = (
+        get_db()
+        .execute(
+            """SELECT f.*, m.seq FROM files f LEFT JOIN messages m ON m.id = f.message_id
+               WHERE f.id = ? AND f.chat_id = ?""",
+            (file_id, chat_id),
+        )
+        .fetchone()
+    )
+    visible = row is not None and (
+        (row["message_id"] is None and row["uploader_id"] == me_id)
+        or (row["seq"] is not None and row["seq"] > max(chat["joined_seq"], chat["cleared_seq"]))
+    )
+    if not visible or not os.path.exists(file_path(file_id)):
+        return error("File not found", 404)
+    response = flask.send_file(file_path(file_id), mimetype="application/octet-stream", max_age=0)
+    # Ciphertext never changes; the browser may keep it, but no shared cache.
+    response.headers["Cache-Control"] = "private, max-age=604800, immutable"
+    return response
+
+
+@app.route("/api/chats/<chat_id>/messages/<message_id>")
+@login_required
+def get_single_message(chat_id, message_id):
+    """One message, e.g. to show a pinned or quoted message that is not loaded yet."""
+    chat = require_membership(chat_id)
+    row = (
+        get_db()
+        .execute(
+            MESSAGE_SELECT + " WHERE m.id = ? AND m.chat_id = ? AND m.seq > ?",
+            (message_id, chat_id, max(chat["joined_seq"], chat["cleared_seq"])),
+        )
+        .fetchone()
+    )
+    if row is None:
+        return error("Message not found", 404)
+    return ok(message=serialize_message(row))
+
+
+def chat_pins(chat):
+    floor = max(chat["joined_seq"], chat["cleared_seq"])
+    rows = get_db().execute(
+        """SELECT p.message_id, p.pinned_at, m.seq, u.username, u.display_name
+           FROM pinned_messages p JOIN messages m ON m.id = p.message_id
+           LEFT JOIN users u ON u.id = p.pinned_by
+           WHERE p.chat_id = ? AND m.deleted = 0 AND m.seq > ? ORDER BY p.pinned_at DESC""",
+        (chat["id"], floor),
+    ).fetchall()
+    return [
+        {
+            "message_id": row["message_id"],
+            "seq": row["seq"],
+            "pinned_at": row["pinned_at"],
+            "pinned_by": display_name(row) if row["username"] else None,
+        }
+        for row in rows
+    ]
+
+
+@app.route("/api/chats/<chat_id>/pins", methods=["POST"])
+@login_required
+def pin_message(chat_id):
+    me = current_user()
+    chat = require_membership(chat_id)
+    data = json_body()
+    message_id = str_field(data, "message_id", 64)
+    pinned = data.get("pinned") is not False
+    conn = get_db()
+    message = conn.execute(
+        "SELECT seq FROM messages WHERE id = ? AND chat_id = ? AND deleted = 0 AND silent = 0 AND kind != 'system' AND seq > ?",
+        (message_id, chat_id, max(chat["joined_seq"], chat["cleared_seq"])),
+    ).fetchone()
+    if message is None:
+        return error("Message not found", 404)
+    with db.write_transaction(conn):
+        if pinned:
+            count = conn.execute(
+                "SELECT COUNT(*) AS c FROM pinned_messages WHERE chat_id = ?", (chat_id,)
+            ).fetchone()["c"]
+            if count >= MAX_PINS:
+                flask.abort(flask.make_response(error(f"At most {MAX_PINS} pinned messages")))
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO pinned_messages (chat_id, message_id, pinned_by, pinned_at) VALUES (?, ?, ?, ?)",
+                (chat_id, message_id, me["id"], db.now_iso()),
+            )
+            if cur.rowcount:
+                add_system_message(conn, chat_id, "pinned", actor=display_name(me))
+        else:
+            conn.execute(
+                "DELETE FROM pinned_messages WHERE chat_id = ? AND message_id = ?", (chat_id, message_id)
+            )
+    return ok(pins=chat_pins(membership(chat_id, me["id"])))
+
+
+@app.route("/api/chats/<chat_id>/prefs", methods=["POST"])
+@login_required
+def chat_prefs(chat_id):
+    """Personal settings of a chat: pinned to the top, archived."""
+    require_membership(chat_id)
+    data = json_body()
+    conn = get_db()
+    for column in ("pinned", "archived"):
+        if column in data:
+            if not isinstance(data[column], bool):
+                return error(f"Invalid '{column}'")
+            conn.execute(
+                f"UPDATE chat_members SET {column} = ? WHERE chat_id = ? AND user_id = ?",
+                (int(data[column]), chat_id, current_user()["id"]),
+            )
+    conn.commit()
+    return ok()
+
+
+@app.route("/api/chats/<chat_id>/disappearing", methods=["POST"])
+@login_required
+def set_disappearing(chat_id):
+    me = current_user()
+    chat = require_membership(chat_id)
+    if chat["type"] == "group" and chat["role"] != "owner":
+        return error("Only the group owner can do that", 403)
+    seconds = json_body().get("seconds")
+    if seconds not in DISAPPEAR_OPTIONS or isinstance(seconds, bool):
+        return error("Invalid timer")
+    if seconds == chat["disappear_seconds"]:
+        return ok(disappear_seconds=seconds)
+    conn = get_db()
+    with db.write_transaction(conn):
+        conn.execute("UPDATE chats SET disappear_seconds = ? WHERE id = ?", (seconds, chat_id))
+        add_system_message(conn, chat_id, "disappearing", actor=display_name(me), seconds=seconds)
+    return ok(disappear_seconds=seconds)
+
+
+@app.route("/api/profile/privacy", methods=["POST"])
+@login_required
+def set_privacy():
+    value = json_body().get("show_last_seen")
+    if not isinstance(value, bool):
+        return error("Invalid 'show_last_seen'")
+    conn = get_db()
+    conn.execute("UPDATE users SET show_last_seen = ? WHERE id = ?", (int(value), current_user()["id"]))
+    conn.commit()
+    return ok(show_last_seen=value)
 
 
 @app.route("/api/remove_chat", methods=["POST"])

@@ -277,8 +277,85 @@ const SeresCrypto = (() => {
         }, messageKey, fromB64(envelope.ct));
         return JSON.parse(decoder.decode(plain));
     }
+    // ----------------------------------------------------------- backup codes
+    // Each code looks like "K7QF-2M9X-HP4C-ZT8B". The first group is a public
+    // "slot" so the server can find the code; all 16 characters (80 bits) go
+    // through the same key derivation as a password. The private keys are
+    // encrypted once per code, so any unused code can unlock the account.
+    const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O, 1/I
+    const RECOVERY_ITERATIONS = 100000;
+    const RECOVERY_CODE_COUNT = 10;
+    function randomCode() {
+        // 256 is a multiple of 32, so taking the byte modulo 32 is unbiased.
+        const chars = Array.from(randomBytes(16), (b) => CODE_ALPHABET[b % 32]).join("");
+        return chars.match(/.{4}/g).join("-");
+    }
+    /** Accepts codes with or without dashes, spaces or lower case. */
+    function normalizeCode(input) {
+        const plain = input.toUpperCase().replace(/[\s-]/g, "");
+        if (plain.length !== 16 || [...plain].some((c) => !CODE_ALPHABET.includes(c)))
+            return null;
+        return { slot: plain.slice(0, 4), code: plain.match(/.{4}/g).join("-") };
+    }
+    /** Derives the server check value and the key-wrapping key of a code. */
+    function deriveCodeKeys(code, saltB64) {
+        return deriveAccountKeys(code, saltB64, RECOVERY_ITERATIONS);
+    }
+    /**
+     * Makes 10 new codes for the private keys in encPrivate (unlocked with wrapKey).
+     * Returns the codes to show once and what the server stores for them.
+     */
+    async function createRecoveryCodes(encPrivate, wrapKey) {
+        const raw = await decryptPrivateKeys(encPrivate, wrapKey);
+        try {
+            const codes = [];
+            const slots = new Set();
+            while (codes.length < RECOVERY_CODE_COUNT) {
+                const code = randomCode();
+                if (slots.has(code.slice(0, 4)))
+                    continue;
+                slots.add(code.slice(0, 4));
+                codes.push(code);
+            }
+            const stored = await Promise.all(codes.map(async (code) => {
+                const salt = newSalt();
+                const keys = await deriveCodeKeys(code, salt);
+                return {
+                    slot: code.slice(0, 4),
+                    kdf_salt: salt,
+                    auth_hash: keys.authHash,
+                    enc_private: await encryptPrivateKeys(raw.ecdh, raw.sign, keys.wrapKey),
+                };
+            }));
+            return { codes, stored };
+        }
+        finally {
+            raw.ecdh.fill(0);
+            raw.sign.fill(0);
+        }
+    }
+    // ------------------------------------------------------------ attachments
+    // Each file gets its own random AES-256-GCM key. The key and IV are put into
+    // the (encrypted and signed) message, the server only stores the ciphertext.
+    const FILE_AAD = encoder.encode("seres-file-v1");
+    async function encryptFile(data) {
+        const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
+        const iv = randomBytes(12);
+        const ct = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: FILE_AAD }, key, data);
+        const raw = await subtle.exportKey("raw", key);
+        return { data: ct, key: toB64(raw), iv: toB64(iv) };
+    }
+    async function decryptFile(data, keyB64, ivB64) {
+        const key = await subtle.importKey("raw", fromB64(keyB64), "AES-GCM", false, ["decrypt"]);
+        return subtle.decrypt({ name: "AES-GCM", iv: fromB64(ivB64), additionalData: FILE_AAD }, key, data);
+    }
     return {
         DEFAULT_ITERATIONS,
+        normalizeCode,
+        deriveCodeKeys,
+        createRecoveryCodes,
+        encryptFile,
+        decryptFile,
         newSalt,
         deriveAccountKeys,
         createKeyBundle,

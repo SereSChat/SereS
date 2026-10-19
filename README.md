@@ -22,6 +22,7 @@ The **SereS Beta** is currently live and directly accessible on our official web
 - **Best of Both Worlds:** Combines the simple direct messaging of WhatsApp with the rich community structure of Discord.
 - **Real-time Engine:** Ultra-fast messaging, rich media sharing, and instant updates.
 - **Dynamic Spaces:** Effortlessly jump between private 1-on-1 chats and group chats.
+- **Rich Messaging:** Replies, emoji reactions, encrypted photos, files and voice messages, Discord-style formatting, @mentions, pinned messages, search and disappearing messages.
 - **End-to-End Encrypted:** Every message is encrypted in your browser. The server only ever sees ciphertext.
 
 ---
@@ -99,10 +100,56 @@ Optional environment variables: `PORT`, `HOST`, `SERES_DEBUG=1` (never in produc
   sender, ciphertext, wrapped keys) is signed with the sender's ECDSA key. The server checks that
   a message is encrypted for exactly the current members, but can neither read nor forge it.
 - **Groups:** new members only receive keys for messages sent after they joined.
+- **Attachments:** every file is encrypted in the browser with its own AES-256-GCM key. The
+  server only stores the ciphertext; the key travels inside the encrypted, signed message.
+  Reactions, replies and forwarded messages are encrypted the same way.
 - **Verification:** each chat shows a 60-digit security code (like WhatsApp/Signal). Compare it
   with your contact; contacts' key fingerprints are pinned on first use and you get a warning
   (and sending is blocked) if the server ever hands out a different key.
 - **Limits:** this is not the Signal protocol – there is no forward secrecy (a stolen password +
   server database exposes old messages), and metadata (who chats with whom, when) is visible to
-  the server. Messages from before v1.1 stay readable and are marked *not encrypted*.
-- Forgetting your password means losing access to your encrypted history – there is no recovery.
+  the server (also that a message is a reaction, which messages are pinned and the
+  disappearing-messages timer). Messages from before v1.1 stay readable and are marked *not encrypted*.
+
+## 🔑 Forgot password: backup codes and e-mail reset
+
+- **Backup codes (keep everything):** after registering – and later in the settings – you get
+  10 codes like `K7QF-2M9X-HP4C-ZT8B`, shown **only once** (download them as `.txt` or copy
+  them). Each code works once. The browser encrypts the private keys separately with a key
+  derived from each code (PBKDF2 + HKDF, 80-bit codes); the server only stores the encrypted
+  keys and an Argon2 hash per code. With a code, "Forgot password?" unlocks the keys in the
+  browser, encrypts them again with the new password and **all chats stay readable**.
+  Generating new codes makes all old ones invalid.
+- **E-mail reset (fallback):** a link valid for 60 minutes. Without the password or a code the
+  old keys can't be unlocked, so new keys are created: friends, groups and chats stay, but the
+  user can't read their **own copy** of old messages anymore (they are hidden for them). The
+  other members keep the full history; the old public keys are kept so they can still verify
+  old messages. Contacts see a "security key changed" warning, like in WhatsApp.
+
+## ✉️ E-mail setup (for password reset links)
+
+SereS sends mails through any SMTP server, configured in `src/backend/.env`:
+
+```bash
+SMTP_HOST=localhost          # unset = e-mail reset disabled
+SMTP_PORT=25                 # 587 for STARTTLS, 465 for SSL
+SMTP_SECURITY=none           # starttls (default), ssl or none
+SMTP_USER=                   # optional
+SMTP_PASSWORD=               # optional
+MAIL_FROM="SereS <no-reply@example.com>"
+PUBLIC_URL=https://chat.example.com   # used for the links in the mails
+# MAIL_DEBUG=1               # development: print mails to the console instead
+```
+
+To run your own send-only mail server on Ubuntu (Postfix + DKIM, no open ports):
+
+```bash
+sudo ./deploy/setup-mailserver.sh --domain example.com \
+     --public-url https://chat.example.com \
+     --seres-env /path/to/SereS/src/backend/.env \
+     --test-to you@example.org
+```
+
+It prints the DNS records (SPF, DKIM, DMARC) and the reverse DNS (PTR) entry you have to set.
+Many hosters block outgoing port 25 until you ask them to unblock it. Instead of your own
+server you can also use any SMTP provider (Mailjet, Brevo, Postmark, your mail host, ...).
