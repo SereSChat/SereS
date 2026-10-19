@@ -3480,3 +3480,51 @@ body.bright-body .jump-bottom {
 .file-card {
   min-width: min(220px, 60vw);
 }
+
+/* Backup codes dialog (shown once) */
+.codes-overlay {
+  z-index: 99999999 !important;
+}
+
+.codes-box {
+  width: 420px;
+}
+
+.codes-warning {
+  color: #f0b232 !important;
+  font-weight: 600;
+}
+
+.codes-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 18px;
+  margin: 0;
+  padding: 12px 12px 12px 34px;
+  border-radius: 8px;
+  background-color: #111b21;
+  color: #e9edef;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 0.95rem;
+  user-select: all;
+}
+
+.codes-status {
+  color: #00a884 !important;
+  min-height: 1em;
+}
+
+.codes-actions {
+  flex-wrap: wrap;
+}
+
+body.bright-body .codes-list {
+  background-color: #f0f2f5;
+  color: #111b21;
+}
+
+@media (max-width: 480px) {
+  .codes-list {
+    grid-template-columns: 1fr;
+  }
+}
