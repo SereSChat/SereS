@@ -374,4 +374,6 @@ window.SeresLang.de = {
   "recover.working": "Code wird geprüft und deine Schlüssel werden neu verschlüsselt…",
   "recover.failed": "Benutzername oder Backup-Code ist falsch, oder der Code wurde schon benutzt.",
   "recover.doneCode": "Dein Passwort wurde mit einem Backup-Code geändert. Dieser Code ist jetzt verbraucht – erstelle in den Einstellungen neue Codes, wenn nur noch wenige übrig sind.",
+
+  "system.keys_reset": "{actor} hat das Passwort per E-Mail zurückgesetzt und neue Sicherheitsschlüssel. Ältere Nachrichten sind auf diesem Konto nicht mehr lesbar.",
 };

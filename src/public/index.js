@@ -282,6 +282,7 @@
             case "left":
             case "renamed":
             case "pinned":
+            case "keys_reset":
                 return t("system." + payload.event, {
                     actor: payload.actor ?? "",
                     target: payload.target ?? "",

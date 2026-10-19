@@ -374,4 +374,6 @@ window.SeresLang.en = {
   "recover.working": "Checking the code and re-encrypting your keys…",
   "recover.failed": "Username or backup code is wrong, or the code was already used.",
   "recover.doneCode": "Your password was changed with a backup code. That code can't be used again – generate new codes in the settings if you are running low.",
+
+  "system.keys_reset": "{actor} reset their password by e-mail and has new security keys. Older messages can't be read on their account anymore.",
 };

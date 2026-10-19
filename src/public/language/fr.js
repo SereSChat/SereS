@@ -374,4 +374,6 @@ window.SeresLang.fr = {
   "recover.working": "Vérification du code et rechiffrement de tes clés…",
   "recover.failed": "Nom d'utilisateur ou code de secours incorrect, ou code déjà utilisé.",
   "recover.doneCode": "Ton mot de passe a été changé avec un code de secours. Ce code est maintenant utilisé – génère de nouveaux codes dans les paramètres s'il t'en reste peu.",
+
+  "system.keys_reset": "{actor} a réinitialisé son mot de passe par e-mail et a de nouvelles clés de sécurité. Les anciens messages ne sont plus lisibles sur son compte.",
 };
