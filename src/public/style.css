@@ -3591,3 +3591,20 @@ body.bright-body .codes-list {
   border-color: #e1e9eb !important;
   color: #111b21 !important;
 }
+
+.codes-box {
+  width: 480px;
+  max-width: 94vw;
+}
+
+.codes-list li {
+  white-space: nowrap;
+}
+
+.modal-box p.codes-warning {
+  color: #f0b232 !important;
+}
+
+.modal-box p.codes-status {
+  color: #00a884 !important;
+}
