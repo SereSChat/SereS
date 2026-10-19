@@ -503,7 +503,12 @@ def login():
             verify_hash(None, auth_hash)
         return error("Login not succesfull")
 
-    user = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    return login_response(user["id"])
+
+
+def login_response(user_id):
+    """Starts a session and returns what the client needs to unlock its keys."""
+    user = get_db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     response = flask.make_response(
         {
             "message": "Login succesfull!",
