@@ -43,6 +43,7 @@
       <div class="login-f modal-hidden" id="recover-panel">
         <div class="recover-tabs" id="recover-tabs">
           <button type="button" class="recover-tab active" data-tab="code" data-i18n="recover.tabCode">With backup code</button>
+          <button type="button" class="recover-tab" data-tab="mail" data-i18n="recover.tabMail">By e-mail</button>
         </div>
         <div class="recover-pane" data-pane="code">
           <p class="recover-hint" data-i18n="recover.codeHint">Use one of your backup codes. You keep all your encrypted chats.</p>
@@ -54,8 +55,28 @@
           </div>
           <button type="button" class="action-button" id="recover-submit" data-i18n="recover.submit">Set new password</button>
         </div>
+        <div class="recover-pane modal-hidden" data-pane="mail">
+          <p class="recover-hint warn" data-i18n="recover.mailHint">We send you a link. Because your chats are end-to-end encrypted, you will lose access to your old messages. Use a backup code if you have one.</p>
+          <div class="input">
+            <input type="text" id="reset-mail-name" placeholder="Username or Email" data-i18n-placeholder="login.usernameOrEmail" autocomplete="username" />
+          </div>
+          <button type="button" class="action-button" id="reset-mail-submit" data-i18n="recover.mailSubmit">Send reset link</button>
+        </div>
         <p class="login-warning" id="recover-warning" role="status"></p>
         <a href="#" class="forgot-link" id="recover-back" data-i18n="recover.back">← Back to login</a>
+      </div>
+
+      <!-- Opened the link from the reset e-mail -->
+      <div class="login-f modal-hidden" id="reset-panel">
+        <p class="recover-hint" id="reset-account"></p>
+        <p class="recover-hint warn" data-i18n="reset.warning">After this reset you can't read your old encrypted messages anymore. Your friends and chats stay.</p>
+        <div class="input">
+          <input type="password" id="reset-new" placeholder="New password (minimum 8 characters)" data-i18n-placeholder="login.passwordNew" autocomplete="new-password" />
+          <input type="password" id="reset-new2" placeholder="Repeat new password" data-i18n-placeholder="recover.repeat" autocomplete="new-password" />
+        </div>
+        <button type="button" class="action-button" id="reset-submit" data-i18n="recover.submit">Set new password</button>
+        <p class="login-warning" id="reset-warning" role="status"></p>
+        <a href="login.html" class="forgot-link" data-i18n="recover.back">← Back to login</a>
       </div>
     </div>
 

@@ -138,13 +138,106 @@
     function showPanel(panel) {
         el("login-panel").classList.toggle("modal-hidden", panel !== "login");
         el("recover-panel").classList.toggle("modal-hidden", panel !== "recover");
-        el("landr").textContent = t(panel === "recover" ? "recover.title" : mode === "register" ? "login.registerTitle" : "login.title");
+        el("reset-panel").classList.toggle("modal-hidden", panel !== "reset");
+        el("landr").textContent = t(panel !== "login" ? "recover.title" : mode === "register" ? "login.registerTitle" : "login.title");
         el("recover-warning").textContent = "";
         if (panel === "recover") {
             const typed = el("email").value.trim();
             if (typed)
                 el("recover-name").value = typed;
             el(typed ? "recover-code" : "recover-name").focus();
+        }
+    }
+    /** Asks the server to e-mail a reset link. */
+    async function requestResetMail() {
+        if (busy)
+            return;
+        const warning = el("recover-warning");
+        const nameomail = el("reset-mail-name").value.trim();
+        if (!nameomail) {
+            warning.textContent = t("login.missingFields");
+            return;
+        }
+        busy = true;
+        el("reset-mail-submit").disabled = true;
+        try {
+            const res = await postJson("/api/password_reset/request", { nameomail, lang: SeresI18n.getLanguage() });
+            warning.textContent = res.ok
+                ? t("recover.mailSent")
+                : res.status === 503
+                    ? t("recover.mailDisabled")
+                    : res.data.message || t("common.requestFailed");
+        }
+        catch {
+            warning.textContent = t("common.unreachable");
+        }
+        finally {
+            busy = false;
+            el("reset-mail-submit").disabled = false;
+        }
+    }
+    /** The page was opened from the reset e-mail (?reset=TOKEN). */
+    async function openResetLink(token) {
+        showPanel("reset");
+        const res = await postJson("/api/password_reset/check", { token }).catch(() => null);
+        if (!res || !res.ok) {
+            el("reset-warning").textContent = t("reset.invalid");
+            el("reset-submit").disabled = true;
+            return;
+        }
+        el("reset-account").textContent = t("reset.account", { name: res.data.display_name, username: res.data.username });
+        el("reset-new").focus();
+    }
+    /** New password and brand-new keys; the old ones can't be recovered without the password. */
+    async function confirmReset(token) {
+        if (busy)
+            return;
+        const warning = el("reset-warning");
+        const password = el("reset-new").value;
+        if (password.length < 8) {
+            warning.textContent = t("login.passwordTooShort");
+            return;
+        }
+        if (password !== el("reset-new2").value) {
+            warning.textContent = t("recover.mismatch");
+            return;
+        }
+        if (!window.confirm(t("reset.confirm")))
+            return;
+        busy = true;
+        el("reset-submit").disabled = true;
+        warning.textContent = t("login.creating");
+        try {
+            const salt = SeresCrypto.newSalt();
+            const iterations = SeresCrypto.DEFAULT_ITERATIONS;
+            const { authHash, wrapKey } = await SeresCrypto.deriveAccountKeys(password, salt, iterations);
+            const keys = await SeresCrypto.createKeyBundle(wrapKey);
+            const res = await postJson("/api/password_reset/confirm", {
+                token,
+                auth_hash: authHash,
+                kdf_salt: salt,
+                kdf_iterations: iterations,
+                keys,
+            });
+            if (!res.ok)
+                throw new Error(res.status === 404 ? t("reset.invalid") : res.data.message || t("common.requestFailed"));
+            const user = res.data.user;
+            // The old backup codes belonged to the old keys: hand out new ones right away.
+            try {
+                const created = await SeresCrypto.createRecoveryCodes(user.enc_private, wrapKey);
+                const saved = await postJson("/api/recovery/codes", { old_auth_hash: authHash, codes: created.stored });
+                if (saved.ok)
+                    await new Promise((resolve) => SeresCodes.show(created.codes, user.username, resolve));
+            }
+            catch {
+                /* codes can still be created later in the settings */
+            }
+            await finishLogin(user, wrapKey, { recovered: "mail" });
+        }
+        catch (error) {
+            warning.textContent = error instanceof Error ? error.message : t("common.unreachable");
+            busy = false;
+            el("reset-submit").disabled = false;
         }
     }
     function selectRecoverTab(tab) {
@@ -300,6 +393,7 @@
             tab.addEventListener("click", () => selectRecoverTab(tab.dataset.tab));
         });
         el("recover-submit").addEventListener("click", recoverWithCode);
+        el("reset-mail-submit").addEventListener("click", requestResetMail);
         el("recover-new2").addEventListener("keydown", (event) => {
             if (event.key === "Enter")
                 recoverWithCode();
@@ -314,6 +408,13 @@
         });
         const params = new URLSearchParams(window.location.search);
         const reason = params.get("reason");
+        const resetToken = params.get("reset");
+        if (resetToken) {
+            // Keep the token out of the address bar (and browser history) from now on.
+            window.history.replaceState({}, document.title, window.location.pathname);
+            el("reset-submit").addEventListener("click", () => confirmReset(resetToken));
+            openResetLink(resetToken);
+        }
         if (params.get("invite"))
             setWarning(t("invite.loginHint"));
         if (reason === "keys") {
