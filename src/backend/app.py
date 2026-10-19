@@ -593,6 +593,170 @@ def change_password():
     return {"message": "Password changed", "success": True}, 200
 
 
+# --------------------------------------------------------------------------
+# Backup codes
+# --------------------------------------------------------------------------
+
+RECOVERY_CODE_COUNT = 10
+# The public first part of a code, e.g. "K7QF" of "K7QF-2M9X-HP4C-ZT8B".
+SLOT_RE = re.compile(r"^[A-HJ-NP-Z2-9]{4}$")
+
+
+def validate_recovery_codes(data):
+    codes = data.get("codes")
+    if not isinstance(codes, list) or len(codes) != RECOVERY_CODE_COUNT:
+        flask.abort(flask.make_response(error(f"Exactly {RECOVERY_CODE_COUNT} codes are needed")))
+    result = []
+    for code in codes:
+        if not isinstance(code, dict):
+            flask.abort(flask.make_response(error("Invalid code")))
+        slot = code.get("slot")
+        if not isinstance(slot, str) or not SLOT_RE.match(slot):
+            flask.abort(flask.make_response(error("Invalid code slot")))
+        result.append(
+            {
+                "slot": slot,
+                "kdf_salt": b64_field(code, "kdf_salt", 64),
+                "auth_hash": b64_field(code, "auth_hash", 128),
+                "enc_private": str_field(code, "enc_private", 8192),
+            }
+        )
+    if len({c["slot"] for c in result}) != len(result):
+        flask.abort(flask.make_response(error("Code slots must be different")))
+    return result
+
+
+@app.route("/api/recovery/codes")
+@login_required
+def recovery_status():
+    """How many backup codes are left. The codes themselves are never shown again."""
+    row = (
+        get_db()
+        .execute(
+            """SELECT COUNT(*) AS total, SUM(used_at IS NULL) AS unused, MAX(created_at) AS created_at
+               FROM recovery_codes WHERE user_id = ?""",
+            (current_user()["id"],),
+        )
+        .fetchone()
+    )
+    return ok(total=row["total"], unused=row["unused"] or 0, created_at=row["created_at"])
+
+
+@app.route("/api/recovery/codes", methods=["POST"])
+@login_required
+def replace_recovery_codes():
+    """Stores 10 new backup codes (made in the browser); all old codes stop working."""
+    user = current_user()
+    data = json_body()
+    old_hash = b64_field(data, "old_auth_hash", 128)
+    codes = validate_recovery_codes(data)
+    if rate_limited(("recovery-codes", user["id"]), 5, 300):
+        return error("Too many attempts, please wait a few minutes", 429)
+    if not verify_hash(user["passwd"], old_hash):
+        return error("Password is wrong")
+    conn = get_db()
+    now = db.now_iso()
+    with db.write_transaction(conn):
+        conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user["id"],))
+        for code in codes:
+            conn.execute(
+                """INSERT INTO recovery_codes (user_id, slot, kdf_salt, auth_hash, enc_private, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (user["id"], code["slot"], code["kdf_salt"], ph.hash(code["auth_hash"]), code["enc_private"], now),
+            )
+    return ok(total=len(codes), unused=len(codes), created_at=now)
+
+
+def find_recovery_code(data):
+    """The user and unused code addressed by a request (or None, None)."""
+    nameomail = str_field(data, "nameomail", 254).strip()
+    slot = str_field(data, "slot", 8).strip().upper()
+    user = find_user_by_login(nameomail)
+    if user is None or not SLOT_RE.match(slot):
+        return None, None
+    code = (
+        get_db()
+        .execute(
+            "SELECT * FROM recovery_codes WHERE user_id = ? AND slot = ? AND used_at IS NULL",
+            (user["id"], slot),
+        )
+        .fetchone()
+    )
+    return (user, code) if code else (None, None)
+
+
+def recovery_rate_limited(data):
+    account = str(data.get("nameomail", "")).strip().lower()
+    return rate_limited(("recovery-ip", client_ip()), 20, 900) or rate_limited(
+        ("recovery-account", account), 10, 900
+    )
+
+
+@app.route("/api/recovery/prelogin", methods=["POST"])
+def recovery_prelogin():
+    """Salt of a backup code. Unknown accounts/codes get a stable fake salt."""
+    data = json_body()
+    if recovery_rate_limited(data):
+        return error("Too many attempts, please wait a few minutes", 429)
+    _, code = find_recovery_code(data)
+    if code is None:
+        fake = fake_salt("recovery|" + str(data.get("nameomail", "")) + "|" + str(data.get("slot", "")))
+        return ok(kdf_salt=fake)
+    return ok(kdf_salt=code["kdf_salt"])
+
+
+def verified_recovery_code(data):
+    user, code = find_recovery_code(data)
+    auth_hash = b64_field(data, "auth_hash", 128)
+    if code is None:
+        verify_hash(None, auth_hash)
+        return None, None
+    if not verify_hash(code["auth_hash"], auth_hash):
+        return None, None
+    return user, code
+
+
+@app.route("/api/recovery/unlock", methods=["POST"])
+def recovery_unlock():
+    """Checks a backup code and returns the keys encrypted with that code."""
+    data = json_body()
+    if recovery_rate_limited(data):
+        return error("Too many attempts, please wait a few minutes", 429)
+    user, code = verified_recovery_code(data)
+    if code is None:
+        return error("Username or backup code is wrong")
+    return ok(enc_private=code["enc_private"], pub_ecdh=user["pub_ecdh"], pub_sign=user["pub_sign"])
+
+
+@app.route("/api/recovery/reset", methods=["POST"])
+def recovery_reset():
+    """Sets a new password with a backup code. The code can't be used again."""
+    data = json_body()
+    if recovery_rate_limited(data):
+        return error("Too many attempts, please wait a few minutes", 429)
+    user, code = verified_recovery_code(data)
+    if code is None:
+        return error("Username or backup code is wrong")
+    new_hash = b64_field(data, "new_auth_hash", 128)
+    kdf_salt, kdf_iterations = validate_kdf(data)
+    enc_private = str_field(data, "enc_private", 8192)
+    conn = get_db()
+    with db.write_transaction(conn):
+        used = conn.execute(
+            "UPDATE recovery_codes SET used_at = ? WHERE user_id = ? AND slot = ? AND used_at IS NULL",
+            (db.now_iso(), user["id"], code["slot"]),
+        )
+        if used.rowcount == 0:
+            flask.abort(flask.make_response(error("Username or backup code is wrong")))
+        conn.execute(
+            "UPDATE users SET passwd = ?, kdf_salt = ?, kdf_iterations = ?, enc_private = ? WHERE id = ?",
+            (ph.hash(new_hash), kdf_salt, kdf_iterations, enc_private, user["id"]),
+        )
+        # Whoever had the old password is logged out everywhere.
+        conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user["id"],))
+    return login_response(user["id"])
+
+
 @app.route("/api/users/keys")
 @login_required
 def user_keys():
