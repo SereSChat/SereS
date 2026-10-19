@@ -126,6 +126,22 @@ Optional environment variables: `PORT`, `HOST`, `SERES_DEBUG=1` (never in produc
   other members keep the full history; the old public keys are kept so they can still verify
   old messages. Contacts see a "security key changed" warning, like in WhatsApp.
 
+## 🛡️ Two-factor authentication (optional)
+
+In the settings everyone can turn on a second factor for the login:
+
+- **Passkeys** (WebAuthn): a phone, a security key, Windows Hello, Touch ID … On a computer the
+  browser offers "use a phone or tablet" and shows a QR code, so the phone works as passkey.
+- **Authenticator apps** (TOTP, 6-digit codes): Google/Microsoft Authenticator, Aegis, 1Password …
+- **Backup codes** also work as second factor if the device is lost.
+
+With 2FA on, the server only starts a session – and only hands out the encrypted keys – after
+the second factor. Adding or removing a factor needs the current password. The e-mail reset is
+not possible while 2FA is on (the mailbox alone must not be enough); use a backup code instead.
+
+Passkeys need HTTPS (or `localhost`) and are bound to the domain. Set `PUBLIC_URL` (or
+`WEBAUTHN_RP_ID`) in `.env` when SereS runs behind a reverse proxy.
+
 ## ✉️ E-mail setup (for password reset links)
 
 SereS sends mails through any SMTP server, configured in `src/backend/.env`:
