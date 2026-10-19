@@ -1222,7 +1222,18 @@ def check_password_reset():
     user = reset_user(json_body().get("token"))
     if user is None:
         return error("This link is invalid or expired", 404)
+    if twofa_methods(user):
+        return two_factor_blocks_reset()
     return ok(username=user["username"], display_name=display_name(user))
+
+
+def two_factor_blocks_reset():
+    # Otherwise access to the mailbox alone would be enough to take over the account.
+    return {
+        "message": "Two-factor authentication is on: please use a backup code to reset your password",
+        "success": False,
+        "two_factor": True,
+    }, 403
 
 
 @app.route("/api/password_reset/confirm", methods=["POST"])
@@ -1234,6 +1245,8 @@ def confirm_password_reset():
     user = reset_user(data.get("token"))
     if user is None:
         return error("This link is invalid or expired", 404)
+    if twofa_methods(user):
+        return two_factor_blocks_reset()
     auth_hash = b64_field(data, "auth_hash", 128)
     kdf_salt, kdf_iterations = validate_kdf(data)
     keys = validate_key_bundle(data)
