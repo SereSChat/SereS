@@ -84,6 +84,12 @@ def test_reset_flow(make_client, mails):
     assert erin_msgs[0]["payload"]["event"] == "keys_reset"
     frank_msgs = frank.get(f"/api/chats/{chat_id}/messages").json["messages"]
     assert [m["kind"] for m in frank_msgs] == ["e2e", "system"]
+    # Frank still gets Erin's old keys to verify her old messages.
+    erin_member = [m for m in frank.get(f"/api/chats/{chat_id}").json["chat"]["members"] if m["username"] == "erin"][0]
+    assert erin_member["pub_ecdh"] == new_keys["pub_ecdh"]
+    assert len(erin_member["previous_keys"]) == 1 and erin_member["previous_keys"][0]["until"]
+    looked_up = frank.get(f"/api/users/keys?ids={erin_member['id']}").json["users"][0]
+    assert looked_up["previous_keys"] == erin_member["previous_keys"]
     # The link works only once.
     again = make_client().post(
         "/api/password_reset/confirm",

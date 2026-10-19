@@ -877,6 +877,12 @@ def confirm_password_reset():
         )
         if used.rowcount == 0:
             flask.abort(flask.make_response(error("This link is invalid or expired", 404)))
+        if user["pub_ecdh"] and user["pub_sign"]:
+            # Others still verify the old messages with the old keys.
+            conn.execute(
+                "INSERT INTO user_key_history (user_id, pub_ecdh, pub_sign, replaced_at) VALUES (?, ?, ?, ?)",
+                (user["id"], user["pub_ecdh"], user["pub_sign"], db.now_iso()),
+            )
         conn.execute(
             """UPDATE users SET passwd = ?, auth_version = 1, kdf_salt = ?, kdf_iterations = ?,
                       pub_ecdh = ?, pub_sign = ?, enc_private = ? WHERE id = ?""",
@@ -906,7 +912,31 @@ def user_keys():
     rows = get_db().execute(
         f"SELECT id, username, display_name, pub_ecdh, pub_sign FROM users WHERE id IN ({placeholders})", ids
     )
-    return ok(users=[{**dict(row), "display_name": display_name(row)} for row in rows])
+    history = previous_keys(ids)
+    return ok(
+        users=[
+            {**dict(row), "display_name": display_name(row), "previous_keys": history.get(row["id"], [])}
+            for row in rows
+        ]
+    )
+
+
+def previous_keys(user_ids):
+    """Keys replaced by a reset, oldest first: {user_id: [{pub_ecdh, pub_sign, until}]}."""
+    if not user_ids:
+        return {}
+    placeholders = ",".join("?" * len(user_ids))
+    rows = get_db().execute(
+        f"""SELECT user_id, pub_ecdh, pub_sign, replaced_at FROM user_key_history
+            WHERE user_id IN ({placeholders}) ORDER BY replaced_at""",
+        list(user_ids),
+    )
+    result = {}
+    for row in rows:
+        result.setdefault(row["user_id"], []).append(
+            {"pub_ecdh": row["pub_ecdh"], "pub_sign": row["pub_sign"], "until": row["replaced_at"]}
+        )
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -1552,6 +1582,8 @@ def chat_details(chat_id):
     chat = require_membership(chat_id)
     me_id = current_user()["id"]
     summary = chat_summary(chat, me_id)
+    members = chat_members(chat_id)
+    history = previous_keys([row["id"] for row in members])
     summary["members"] = [
         {
             "id": row["id"],
@@ -1559,9 +1591,10 @@ def chat_details(chat_id):
             "display_name": display_name(row),
             "pub_ecdh": row["pub_ecdh"],
             "pub_sign": row["pub_sign"],
+            "previous_keys": history.get(row["id"], []),
             "role": row["role"],
         }
-        for row in chat_members(chat_id)
+        for row in members
     ]
     summary["owner_id"] = chat["owner_id"]
     summary["pins"] = chat_pins(chat)
