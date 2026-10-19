@@ -16,6 +16,8 @@ import uuid
 
 import dotenv
 import flask
+import webauthn
+import webauthn.helpers
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from flask import g
@@ -845,6 +847,158 @@ def totp_disable():
     )
     conn.commit()
     return ok(message="Authenticator app removed")
+
+
+# Passkeys (WebAuthn). The phone, a security key, Windows Hello or Touch ID
+# signs a random challenge; the browser offers "use a phone" via QR code.
+
+
+def webauthn_rp_id():
+    """The domain passkeys are bound to (without port)."""
+    configured = os.getenv("WEBAUTHN_RP_ID")
+    if configured:
+        return configured
+    if os.getenv("PUBLIC_URL"):
+        return urllib.parse.urlsplit(os.getenv("PUBLIC_URL")).hostname
+    return flask.request.host.split(":")[0]
+
+
+def webauthn_origins():
+    origins = set()
+    if os.getenv("PUBLIC_URL"):
+        parts = urllib.parse.urlsplit(os.getenv("PUBLIC_URL"))
+        origins.add(f"{parts.scheme}://{parts.netloc}")
+    for host in (flask.request.host, flask.request.headers.get("X-Forwarded-Host")):
+        if host:
+            origins.update({f"https://{host}", f"http://{host}"})
+    return sorted(origins)
+
+
+def new_challenge(conn, user_id, purpose, minutes=TWOFA_LOGIN_MINUTES, challenge=None):
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        "INSERT INTO twofa_challenges (token_hash, user_id, purpose, challenge, expires_at) VALUES (?, ?, ?, ?, ?)",
+        (hash_token(token), user_id, purpose, challenge, iso_in(minutes * 60)),
+    )
+    # Old, expired challenges are not needed anymore.
+    conn.execute("DELETE FROM twofa_challenges WHERE expires_at < ?", (db.now_iso(),))
+    return token
+
+
+def find_challenge(token, purpose):
+    if not isinstance(token, str) or len(token) > 100:
+        return None
+    return (
+        get_db()
+        .execute(
+            "SELECT * FROM twofa_challenges WHERE token_hash = ? AND purpose = ? AND expires_at > ?",
+            (hash_token(token), purpose, db.now_iso()),
+        )
+        .fetchone()
+    )
+
+
+def credential_descriptors(user_id):
+    from webauthn.helpers.structs import AuthenticatorTransport, PublicKeyCredentialDescriptor
+
+    descriptors = []
+    for row in passkey_rows(user_id):
+        transports = []
+        for name in json.loads(row["transports"] or "[]"):
+            try:
+                transports.append(AuthenticatorTransport(name))
+            except ValueError:
+                pass
+        descriptors.append(
+            PublicKeyCredentialDescriptor(id=webauthn.base64url_to_bytes(row["id"]), transports=transports or None)
+        )
+    return descriptors
+
+
+@app.route("/api/2fa/passkeys/options", methods=["POST"])
+@login_required
+def passkey_register_options():
+    from webauthn.helpers.structs import (
+        AuthenticatorSelectionCriteria,
+        ResidentKeyRequirement,
+        UserVerificationRequirement,
+    )
+
+    user = require_password(json_body())
+    if len(passkey_rows(user["id"])) >= 10:
+        return error("You can add at most 10 passkeys")
+    options = webauthn.generate_registration_options(
+        rp_id=webauthn_rp_id(),
+        rp_name="SereS",
+        user_id=user["id"].encode(),
+        user_name=user["username"],
+        user_display_name=display_name(user),
+        exclude_credentials=credential_descriptors(user["id"]),
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.PREFERRED,
+            user_verification=UserVerificationRequirement.PREFERRED,
+        ),
+    )
+    conn = get_db()
+    token = new_challenge(conn, user["id"], "register", challenge=webauthn.helpers.bytes_to_base64url(options.challenge))
+    conn.commit()
+    return ok(token=token, options=json.loads(webauthn.options_to_json(options)))
+
+
+@app.route("/api/2fa/passkeys/register", methods=["POST"])
+@login_required
+def passkey_register():
+    user = current_user()
+    data = json_body()
+    pending = find_challenge(data.get("token"), "register")
+    if pending is None or pending["user_id"] != user["id"]:
+        return error("The request expired, please try again")
+    name = " ".join(str(data.get("name") or "").split())[:40] or "Passkey"
+    try:
+        verified = webauthn.verify_registration_response(
+            credential=data.get("credential"),
+            expected_challenge=webauthn.base64url_to_bytes(pending["challenge"]),
+            expected_rp_id=webauthn_rp_id(),
+            expected_origin=webauthn_origins(),
+        )
+    except Exception as e:  # invalid or tampered response
+        print("passkey registration failed:", e)
+        return error("The passkey could not be verified")
+    credential_id = webauthn.helpers.bytes_to_base64url(verified.credential_id)
+    transports = (data.get("credential") or {}).get("response", {}).get("transports") or []
+    conn = get_db()
+    conn.execute("DELETE FROM twofa_challenges WHERE token_hash = ?", (pending["token_hash"],))
+    try:
+        conn.execute(
+            """INSERT INTO passkeys (id, user_id, public_key, sign_count, transports, name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                credential_id,
+                user["id"],
+                webauthn.helpers.bytes_to_base64url(verified.credential_public_key),
+                verified.sign_count,
+                json.dumps([t for t in transports if isinstance(t, str)][:8]),
+                name,
+                db.now_iso(),
+            ),
+        )
+    except sqlite3.IntegrityError:
+        return error("This passkey is already registered")
+    conn.commit()
+    return ok(message="Passkey added")
+
+
+@app.route("/api/2fa/passkeys/delete", methods=["POST"])
+@login_required
+def passkey_delete():
+    data = json_body()
+    user = require_password(data)
+    conn = get_db()
+    cur = conn.execute("DELETE FROM passkeys WHERE id = ? AND user_id = ?", (str(data.get("id")), user["id"]))
+    conn.commit()
+    if cur.rowcount == 0:
+        return error("Passkey not found", 404)
+    return ok(message="Passkey removed")
 
 
 # --------------------------------------------------------------------------
