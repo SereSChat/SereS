@@ -376,4 +376,14 @@ window.SeresLang.de = {
   "recover.doneCode": "Dein Passwort wurde mit einem Backup-Code geändert. Dieser Code ist jetzt verbraucht – erstelle in den Einstellungen neue Codes, wenn nur noch wenige übrig sind.",
 
   "system.keys_reset": "{actor} hat das Passwort per E-Mail zurückgesetzt und neue Sicherheitsschlüssel. Ältere Nachrichten sind auf diesem Konto nicht mehr lesbar.",
+
+  "recover.tabMail": "Per E-Mail",
+  "recover.mailHint": "Wir schicken dir einen Link. Da deine Chats Ende-zu-Ende-verschlüsselt sind, verlierst du den Zugriff auf deine alten Nachrichten (deine Freunde behalten sie). Nutze lieber einen Backup-Code, falls du einen hast.",
+  "recover.mailSubmit": "Link zum Zurücksetzen senden",
+  "recover.mailSent": "Falls das Konto existiert, haben wir eine E-Mail mit einem Link geschickt. Er ist 60 Minuten gültig – schau auch im Spam-Ordner nach.",
+  "recover.mailDisabled": "Zurücksetzen per E-Mail ist auf diesem Server nicht eingerichtet. Bitte nutze einen Backup-Code.",
+  "reset.account": "Neues Passwort für {name} (@{username})",
+  "reset.warning": "Nach dem Zurücksetzen kannst du deine alten verschlüsselten Nachrichten nicht mehr lesen. Freunde, Gruppen und Chats bleiben, und du bekommst neue Backup-Codes.",
+  "reset.invalid": "Dieser Link ist ungültig oder abgelaufen. Fordere einen neuen an.",
+  "reset.confirm": "Passwort zurücksetzen? Deine alten verschlüsselten Nachrichten sind danach auf deinem Konto nicht mehr lesbar.",
 };

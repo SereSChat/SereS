@@ -376,4 +376,14 @@ window.SeresLang.en = {
   "recover.doneCode": "Your password was changed with a backup code. That code can't be used again – generate new codes in the settings if you are running low.",
 
   "system.keys_reset": "{actor} reset their password by e-mail and has new security keys. Older messages can't be read on their account anymore.",
+
+  "recover.tabMail": "By e-mail",
+  "recover.mailHint": "We send you a link. Because your chats are end-to-end encrypted, you will lose access to your old messages (your friends keep them). Use a backup code instead if you have one.",
+  "recover.mailSubmit": "Send reset link",
+  "recover.mailSent": "If the account exists, we sent an e-mail with a link. It is valid for 60 minutes – check your spam folder too.",
+  "recover.mailDisabled": "Resetting by e-mail is not set up on this server. Please use a backup code.",
+  "reset.account": "New password for {name} (@{username})",
+  "reset.warning": "After this reset you can't read your old encrypted messages anymore. Your friends, groups and chats stay, and you get new backup codes.",
+  "reset.invalid": "This link is invalid or expired. Request a new one.",
+  "reset.confirm": "Reset the password? Your old encrypted messages can't be read on your account afterwards.",
 };

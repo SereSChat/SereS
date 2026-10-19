@@ -376,4 +376,14 @@ window.SeresLang.fr = {
   "recover.doneCode": "Ton mot de passe a été changé avec un code de secours. Ce code est maintenant utilisé – génère de nouveaux codes dans les paramètres s'il t'en reste peu.",
 
   "system.keys_reset": "{actor} a réinitialisé son mot de passe par e-mail et a de nouvelles clés de sécurité. Les anciens messages ne sont plus lisibles sur son compte.",
+
+  "recover.tabMail": "Par e-mail",
+  "recover.mailHint": "Nous t'envoyons un lien. Comme tes discussions sont chiffrées de bout en bout, tu perdras l'accès à tes anciens messages (tes amis les gardent). Utilise plutôt un code de secours si tu en as un.",
+  "recover.mailSubmit": "Envoyer le lien",
+  "recover.mailSent": "Si le compte existe, nous avons envoyé un e-mail avec un lien. Il est valable 60 minutes – vérifie aussi tes spams.",
+  "recover.mailDisabled": "La réinitialisation par e-mail n'est pas configurée sur ce serveur. Utilise un code de secours.",
+  "reset.account": "Nouveau mot de passe pour {name} (@{username})",
+  "reset.warning": "Après cette réinitialisation, tu ne pourras plus lire tes anciens messages chiffrés. Tes amis, groupes et discussions restent, et tu reçois de nouveaux codes de secours.",
+  "reset.invalid": "Ce lien est invalide ou expiré. Demandes-en un nouveau.",
+  "reset.confirm": "Réinitialiser le mot de passe ? Tes anciens messages chiffrés ne seront plus lisibles sur ton compte.",
 };
