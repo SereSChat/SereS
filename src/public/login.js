@@ -44,9 +44,86 @@
                 ? res.data.message
                 : t("login.failedCredentials"));
         }
+        if (res.data.two_factor) {
+            // Password is right; the session starts after the second factor.
+            twofa = { ...res.data.two_factor, nameomail, wrapKey };
+            showTwofa();
+            return;
+        }
         if (afterLogin)
             await afterLogin({ user: res.data.user, wrapKey, authHash });
         await finishLogin(res.data.user, wrapKey);
+    }
+    // ------------------------------------------------------------------ 2FA
+    let twofa = null;
+    function showTwofa() {
+        if (!twofa)
+            return;
+        busy = false;
+        showPanel("twofa");
+        const passkey = twofa.methods.includes("passkey") && SeresPasskeys.supported();
+        el("twofa-passkey").classList.toggle("modal-hidden", !passkey);
+        el("twofa-totp-box").classList.toggle("modal-hidden", !twofa.methods.includes("totp"));
+        el("twofa-backup-link").classList.toggle("modal-hidden", !twofa.backup_codes);
+        el("twofa-backup-box").classList.add("modal-hidden");
+        el("twofa-warning").textContent = "";
+        if (twofa.methods.includes("totp"))
+            el("twofa-login-code").focus();
+    }
+    /** Sends the second factor; on success the keys are unlocked and the chats open. */
+    async function sendSecondFactor(body) {
+        if (!twofa || busy)
+            return;
+        const current = twofa;
+        busy = true;
+        const warning = el("twofa-warning");
+        warning.textContent = t("login.loggingIn");
+        try {
+            const res = await postJson("/api/login/2fa", { token: current.token, ...body });
+            if (!res.ok) {
+                if (res.status === 401) {
+                    twofa = null;
+                    throw new Error(t("twofa.expired"));
+                }
+                throw new Error(res.status === 429 ? res.data.message : t("twofa.wrong"));
+            }
+            await finishLogin(res.data.user, current.wrapKey);
+        }
+        catch (error) {
+            warning.textContent = error instanceof Error ? error.message : t("common.unreachable");
+            busy = false;
+        }
+    }
+    async function usePasskey() {
+        if (!twofa)
+            return;
+        const warning = el("twofa-warning");
+        try {
+            const res = await postJson("/api/login/2fa/options", { token: twofa.token });
+            if (!res.ok)
+                throw new Error(t("twofa.expired"));
+            const credential = await SeresPasskeys.get(res.data.options);
+            await sendSecondFactor({ method: "passkey", credential });
+        }
+        catch (error) {
+            warning.textContent = error instanceof DOMException ? t("twofa.passkeyCancelled") : error instanceof Error ? error.message : String(error);
+        }
+    }
+    async function useBackupCode() {
+        if (!twofa)
+            return;
+        const parsed = SeresCrypto.normalizeCode(el("twofa-backup-code").value);
+        if (!parsed) {
+            el("twofa-warning").textContent = t("recover.invalidCode");
+            return;
+        }
+        const pre = await postJson("/api/recovery/prelogin", { nameomail: twofa.nameomail, slot: parsed.slot });
+        if (!pre.ok) {
+            el("twofa-warning").textContent = pre.data.message || t("twofa.wrong");
+            return;
+        }
+        const keys = await SeresCrypto.deriveCodeKeys(parsed.code, pre.data.kdf_salt);
+        await sendSecondFactor({ method: "backup", slot: parsed.slot, auth_hash: keys.authHash });
     }
     /** Unlocks the private keys after a successful login and opens the chats. */
     async function finishLogin(user, wrapKey, extraParams = {}) {
@@ -136,10 +213,11 @@
     }
     // ------------------------------------------------------ forgot password
     function showPanel(panel) {
+        el("twofa-panel").classList.toggle("modal-hidden", panel !== "twofa");
         el("login-panel").classList.toggle("modal-hidden", panel !== "login");
         el("recover-panel").classList.toggle("modal-hidden", panel !== "recover");
         el("reset-panel").classList.toggle("modal-hidden", panel !== "reset");
-        el("landr").textContent = t(panel !== "login" ? "recover.title" : mode === "register" ? "login.registerTitle" : "login.title");
+        el("landr").textContent = t(panel === "twofa" ? "twofa.loginTitle" : panel !== "login" ? "recover.title" : mode === "register" ? "login.registerTitle" : "login.title");
         el("recover-warning").textContent = "";
         if (panel === "recover") {
             const typed = el("email").value.trim();
@@ -393,6 +471,18 @@
             tab.addEventListener("click", () => selectRecoverTab(tab.dataset.tab));
         });
         el("recover-submit").addEventListener("click", recoverWithCode);
+        el("twofa-passkey").addEventListener("click", usePasskey);
+        el("twofa-totp-submit").addEventListener("click", () => sendSecondFactor({ method: "totp", code: el("twofa-login-code").value.replace(/\s/g, "") }));
+        el("twofa-login-code").addEventListener("keydown", (event) => {
+            if (event.key === "Enter")
+                el("twofa-totp-submit").click();
+        });
+        el("twofa-backup-link").addEventListener("click", (event) => {
+            event.preventDefault();
+            el("twofa-backup-box").classList.remove("modal-hidden");
+            el("twofa-backup-code").focus();
+        });
+        el("twofa-backup-submit").addEventListener("click", useBackupCode);
         el("reset-mail-submit").addEventListener("click", requestResetMail);
         el("recover-new2").addEventListener("keydown", (event) => {
             if (event.key === "Enter")

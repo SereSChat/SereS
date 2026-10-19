@@ -3659,3 +3659,8 @@ body.bright-body .twofa-item {
   letter-spacing: 4px;
   font-size: 1.1rem;
 }
+
+#twofa-panel .action-button {
+  width: 100%;
+  margin-top: 6px;
+}
