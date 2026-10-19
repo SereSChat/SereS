@@ -507,7 +507,23 @@ def login():
             verify_hash(None, auth_hash)
         return error("Login not succesfull")
 
+    methods = twofa_methods(user)
+    if methods:
+        # Password is right, but the second factor is still missing: no session yet,
+        # and the encrypted keys are only handed out after the second step.
+        token = new_challenge(conn, user["id"], "login")
+        conn.commit()
+        return ok(two_factor={"token": token, "methods": methods, "backup_codes": has_backup_codes(user["id"])})
     return login_response(user["id"])
+
+
+def has_backup_codes(user_id):
+    return (
+        get_db()
+        .execute("SELECT 1 FROM recovery_codes WHERE user_id = ? AND used_at IS NULL", (user_id,))
+        .fetchone()
+        is not None
+    )
 
 
 def login_response(user_id):
@@ -999,6 +1015,115 @@ def passkey_delete():
     if cur.rowcount == 0:
         return error("Passkey not found", 404)
     return ok(message="Passkey removed")
+
+
+@app.route("/api/login/2fa/options", methods=["POST"])
+def login_passkey_options():
+    """Challenge for signing in with a passkey as second factor."""
+    pending = find_challenge(json_body().get("token"), "login")
+    if pending is None:
+        return error("The login expired, please log in again", 401)
+    options = webauthn.generate_authentication_options(
+        rp_id=webauthn_rp_id(), allow_credentials=credential_descriptors(pending["user_id"])
+    )
+    conn = get_db()
+    conn.execute(
+        "UPDATE twofa_challenges SET challenge = ? WHERE token_hash = ?",
+        (webauthn.helpers.bytes_to_base64url(options.challenge), pending["token_hash"]),
+    )
+    conn.commit()
+    return ok(options=json.loads(webauthn.options_to_json(options)))
+
+
+def check_passkey(pending, credential):
+    if not pending["challenge"] or not isinstance(credential, dict):
+        return False
+    row = (
+        get_db()
+        .execute(
+            "SELECT * FROM passkeys WHERE id = ? AND user_id = ?", (str(credential.get("id")), pending["user_id"])
+        )
+        .fetchone()
+    )
+    if row is None:
+        return False
+    try:
+        verified = webauthn.verify_authentication_response(
+            credential=credential,
+            expected_challenge=webauthn.base64url_to_bytes(pending["challenge"]),
+            expected_rp_id=webauthn_rp_id(),
+            expected_origin=webauthn_origins(),
+            credential_public_key=webauthn.base64url_to_bytes(row["public_key"]),
+            credential_current_sign_count=row["sign_count"],
+        )
+    except Exception as e:
+        print("passkey login failed:", e)
+        return False
+    conn = get_db()
+    conn.execute(
+        "UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?",
+        (verified.new_sign_count, db.now_iso(), row["id"]),
+    )
+    return True
+
+
+def check_totp(user, code):
+    step = totp.verify(user["totp_secret"], code, last_step=user["totp_last_step"])
+    if step is None:
+        return False
+    get_db().execute("UPDATE users SET totp_last_step = ? WHERE id = ?", (step, user["id"]))
+    return True
+
+
+def check_backup_code(user, data):
+    """A backup code also works as second factor (and is used up)."""
+    slot = str(data.get("slot", "")).strip().upper()
+    auth_hash = data.get("auth_hash")
+    if not SLOT_RE.match(slot) or not isinstance(auth_hash, str):
+        return False
+    conn = get_db()
+    code = conn.execute(
+        "SELECT * FROM recovery_codes WHERE user_id = ? AND slot = ? AND used_at IS NULL", (user["id"], slot)
+    ).fetchone()
+    if code is None or not verify_hash(code["auth_hash"], auth_hash):
+        return False
+    conn.execute(
+        "UPDATE recovery_codes SET used_at = ? WHERE user_id = ? AND slot = ?", (db.now_iso(), user["id"], slot)
+    )
+    return True
+
+
+@app.route("/api/login/2fa", methods=["POST"])
+def login_second_factor():
+    data = json_body()
+    if rate_limited(("login-2fa", client_ip()), 30, 300):
+        return error("Too many attempts, please wait a few minutes", 429)
+    pending = find_challenge(data.get("token"), "login")
+    if pending is None:
+        return error("The login expired, please log in again", 401)
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (pending["user_id"],)).fetchone()
+    method = data.get("method")
+    if method == "passkey":
+        passed = check_passkey(pending, data.get("credential"))
+    elif method == "totp":
+        passed = check_totp(user, data.get("code"))
+    elif method == "backup":
+        passed = check_backup_code(user, data)
+    else:
+        return error("Unknown method")
+    if not passed:
+        attempts = pending["attempts"] + 1
+        if attempts >= TWOFA_MAX_ATTEMPTS:
+            conn.execute("DELETE FROM twofa_challenges WHERE token_hash = ?", (pending["token_hash"],))
+            conn.commit()
+            return error("Too many wrong attempts, please log in again", 401)
+        conn.execute("UPDATE twofa_challenges SET attempts = ? WHERE token_hash = ?", (attempts, pending["token_hash"]))
+        conn.commit()
+        return error("The code or passkey is wrong")
+    conn.execute("DELETE FROM twofa_challenges WHERE token_hash = ?", (pending["token_hash"],))
+    conn.commit()
+    return login_response(user["id"])
 
 
 # --------------------------------------------------------------------------
