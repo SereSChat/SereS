@@ -123,6 +123,20 @@ SCHEMA = [
         created_at TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_files_message ON files(message_id)",
+    # Backup codes (like Discord): each one can unlock the account once. The
+    # private keys are stored encrypted with a key derived from each code, so a
+    # code restores the account *with* its encrypted history. Only the slot (the
+    # public first part of a code) is stored in plain text.
+    """CREATE TABLE IF NOT EXISTS recovery_codes (
+        user_id TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        kdf_salt TEXT NOT NULL,
+        auth_hash TEXT NOT NULL,
+        enc_private TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        used_at TEXT,
+        PRIMARY KEY (user_id, slot)
+    )""",
 ]
 
 # Indexes on columns that are added by `_migrate_columns`.
