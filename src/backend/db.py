@@ -123,6 +123,37 @@ SCHEMA = [
         created_at TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_files_message ON files(message_id)",
+    # Backup codes (like Discord): each one can unlock the account once. The
+    # private keys are stored encrypted with a key derived from each code, so a
+    # code restores the account *with* its encrypted history. Only the slot (the
+    # public first part of a code) is stored in plain text.
+    """CREATE TABLE IF NOT EXISTS recovery_codes (
+        user_id TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        kdf_salt TEXT NOT NULL,
+        auth_hash TEXT NOT NULL,
+        enc_private TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        used_at TEXT,
+        PRIMARY KEY (user_id, slot)
+    )""",
+    # Public keys a user had before a reset by e-mail. Messages sent before
+    # `replaced_at` are checked with these keys, so others keep their history.
+    """CREATE TABLE IF NOT EXISTS user_key_history (
+        user_id TEXT NOT NULL,
+        pub_ecdh TEXT NOT NULL,
+        pub_sign TEXT NOT NULL,
+        replaced_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_key_history_user ON user_key_history(user_id)",
+    # Password reset links sent by e-mail. Only a hash of the token is stored.
+    """CREATE TABLE IF NOT EXISTS password_resets (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT
+    )""",
 ]
 
 # Indexes on columns that are added by `_migrate_columns`.

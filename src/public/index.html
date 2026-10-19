@@ -338,6 +338,13 @@
           <code class="fingerprint" id="my-fingerprint">...</code>
         </div>
 
+        <form class="settings-section" id="codes-form" autocomplete="off">
+          <p data-i18n="settings.codesText">🔑 Backup codes (to set a new password if you forget yours):</p>
+          <p class="settings-hint" id="codes-status"></p>
+          <input type="password" id="codes-password" placeholder="Current password" data-i18n-placeholder="settings.oldPassword" autocomplete="current-password" />
+          <button class="modal-btn secondary-btn" type="submit" id="codes-generate" data-i18n="settings.codesButton">Generate new backup codes</button>
+        </form>
+
         <!-- Own form with a username field, so password managers fill this form
              instead of putting the saved login into the first text field (the search). -->
         <form class="settings-section" id="password-form" autocomplete="on">
@@ -365,6 +372,7 @@
     <script src="emoji.js"></script>
     <script src="format.js"></script>
     <script src="crypto.js"></script>
+    <script src="codes.js"></script>
     <script src="index.js"></script>
   </body>
 </html>

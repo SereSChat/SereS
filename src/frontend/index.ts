@@ -151,6 +151,8 @@
   let editing: { chatId: string; message: Message; content: Content } | null = null;
   // Invite token from a link like /?invite=..., kept across the login redirect.
   const pendingInvite = new URLSearchParams(window.location.search).get("invite");
+  // Set by the login page after a password reset ("code" or "mail").
+  const recoveredBy = new URLSearchParams(window.location.search).get("recovered");
   let inviteToAccept: { token: string; name: string } | null = null;
 
   // Message that is being answered (shown above the input field).
@@ -165,7 +167,21 @@
   // Decrypted attachments as blob: URLs, by file id.
   const fileUrls = new Map<string, Promise<string>>();
 
-  const userKeys = new Map<string, { id: string; username: string; pub_ecdh: string | null; pub_sign: string | null }>();
+  interface KnownKeys {
+    id: string;
+    username: string;
+    pub_ecdh: string | null;
+    pub_sign: string | null;
+    // Keys replaced by a password reset, oldest first, valid until "until".
+    previous_keys?: { pub_ecdh: string; pub_sign: string; until: string }[];
+  }
+  const userKeys = new Map<string, KnownKeys>();
+
+  /** The sender's keys that were valid when the message was written. */
+  function keysAt(user: KnownKeys, createdAt: string) {
+    const previous = (user.previous_keys || []).find((old) => createdAt <= old.until);
+    return previous || { pub_ecdh: user.pub_ecdh, pub_sign: user.pub_sign };
+  }
   const shownCache = new Map<string, Promise<Shown>>();
   const avatarState = new Map<string, "yes" | "no">();
 
@@ -414,6 +430,7 @@
       case "left":
       case "renamed":
       case "pinned":
+      case "keys_reset":
         return t("system." + payload.event, {
           actor: payload.actor ?? "",
           target: payload.target ?? "",
@@ -438,7 +455,8 @@
         if (message.kind === "legacy") return { type: "legacy", text: String(message.payload?.text ?? "") };
         try {
           await ensureUserKeys([message.sender_id!]);
-          const sender = userKeys.get(message.sender_id!);
+          const known = userKeys.get(message.sender_id!);
+          const sender = known ? { id: known.id, ...keysAt(known, message.created_at) } : null;
           if (!sender || !sender.pub_ecdh || !sender.pub_sign) throw new Error("unknown sender");
           const content = await SeresCrypto.decryptMessage(
             identity,
@@ -3106,7 +3124,56 @@
     }
   }
 
+  async function loadCodesStatus() {
+    try {
+      const data = await api("/api/recovery/codes");
+      $("codes-status").textContent = data.total
+        ? t("settings.codesLeft", { unused: data.unused, total: data.total })
+        : t("settings.codesNone");
+      $("codes-status").classList.toggle("warn", !data.unused);
+    } catch {
+      $("codes-status").textContent = "";
+    }
+  }
+
+  /** Makes 10 new backup codes (old ones stop working) and shows them once. */
+  async function generateCodes() {
+    const warning = $("settings-warning");
+    const passwordInput = $("codes-password") as HTMLInputElement;
+    const password = passwordInput.value;
+    warning.textContent = "";
+    if (!password) {
+      warning.textContent = t("settings.codesNeedPassword");
+      passwordInput.focus();
+      return;
+    }
+    const button = $("codes-generate") as HTMLButtonElement;
+    button.disabled = true;
+    warning.textContent = t("settings.codesCreating");
+    try {
+      const fresh: Me = (await api("/api/me")).user;
+      const pre = await post("/api/prelogin", { nameomail: me.username });
+      const keys = await SeresCrypto.deriveAccountKeys(password, pre.kdf_salt, pre.kdf_iterations);
+      let created: { codes: string[]; stored: object[] };
+      try {
+        created = await SeresCrypto.createRecoveryCodes(fresh.enc_private, keys.wrapKey);
+      } catch {
+        throw new Error(t("settings.codesWrongPassword"));
+      }
+      await post("/api/recovery/codes", { old_auth_hash: keys.authHash, codes: created.stored });
+      passwordInput.value = "";
+      warning.textContent = "";
+      await loadCodesStatus();
+      SeresCodes.show(created.codes, me.username);
+    } catch (error) {
+      warning.textContent = errorText(error);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   async function openSettings() {
+    loadCodesStatus();
     renderSettingsToggles();
     $("user-dropdown-menu").classList.add("modal-hidden");
     $("settings-warning").textContent = "";
@@ -3324,6 +3391,10 @@
     });
     $("upload-avatar-btn").addEventListener("click", uploadAvatar);
     $("theme-toggle-btn").addEventListener("click", toggleTheme);
+    $("codes-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (window.confirm(t("settings.codesConfirm"))) generateCodes();
+    });
     $("password-form").addEventListener("submit", (event) => {
       event.preventDefault();
       changePassword();
@@ -3469,6 +3540,12 @@
     if (window.innerWidth <= 768) document.querySelector(".sidebar")?.classList.add("open");
 
     await refreshAll();
+    if (recoveredBy === "code") {
+      // Point to the backup codes, one of them was just used.
+      await openSettings();
+      $("settings-warning").textContent = t("recover.doneCode");
+      $("codes-form").scrollIntoView({ block: "center" });
+    }
     if (pendingInvite) {
       // Remove the token from the address bar so a reload doesn't ask again.
       window.history.replaceState({}, document.title, window.location.pathname);
