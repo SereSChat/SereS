@@ -3608,3 +3608,54 @@ body.bright-body .codes-list {
 .modal-box p.codes-status {
   color: #00a884 !important;
 }
+
+/* Two-factor authentication in the settings */
+#twofa-status.on {
+  color: #00a884;
+}
+
+.twofa-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.twofa-list:empty {
+  display: none;
+}
+
+.twofa-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background-color: #111b21;
+  color: #e9edef;
+  font-size: 0.85rem;
+}
+
+.twofa-item .twofa-meta {
+  flex: 1;
+  color: #8696a0;
+  font-size: 0.75rem;
+}
+
+body.bright-body .twofa-item {
+  background-color: #f0f2f5;
+  color: #111b21;
+}
+
+.twofa-totp {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.twofa-totp #twofa-code {
+  width: 160px;
+  text-align: center;
+  letter-spacing: 4px;
+  font-size: 1.1rem;
+}
