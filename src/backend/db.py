@@ -137,6 +137,15 @@ SCHEMA = [
         used_at TEXT,
         PRIMARY KEY (user_id, slot)
     )""",
+    # Public keys a user had before a reset by e-mail. Messages sent before
+    # `replaced_at` are checked with these keys, so others keep their history.
+    """CREATE TABLE IF NOT EXISTS user_key_history (
+        user_id TEXT NOT NULL,
+        pub_ecdh TEXT NOT NULL,
+        pub_sign TEXT NOT NULL,
+        replaced_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_key_history_user ON user_key_history(user_id)",
     # Password reset links sent by e-mail. Only a hash of the token is stored.
     """CREATE TABLE IF NOT EXISTS password_resets (
         token_hash TEXT PRIMARY KEY,
