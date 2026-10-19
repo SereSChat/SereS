@@ -45,7 +45,9 @@ def build_message(to, subject, text):
 
 def deliver(message):
     if debug_mode():
-        print("----- MAIL_DEBUG -----\n" + message.as_string() + "\n----------------------", flush=True)
+        # Decoded text, so links can be copied from the console.
+        head = "".join(f"{key}: {value}\n" for key, value in message.items() if key in ("From", "To", "Subject"))
+        print("----- MAIL_DEBUG -----\n" + head + "\n" + message.get_content() + "----------------------", flush=True)
         return
     host = os.getenv("SMTP_HOST")
     port = int(os.getenv("SMTP_PORT", "587"))
