@@ -41,6 +41,11 @@
     // Decrypted attachments as blob: URLs, by file id.
     const fileUrls = new Map();
     const userKeys = new Map();
+    /** The sender's keys that were valid when the message was written. */
+    function keysAt(user, createdAt) {
+        const previous = (user.previous_keys || []).find((old) => createdAt <= old.until);
+        return previous || { pub_ecdh: user.pub_ecdh, pub_sign: user.pub_sign };
+    }
     const shownCache = new Map();
     const avatarState = new Map();
     const MESSAGE_LIMIT = 4000;
@@ -309,7 +314,8 @@
                     return { type: "legacy", text: String(message.payload?.text ?? "") };
                 try {
                     await ensureUserKeys([message.sender_id]);
-                    const sender = userKeys.get(message.sender_id);
+                    const known = userKeys.get(message.sender_id);
+                    const sender = known ? { id: known.id, ...keysAt(known, message.created_at) } : null;
                     if (!sender || !sender.pub_ecdh || !sender.pub_sign)
                         throw new Error("unknown sender");
                     const content = await SeresCrypto.decryptMessage(identity, chatId, message.id, { id: sender.id, pub_ecdh: sender.pub_ecdh, pub_sign: sender.pub_sign }, message.payload);

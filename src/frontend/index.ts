@@ -167,7 +167,21 @@
   // Decrypted attachments as blob: URLs, by file id.
   const fileUrls = new Map<string, Promise<string>>();
 
-  const userKeys = new Map<string, { id: string; username: string; pub_ecdh: string | null; pub_sign: string | null }>();
+  interface KnownKeys {
+    id: string;
+    username: string;
+    pub_ecdh: string | null;
+    pub_sign: string | null;
+    // Keys replaced by a password reset, oldest first, valid until "until".
+    previous_keys?: { pub_ecdh: string; pub_sign: string; until: string }[];
+  }
+  const userKeys = new Map<string, KnownKeys>();
+
+  /** The sender's keys that were valid when the message was written. */
+  function keysAt(user: KnownKeys, createdAt: string) {
+    const previous = (user.previous_keys || []).find((old) => createdAt <= old.until);
+    return previous || { pub_ecdh: user.pub_ecdh, pub_sign: user.pub_sign };
+  }
   const shownCache = new Map<string, Promise<Shown>>();
   const avatarState = new Map<string, "yes" | "no">();
 
@@ -441,7 +455,8 @@
         if (message.kind === "legacy") return { type: "legacy", text: String(message.payload?.text ?? "") };
         try {
           await ensureUserKeys([message.sender_id!]);
-          const sender = userKeys.get(message.sender_id!);
+          const known = userKeys.get(message.sender_id!);
+          const sender = known ? { id: known.id, ...keysAt(known, message.created_at) } : null;
           if (!sender || !sender.pub_ecdh || !sender.pub_sign) throw new Error("unknown sender");
           const content = await SeresCrypto.decryptMessage(
             identity,
