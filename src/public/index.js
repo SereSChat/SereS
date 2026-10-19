@@ -26,6 +26,8 @@
     let editing = null;
     // Invite token from a link like /?invite=..., kept across the login redirect.
     const pendingInvite = new URLSearchParams(window.location.search).get("invite");
+    // Set by the login page after a password reset ("code" or "mail").
+    const recoveredBy = new URLSearchParams(window.location.search).get("recovered");
     let inviteToAccept = null;
     // Message that is being answered (shown above the input field).
     let replyTo = null;
@@ -3193,6 +3195,12 @@
         if (window.innerWidth <= 768)
             document.querySelector(".sidebar")?.classList.add("open");
         await refreshAll();
+        if (recoveredBy === "code") {
+            // Point to the backup codes, one of them was just used.
+            await openSettings();
+            $("settings-warning").textContent = t("recover.doneCode");
+            $("codes-form").scrollIntoView({ block: "center" });
+        }
         if (pendingInvite) {
             // Remove the token from the address bar so a reload doesn't ask again.
             window.history.replaceState({}, document.title, window.location.pathname);
