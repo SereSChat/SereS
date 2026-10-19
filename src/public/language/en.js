@@ -360,4 +360,18 @@ window.SeresLang.en = {
   "settings.codesCreating": "Creating backup codes…",
   "settings.codesWrongPassword": "Password is wrong",
   "settings.codesConfirm": "Generate 10 new backup codes? Your old codes will stop working.",
+
+  "recover.forgot": "Forgot password?",
+  "recover.title": "Reset password",
+  "recover.tabCode": "With backup code",
+  "recover.codeHint": "Use one of your backup codes. You keep all your encrypted chats. Each code works only once.",
+  "recover.code": "Backup code (e.g. K7QF-2M9X-HP4C-ZT8B)",
+  "recover.repeat": "Repeat new password",
+  "recover.submit": "Set new password",
+  "recover.back": "← Back to login",
+  "recover.invalidCode": "This is not a valid backup code (16 letters and digits).",
+  "recover.mismatch": "The passwords don't match.",
+  "recover.working": "Checking the code and re-encrypting your keys…",
+  "recover.failed": "Username or backup code is wrong, or the code was already used.",
+  "recover.doneCode": "Your password was changed with a backup code. That code can't be used again – generate new codes in the settings if you are running low.",
 };

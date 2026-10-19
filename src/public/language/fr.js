@@ -360,4 +360,18 @@ window.SeresLang.fr = {
   "settings.codesCreating": "Création des codes de secours…",
   "settings.codesWrongPassword": "Le mot de passe est incorrect",
   "settings.codesConfirm": "Générer 10 nouveaux codes de secours ? Tes anciens codes ne fonctionneront plus.",
+
+  "recover.forgot": "Mot de passe oublié ?",
+  "recover.title": "Réinitialiser le mot de passe",
+  "recover.tabCode": "Avec un code de secours",
+  "recover.codeHint": "Utilise l'un de tes codes de secours. Tu gardes toutes tes discussions chiffrées. Chaque code ne fonctionne qu'une fois.",
+  "recover.code": "Code de secours (ex. K7QF-2M9X-HP4C-ZT8B)",
+  "recover.repeat": "Répéter le nouveau mot de passe",
+  "recover.submit": "Définir le nouveau mot de passe",
+  "recover.back": "← Retour à la connexion",
+  "recover.invalidCode": "Ce n'est pas un code de secours valide (16 lettres et chiffres).",
+  "recover.mismatch": "Les mots de passe ne correspondent pas.",
+  "recover.working": "Vérification du code et rechiffrement de tes clés…",
+  "recover.failed": "Nom d'utilisateur ou code de secours incorrect, ou code déjà utilisé.",
+  "recover.doneCode": "Ton mot de passe a été changé avec un code de secours. Ce code est maintenant utilisé – génère de nouveaux codes dans les paramètres s'il t'en reste peu.",
 };

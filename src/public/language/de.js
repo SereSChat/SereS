@@ -360,4 +360,18 @@ window.SeresLang.de = {
   "settings.codesCreating": "Backup-Codes werden erstellt…",
   "settings.codesWrongPassword": "Das Passwort ist falsch",
   "settings.codesConfirm": "10 neue Backup-Codes erstellen? Deine alten Codes funktionieren dann nicht mehr.",
+
+  "recover.forgot": "Passwort vergessen?",
+  "recover.title": "Passwort zurücksetzen",
+  "recover.tabCode": "Mit Backup-Code",
+  "recover.codeHint": "Nutze einen deiner Backup-Codes. Du behältst alle verschlüsselten Chats. Jeder Code funktioniert nur einmal.",
+  "recover.code": "Backup-Code (z. B. K7QF-2M9X-HP4C-ZT8B)",
+  "recover.repeat": "Neues Passwort wiederholen",
+  "recover.submit": "Neues Passwort setzen",
+  "recover.back": "← Zurück zur Anmeldung",
+  "recover.invalidCode": "Das ist kein gültiger Backup-Code (16 Buchstaben und Ziffern).",
+  "recover.mismatch": "Die Passwörter stimmen nicht überein.",
+  "recover.working": "Code wird geprüft und deine Schlüssel werden neu verschlüsselt…",
+  "recover.failed": "Benutzername oder Backup-Code ist falsch, oder der Code wurde schon benutzt.",
+  "recover.doneCode": "Dein Passwort wurde mit einem Backup-Code geändert. Dieser Code ist jetzt verbraucht – erstelle in den Einstellungen neue Codes, wenn nur noch wenige übrig sind.",
 };
