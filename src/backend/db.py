@@ -137,6 +137,14 @@ SCHEMA = [
         used_at TEXT,
         PRIMARY KEY (user_id, slot)
     )""",
+    # Password reset links sent by e-mail. Only a hash of the token is stored.
+    """CREATE TABLE IF NOT EXISTS password_resets (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT
+    )""",
 ]
 
 # Indexes on columns that are added by `_migrate_columns`.
