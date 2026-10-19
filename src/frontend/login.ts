@@ -284,7 +284,7 @@
     showPanel("reset");
     const res = await postJson("/api/password_reset/check", { token }).catch(() => null);
     if (!res || !res.ok) {
-      el("reset-warning").textContent = t("reset.invalid");
+      el("reset-warning").textContent = t(res && res.data.two_factor ? "twofa.resetBlocked" : "reset.invalid");
       el<HTMLButtonElement>("reset-submit").disabled = true;
       return;
     }
