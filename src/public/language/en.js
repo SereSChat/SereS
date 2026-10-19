@@ -351,4 +351,13 @@ window.SeresLang.en = {
   "codes.fileCreated": "Created: {date}",
   "codes.fileHint1": "Each code can be used once to set a new password if you forget yours (\"Forgot password?\" on the login page).",
   "codes.fileHint2": "Keep them secret: anyone with a code and your username can take over your account.",
+
+  "settings.codesText": "🔑 Backup codes (to set a new password if you forget yours):",
+  "settings.codesButton": "Generate new backup codes",
+  "settings.codesLeft": "{unused} of {total} codes unused. They can't be shown again.",
+  "settings.codesNone": "You have no backup codes yet. Without them, a forgotten password means losing your encrypted chats.",
+  "settings.codesNeedPassword": "Enter your current password to create backup codes.",
+  "settings.codesCreating": "Creating backup codes…",
+  "settings.codesWrongPassword": "Password is wrong",
+  "settings.codesConfirm": "Generate 10 new backup codes? Your old codes will stop working.",
 };

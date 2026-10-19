@@ -2773,7 +2773,58 @@
             showAlert(errorText(error));
         }
     }
+    async function loadCodesStatus() {
+        try {
+            const data = await api("/api/recovery/codes");
+            $("codes-status").textContent = data.total
+                ? t("settings.codesLeft", { unused: data.unused, total: data.total })
+                : t("settings.codesNone");
+            $("codes-status").classList.toggle("warn", !data.unused);
+        }
+        catch {
+            $("codes-status").textContent = "";
+        }
+    }
+    /** Makes 10 new backup codes (old ones stop working) and shows them once. */
+    async function generateCodes() {
+        const warning = $("settings-warning");
+        const passwordInput = $("codes-password");
+        const password = passwordInput.value;
+        warning.textContent = "";
+        if (!password) {
+            warning.textContent = t("settings.codesNeedPassword");
+            passwordInput.focus();
+            return;
+        }
+        const button = $("codes-generate");
+        button.disabled = true;
+        warning.textContent = t("settings.codesCreating");
+        try {
+            const fresh = (await api("/api/me")).user;
+            const pre = await post("/api/prelogin", { nameomail: me.username });
+            const keys = await SeresCrypto.deriveAccountKeys(password, pre.kdf_salt, pre.kdf_iterations);
+            let created;
+            try {
+                created = await SeresCrypto.createRecoveryCodes(fresh.enc_private, keys.wrapKey);
+            }
+            catch {
+                throw new Error(t("settings.codesWrongPassword"));
+            }
+            await post("/api/recovery/codes", { old_auth_hash: keys.authHash, codes: created.stored });
+            passwordInput.value = "";
+            warning.textContent = "";
+            await loadCodesStatus();
+            SeresCodes.show(created.codes, me.username);
+        }
+        catch (error) {
+            warning.textContent = errorText(error);
+        }
+        finally {
+            button.disabled = false;
+        }
+    }
     async function openSettings() {
+        loadCodesStatus();
         renderSettingsToggles();
         $("user-dropdown-menu").classList.add("modal-hidden");
         $("settings-warning").textContent = "";
@@ -2992,6 +3043,11 @@
         });
         $("upload-avatar-btn").addEventListener("click", uploadAvatar);
         $("theme-toggle-btn").addEventListener("click", toggleTheme);
+        $("codes-form").addEventListener("submit", (event) => {
+            event.preventDefault();
+            if (window.confirm(t("settings.codesConfirm")))
+                generateCodes();
+        });
         $("password-form").addEventListener("submit", (event) => {
             event.preventDefault();
             changePassword();

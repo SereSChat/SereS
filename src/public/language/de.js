@@ -351,4 +351,13 @@ window.SeresLang.de = {
   "codes.fileCreated": "Erstellt: {date}",
   "codes.fileHint1": "Mit jedem Code kannst du einmal ein neues Passwort setzen, falls du deins vergisst (\"Passwort vergessen?\" auf der Anmeldeseite).",
   "codes.fileHint2": "Halte sie geheim: Wer einen Code und deinen Benutzernamen hat, kann dein Konto übernehmen.",
+
+  "settings.codesText": "🔑 Backup-Codes (um ein neues Passwort zu setzen, falls du deins vergisst):",
+  "settings.codesButton": "Neue Backup-Codes erstellen",
+  "settings.codesLeft": "{unused} von {total} Codes unbenutzt. Sie können nicht erneut angezeigt werden.",
+  "settings.codesNone": "Du hast noch keine Backup-Codes. Ohne sie verlierst du bei einem vergessenen Passwort deine verschlüsselten Chats.",
+  "settings.codesNeedPassword": "Gib dein aktuelles Passwort ein, um Backup-Codes zu erstellen.",
+  "settings.codesCreating": "Backup-Codes werden erstellt…",
+  "settings.codesWrongPassword": "Das Passwort ist falsch",
+  "settings.codesConfirm": "10 neue Backup-Codes erstellen? Deine alten Codes funktionieren dann nicht mehr.",
 };

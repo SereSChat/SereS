@@ -351,4 +351,13 @@ window.SeresLang.fr = {
   "codes.fileCreated": "Créés le : {date}",
   "codes.fileHint1": "Chaque code permet une fois de définir un nouveau mot de passe si tu oublies le tien (« Mot de passe oublié ? » sur la page de connexion).",
   "codes.fileHint2": "Garde-les secrets : toute personne ayant un code et ton nom d'utilisateur peut prendre ton compte.",
+
+  "settings.codesText": "🔑 Codes de secours (pour définir un nouveau mot de passe si tu oublies le tien) :",
+  "settings.codesButton": "Générer de nouveaux codes de secours",
+  "settings.codesLeft": "{unused} codes sur {total} inutilisés. Ils ne peuvent plus être affichés.",
+  "settings.codesNone": "Tu n'as pas encore de codes de secours. Sans eux, un mot de passe oublié signifie perdre tes discussions chiffrées.",
+  "settings.codesNeedPassword": "Saisis ton mot de passe actuel pour créer des codes de secours.",
+  "settings.codesCreating": "Création des codes de secours…",
+  "settings.codesWrongPassword": "Le mot de passe est incorrect",
+  "settings.codesConfirm": "Générer 10 nouveaux codes de secours ? Tes anciens codes ne fonctionneront plus.",
 };

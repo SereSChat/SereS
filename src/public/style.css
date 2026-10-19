@@ -3528,3 +3528,7 @@ body.bright-body .codes-list {
     grid-template-columns: 1fr;
   }
 }
+
+#codes-status.warn {
+  color: #f0b232;
+}
