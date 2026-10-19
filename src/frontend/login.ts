@@ -31,7 +31,9 @@
   }
 
   /** Logs in, unlocks the private keys locally and stores them for this browser. */
-  async function loginWith(nameomail: string, password: string) {
+  type AfterLogin = (session: { user: any; wrapKey: CryptoKey; authHash: string }) => Promise<void>;
+
+  async function loginWith(nameomail: string, password: string, afterLogin?: AfterLogin) {
     const pre = await postJson("/api/prelogin", { nameomail });
     if (!pre.ok) throw new Error(pre.data.message || t("login.failed"));
 
@@ -55,6 +57,7 @@
           : t("login.failedCredentials"),
       );
     }
+    if (afterLogin) await afterLogin({ user: res.data.user, wrapKey, authHash });
     await finishLogin(res.data.user, wrapKey);
   }
 
@@ -135,7 +138,17 @@
         return;
       }
       setWarning(t("login.created"));
-      await loginWith(username, password);
+      await loginWith(username, password, async (session) => {
+        // Like Discord: hand out the backup codes right away, shown only this once.
+        try {
+          const created = await SeresCrypto.createRecoveryCodes(session.user.enc_private, session.wrapKey);
+          const saved = await postJson("/api/recovery/codes", { old_auth_hash: session.authHash, codes: created.stored });
+          if (!saved.ok) return;
+          await new Promise<void>((resolve) => SeresCodes.show(created.codes, username, resolve));
+        } catch {
+          /* codes can still be created later in the settings */
+        }
+      });
     } catch (error) {
       setBusy(false, error instanceof Error ? error.message : t("login.registerFailed"));
     }
