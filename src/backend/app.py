@@ -23,6 +23,7 @@ from PIL import Image, UnidentifiedImageError
 
 import db
 import mailer
+import totp
 from legacy_migration import migrate_legacy_files
 
 dotenv.load_dotenv()
@@ -756,6 +757,94 @@ def recovery_reset():
         # Whoever had the old password is logged out everywhere.
         conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user["id"],))
     return login_response(user["id"])
+
+
+# --------------------------------------------------------------------------
+# Two-factor authentication (optional): passkeys and authenticator apps
+# --------------------------------------------------------------------------
+
+TWOFA_LOGIN_MINUTES = 5
+TWOFA_MAX_ATTEMPTS = 5
+
+
+def passkey_rows(user_id):
+    return get_db().execute(
+        "SELECT * FROM passkeys WHERE user_id = ? ORDER BY created_at", (user_id,)
+    ).fetchall()
+
+
+def twofa_methods(user):
+    """Which second factors the account has; empty = 2FA is off."""
+    methods = []
+    if passkey_rows(user["id"]):
+        methods.append("passkey")
+    if user["totp_secret"]:
+        methods.append("totp")
+    return methods
+
+
+def require_password(data):
+    """2FA changes need the current password, so a stolen session can't lock the owner out."""
+    user = current_user()
+    old_hash = b64_field(data, "old_auth_hash", 128)
+    if rate_limited(("twofa-password", user["id"]), 10, 300):
+        flask.abort(flask.make_response(error("Too many attempts, please wait a few minutes", 429)))
+    if not verify_hash(user["passwd"], old_hash):
+        flask.abort(flask.make_response(error("Password is wrong")))
+    return user
+
+
+@app.route("/api/2fa")
+@login_required
+def twofa_status():
+    user = current_user()
+    passkeys = [
+        {"id": row["id"], "name": row["name"], "created_at": row["created_at"], "last_used_at": row["last_used_at"]}
+        for row in passkey_rows(user["id"])
+    ]
+    return ok(enabled=bool(twofa_methods(user)), totp=bool(user["totp_secret"]), passkeys=passkeys)
+
+
+@app.route("/api/2fa/totp/setup", methods=["POST"])
+@login_required
+def totp_setup():
+    """Creates a secret for an authenticator app; active only after a correct code."""
+    user = require_password(json_body())
+    secret = totp.new_secret()
+    conn = get_db()
+    conn.execute("UPDATE users SET totp_pending = ? WHERE id = ?", (secret, user["id"]))
+    conn.commit()
+    return ok(secret=secret, uri=totp.provisioning_uri(secret, user["username"]))
+
+
+@app.route("/api/2fa/totp/enable", methods=["POST"])
+@login_required
+def totp_enable():
+    user = current_user()
+    if rate_limited(("totp-enable", user["id"]), 10, 300):
+        return error("Too many attempts, please wait a few minutes", 429)
+    step = totp.verify(user["totp_pending"], json_body().get("code"))
+    if step is None:
+        return error("The code is wrong. Check the time on your phone and try again.")
+    conn = get_db()
+    conn.execute(
+        "UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_last_step = ? WHERE id = ?",
+        (step, user["id"]),
+    )
+    conn.commit()
+    return ok(message="Authenticator app enabled")
+
+
+@app.route("/api/2fa/totp/disable", methods=["POST"])
+@login_required
+def totp_disable():
+    user = require_password(json_body())
+    conn = get_db()
+    conn.execute(
+        "UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_last_step = 0 WHERE id = ?", (user["id"],)
+    )
+    conn.commit()
+    return ok(message="Authenticator app removed")
 
 
 # --------------------------------------------------------------------------
