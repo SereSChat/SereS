@@ -39,6 +39,27 @@
         <a href="#" class="forgot-link" id="forgot-link" data-i18n="recover.forgot">Forgot password?</a>
       </div>
 
+      <!-- Second factor after the password (2FA is on) -->
+      <div class="login-f modal-hidden" id="twofa-panel">
+        <p class="recover-hint" data-i18n="twofa.loginHint">Your account is protected with two-factor authentication.</p>
+        <button type="button" class="action-button" id="twofa-passkey" data-i18n="twofa.usePasskey">🔑 Use passkey</button>
+        <div class="twofa-totp-login" id="twofa-totp-box">
+          <div class="input">
+            <input type="text" id="twofa-login-code" inputmode="numeric" maxlength="7" placeholder="6-digit code from your app" data-i18n-placeholder="twofa.codePlaceholder" autocomplete="one-time-code" />
+          </div>
+          <button type="button" class="action-button" id="twofa-totp-submit" data-i18n="twofa.confirm">Confirm</button>
+        </div>
+        <a href="#" class="forgot-link" id="twofa-backup-link" data-i18n="twofa.useBackup">Use a backup code instead</a>
+        <div class="modal-hidden" id="twofa-backup-box">
+          <div class="input">
+            <input type="text" id="twofa-backup-code" placeholder="Backup code" data-i18n-placeholder="recover.code" autocomplete="off" spellcheck="false" />
+          </div>
+          <button type="button" class="action-button" id="twofa-backup-submit" data-i18n="twofa.confirm">Confirm</button>
+        </div>
+        <p class="login-warning" id="twofa-warning" role="status"></p>
+        <a href="login.html" class="forgot-link" data-i18n="recover.back">← Back to login</a>
+      </div>
+
       <!-- Forgot password: set a new one with a backup code (keeps all chats) -->
       <div class="login-f modal-hidden" id="recover-panel">
         <div class="recover-tabs" id="recover-tabs">
@@ -87,6 +108,7 @@
     <script src="consent.js"></script>
     <script src="crypto.js"></script>
     <script src="codes.js"></script>
+    <script src="passkeys.js"></script>
     <script src="login.js"></script>
   </body>
 </html>

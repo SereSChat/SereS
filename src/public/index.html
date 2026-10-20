@@ -338,6 +338,22 @@
           <code class="fingerprint" id="my-fingerprint">...</code>
         </div>
 
+        <form class="settings-section" id="twofa-form" autocomplete="off">
+          <p data-i18n="twofa.title">🛡️ Two-factor authentication (optional):</p>
+          <p class="settings-hint" id="twofa-status"></p>
+          <div class="twofa-list" id="twofa-list"></div>
+          <input type="password" id="twofa-password" placeholder="Current password" data-i18n-placeholder="settings.oldPassword" autocomplete="current-password" />
+          <button class="modal-btn secondary-btn" type="button" id="twofa-add-passkey" data-i18n="twofa.addPasskey">🔑 Add a passkey (phone, security key, Windows Hello…)</button>
+          <button class="modal-btn secondary-btn" type="button" id="twofa-totp-button" data-i18n="twofa.setupTotp">📱 Set up an authenticator app</button>
+          <div class="twofa-totp modal-hidden" id="twofa-totp-setup">
+            <p class="settings-hint" data-i18n="twofa.totpScan">Scan the QR code with your authenticator app (Google Authenticator, Microsoft Authenticator, Aegis, …) and enter the 6-digit code.</p>
+            <div class="qr-wrap" id="twofa-qr"></div>
+            <code class="fingerprint" id="twofa-secret"></code>
+            <input type="text" id="twofa-code" inputmode="numeric" maxlength="7" placeholder="123456" autocomplete="one-time-code" />
+            <button class="modal-btn confirm-btn" type="button" id="twofa-totp-confirm" data-i18n="twofa.totpConfirm">Turn on</button>
+          </div>
+        </form>
+
         <form class="settings-section" id="codes-form" autocomplete="off">
           <p data-i18n="settings.codesText">🔑 Backup codes (to set a new password if you forget yours):</p>
           <p class="settings-hint" id="codes-status"></p>
@@ -373,6 +389,7 @@
     <script src="format.js"></script>
     <script src="crypto.js"></script>
     <script src="codes.js"></script>
+    <script src="passkeys.js"></script>
     <script src="index.js"></script>
   </body>
 </html>

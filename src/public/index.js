@@ -2782,6 +2782,110 @@
             showAlert(errorText(error));
         }
     }
+    // ------------------------------------------------------------------ 2FA
+    /** The current password from the 2FA section, turned into the hash the server checks. */
+    async function twofaPasswordHash() {
+        const input = $("twofa-password");
+        if (!input.value) {
+            input.focus();
+            throw new Error(t("twofa.needPassword"));
+        }
+        const pre = await post("/api/prelogin", { nameomail: me.username });
+        const keys = await SeresCrypto.deriveAccountKeys(input.value, pre.kdf_salt, pre.kdf_iterations);
+        return keys.authHash;
+    }
+    async function loadTwofa() {
+        const list = $("twofa-list");
+        list.textContent = "";
+        let data;
+        try {
+            data = await api("/api/2fa");
+        }
+        catch {
+            return;
+        }
+        $("twofa-status").textContent = t(data.enabled ? "twofa.statusOn" : "twofa.statusOff");
+        $("twofa-status").classList.toggle("on", data.enabled);
+        for (const passkey of data.passkeys) {
+            list.appendChild(h("div", { className: "twofa-item" }, [
+                h("span", { text: "🔑 " + passkey.name }),
+                h("span", {
+                    className: "twofa-meta",
+                    text: passkey.last_used_at ? t("twofa.lastUsed", { date: formatDateTime(passkey.last_used_at) }) : t("twofa.neverUsed"),
+                }),
+                button(t("twofa.remove"), "request-action-btn discard", () => removePasskey(passkey.id, passkey.name)),
+            ]));
+        }
+        if (data.totp) {
+            list.appendChild(h("div", { className: "twofa-item" }, [
+                h("span", { text: t("twofa.totpOn") }),
+                h("span", { className: "twofa-meta" }),
+                button(t("twofa.remove"), "request-action-btn discard", disableTotp),
+            ]));
+        }
+        $("twofa-totp-button").classList.toggle("modal-hidden", data.totp);
+        $("twofa-add-passkey").classList.toggle("modal-hidden", !SeresPasskeys.supported());
+    }
+    async function twofaAction(work) {
+        const warning = $("settings-warning");
+        warning.textContent = "";
+        try {
+            await work();
+            $("twofa-password").value = "";
+        }
+        catch (error) {
+            warning.textContent =
+                error instanceof DOMException ? t("twofa.passkeyCancelled") : errorText(error);
+        }
+        await loadTwofa();
+    }
+    function addPasskey() {
+        return twofaAction(async () => {
+            const authHash = await twofaPasswordHash();
+            const name = window.prompt(t("twofa.passkeyName"), t("twofa.passkeyDefault")) || t("twofa.passkeyDefault");
+            const start = await post("/api/2fa/passkeys/options", { old_auth_hash: authHash });
+            const credential = await SeresPasskeys.create(start.options);
+            await post("/api/2fa/passkeys/register", { token: start.token, credential, name });
+            showAlert(t("twofa.passkeyAdded"));
+        });
+    }
+    function removePasskey(id, name) {
+        if (!window.confirm(t("twofa.removeConfirm", { name })))
+            return;
+        return twofaAction(async () => {
+            await post("/api/2fa/passkeys/delete", { id, old_auth_hash: await twofaPasswordHash() });
+            showAlert(t("twofa.removed"));
+        });
+    }
+    function startTotp() {
+        return twofaAction(async () => {
+            const data = await post("/api/2fa/totp/setup", { old_auth_hash: await twofaPasswordHash() });
+            const qr = $("twofa-qr");
+            qr.textContent = "";
+            qr.appendChild(SeresQR.toSvg(data.uri));
+            $("twofa-secret").textContent = data.secret.replace(/(.{4})/g, "$1 ").trim();
+            $("twofa-code").value = "";
+            $("twofa-totp-setup").classList.remove("modal-hidden");
+            $("twofa-code").focus();
+        });
+    }
+    function confirmTotp() {
+        return twofaAction(async () => {
+            await post("/api/2fa/totp/enable", { code: $("twofa-code").value.replace(/\s/g, "") });
+            $("twofa-totp-setup").classList.add("modal-hidden");
+            $("twofa-qr").textContent = "";
+            $("twofa-secret").textContent = "";
+            showAlert(t("twofa.totpEnabled"));
+        });
+    }
+    function disableTotp() {
+        if (!window.confirm(t("twofa.totpRemoveConfirm")))
+            return;
+        return twofaAction(async () => {
+            await post("/api/2fa/totp/disable", { old_auth_hash: await twofaPasswordHash() });
+            showAlert(t("twofa.removed"));
+        });
+    }
     async function loadCodesStatus() {
         try {
             const data = await api("/api/recovery/codes");
@@ -2834,6 +2938,8 @@
     }
     async function openSettings() {
         loadCodesStatus();
+        loadTwofa();
+        $("twofa-totp-setup").classList.add("modal-hidden");
         renderSettingsToggles();
         $("user-dropdown-menu").classList.add("modal-hidden");
         $("settings-warning").textContent = "";
@@ -3052,6 +3158,14 @@
         });
         $("upload-avatar-btn").addEventListener("click", uploadAvatar);
         $("theme-toggle-btn").addEventListener("click", toggleTheme);
+        $("twofa-form").addEventListener("submit", (event) => event.preventDefault());
+        $("twofa-add-passkey").addEventListener("click", addPasskey);
+        $("twofa-totp-button").addEventListener("click", startTotp);
+        $("twofa-totp-confirm").addEventListener("click", confirmTotp);
+        $("twofa-code").addEventListener("keydown", (event) => {
+            if (event.key === "Enter")
+                confirmTotp();
+        });
         $("codes-form").addEventListener("submit", (event) => {
             event.preventDefault();
             if (window.confirm(t("settings.codesConfirm")))

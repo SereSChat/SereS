@@ -20,6 +20,7 @@
     "src/frontend/format.ts",
     "src/frontend/emoji.ts",
     "src/frontend/codes.ts",
+    "src/frontend/passkeys.ts",
     "src/frontend/crypto.ts",
     "src/frontend/login.ts",
     "src/frontend/index.ts",

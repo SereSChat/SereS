@@ -146,6 +146,28 @@ SCHEMA = [
         replaced_at TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_key_history_user ON user_key_history(user_id)",
+    # Two-factor authentication: passkeys (WebAuthn) registered as second factor.
+    """CREATE TABLE IF NOT EXISTS passkeys (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        sign_count INTEGER NOT NULL DEFAULT 0,
+        transports TEXT,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_passkeys_user ON passkeys(user_id)",
+    # Short-lived state of a 2FA step: a login waiting for its second factor,
+    # or a passkey being registered. Only a hash of the token is stored.
+    """CREATE TABLE IF NOT EXISTS twofa_challenges (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        challenge TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        expires_at TEXT NOT NULL
+    )""",
     # Password reset links sent by e-mail. Only a hash of the token is stored.
     """CREATE TABLE IF NOT EXISTS password_resets (
         token_hash TEXT PRIMARY KEY,
@@ -174,6 +196,11 @@ USER_COLUMNS = {
     # Last authenticated request, for "online" / "last seen".
     "last_seen": "TEXT",
     "show_last_seen": "INTEGER NOT NULL DEFAULT 1",
+    # Authenticator app (TOTP): the active secret, one being set up, and the last
+    # used time step so a code can't be used twice.
+    "totp_secret": "TEXT",
+    "totp_pending": "TEXT",
+    "totp_last_step": "INTEGER NOT NULL DEFAULT 0",
 }
 
 
