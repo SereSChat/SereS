@@ -4,6 +4,7 @@ import functools
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import os
 import re
@@ -139,7 +140,24 @@ def rate_limited(key, limit, window):
 
 
 def client_ip():
-    return flask.request.remote_addr or "?"
+    """The visitor's IP for rate limits. Behind a Cloudflare tunnel or a reverse
+    proxy on this server every request comes from localhost, so then the
+    address the proxy passes on is used. Only trusted from localhost, so
+    nobody can choose their own IP with a header."""
+    remote = flask.request.remote_addr or "?"
+    try:
+        local = ipaddress.ip_address(remote).is_loopback
+    except ValueError:
+        local = False
+    if local:
+        headers = flask.request.headers
+        forwarded = headers.get("CF-Connecting-IP") or headers.get("X-Real-IP")
+        if not forwarded and headers.get("X-Forwarded-For"):
+            # The last entry is the one the proxy itself added.
+            forwarded = headers["X-Forwarded-For"].split(",")[-1]
+        if forwarded and forwarded.strip():
+            return forwarded.strip()[:64]
+    return remote
 
 
 def error(message, status=400):
