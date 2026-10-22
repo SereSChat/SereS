@@ -168,6 +168,9 @@ set_env() {
   if grep -q "^$key=" "$file"; then
     sed -i "s|^$key=.*|$key=$value|" "$file"
   else
+    # Without this, the new line would be glued to a last line that has no
+    # line break (as in the .env of the repository).
+    [[ -s "$file" && -n "$(tail -c 1 "$file")" ]] && echo >>"$file"
     printf '%s=%s\n' "$key" "$value" >>"$file"
   fi
 }
