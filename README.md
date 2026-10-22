@@ -142,6 +142,11 @@ All options: [deploy/README.md](deploy/README.md).
   user can't read their **own copy** of old messages anymore (they are hidden for them). The
   other members keep the full history; the old public keys are kept so they can still verify
   old messages. Contacts see a "security key changed" warning, like in WhatsApp.
+- **Getting old messages back after an e-mail reset:** the other members see a notice in the
+  chat and can press **"Share older messages"** (after accepting the new security key). Their
+  browser unwraps the key of every old message it can read and wraps it again for the new keys;
+  the server only stores these wrapped keys, the messages stay end-to-end encrypted and keep
+  their original signature. This also works for resets from before this feature.
 
 ## 🛡️ Two-factor authentication (optional)
 
