@@ -423,3 +423,16 @@ def test_same_origin_post_allowed_behind_proxy(make_client):
     client = make_client()
     res = client.post("/api/logout", headers={"Origin": "https://localhost"})
     assert res.status_code == 200
+
+
+def test_client_ip_behind_tunnel(app_module):
+    def ip(remote, headers=None):
+        with app_module.app.test_request_context("/", headers=headers or {}, environ_base={"REMOTE_ADDR": remote}):
+            return app_module.client_ip()
+
+    # cloudflared / a reverse proxy on the same server passes on the visitor's IP
+    assert ip("127.0.0.1", {"CF-Connecting-IP": "203.0.113.7"}) == "203.0.113.7"
+    assert ip("::1", {"X-Forwarded-For": "198.51.100.1, 203.0.113.8"}) == "203.0.113.8"
+    assert ip("127.0.0.1") == "127.0.0.1"
+    # from the internet the headers are ignored, so nobody picks their own IP
+    assert ip("203.0.113.9", {"CF-Connecting-IP": "1.2.3.4", "X-Forwarded-For": "1.2.3.4"}) == "203.0.113.9"
