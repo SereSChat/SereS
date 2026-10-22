@@ -2586,6 +2586,21 @@ body.bright-body .edit-bar {
   color: #53bdeb;
 }
 
+/* On the green own bubble grey and light blue ticks were almost invisible. */
+.message-own .message-meta {
+  opacity: 1;
+}
+
+.message-own .message-ticks {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.message-own .message-ticks.read {
+  color: #0b3d91;
+}
+
 /* "… is typing" bubble with bouncing dots, bottom left above the input */
 .typing-bubble {
   display: flex;
@@ -3593,12 +3608,22 @@ body.bright-body .codes-list {
 }
 
 .codes-box {
-  width: 480px;
+  width: 520px;
   max-width: 94vw;
+}
+
+/* The numbers sit inside the columns, so "10." no longer runs into the code
+   of the column next to it. */
+.codes-list {
+  list-style-position: inside;
+  padding: 12px 14px;
+  gap: 6px 24px;
 }
 
 .codes-list li {
   white-space: nowrap;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 0.9rem;
 }
 
 .modal-box p.codes-warning {
