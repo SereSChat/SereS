@@ -267,6 +267,7 @@
             case "renamed":
             case "pinned":
             case "keys_reset":
+            case "history_shared":
                 return t("system." + payload.event, {
                     actor: payload.actor ?? "",
                     target: payload.target ?? "",
@@ -281,7 +282,7 @@
         }
     }
     function showMessage(chatId, message) {
-        const cacheKey = message.id + ":" + message.rev;
+        const cacheKey = message.id + ":" + message.rev + (message.share ? ":shared" : "");
         let shown = shownCache.get(cacheKey);
         if (!shown) {
             shown = (async () => {
@@ -297,12 +298,17 @@
                     const sender = known ? { id: known.id, ...keysAt(known, message.created_at) } : null;
                     if (!sender || !sender.pub_ecdh || !sender.pub_sign)
                         throw new Error("unknown sender");
-                    const content = await SeresCrypto.decryptMessage(identity, chatId, message.id, { id: sender.id, pub_ecdh: sender.pub_ecdh, pub_sign: sender.pub_sign }, message.payload);
+                    const content = await SeresCrypto.decryptMessage(identity, chatId, message.id, { id: sender.id, pub_ecdh: sender.pub_ecdh, pub_sign: sender.pub_sign }, message.payload, message.share);
                     const parsed = content && typeof content === "object" ? content : {};
                     return { type: "text", text: String(parsed.text ?? ""), content: parsed };
                 }
                 catch (error) {
                     console.warn("Could not decrypt message", message.id, error);
+                    // From before my own reset by e-mail and nobody shared it.
+                    const resets = userKeys.get(me.id)?.previous_keys || [];
+                    const lastReset = resets.length ? resets[resets.length - 1].until : "";
+                    if (!message.share && message.created_at <= lastReset)
+                        return { type: "error", text: t("history.notShared") };
                     return { type: "error", text: t("msg.decryptError") };
                 }
             })();
@@ -1068,7 +1074,82 @@
                 text: t("chat.keyMissing", { names }),
             }));
         }
+        else {
+            renderHistoryNotice(box, current);
+        }
         box.classList.toggle("modal-hidden", !box.childElementCount);
+    }
+    /** Someone reset their password by e-mail and can't read the older messages. */
+    function renderHistoryNotice(box, opened) {
+        const members = opened.details?.members || [];
+        if (members.find((m) => m.id === me.id)?.history_reset) {
+            box.appendChild(h("span", { text: t("history.mine") }));
+            return;
+        }
+        const waiting = members.filter((m) => m.id !== me.id && m.history_reset && m.pub_ecdh);
+        if (!waiting.length)
+            return;
+        box.appendChild(h("span", { text: t("history.others", { names: waiting.map(nameOf).join(", ") }) }));
+        for (const member of waiting) {
+            const label = waiting.length > 1 ? t("history.shareWith", { name: nameOf(member) }) : t("history.share");
+            const shareButton = button(label, "pill-btn", async () => {
+                shareButton.disabled = true;
+                shareButton.textContent = t("history.sharing");
+                try {
+                    const count = await shareHistory(opened, member);
+                    showAlert(t("history.shared", { name: nameOf(member), count }));
+                }
+                catch (error) {
+                    showAlert(errorText(error));
+                }
+                if (current === opened)
+                    await refreshCurrentDetails().catch(() => { });
+            });
+            box.appendChild(shareButton);
+        }
+    }
+    /**
+     * Gives a member who reset their password by e-mail the older messages back:
+     * every message key this account can read is wrapped again for their new
+     * keys. The messages themselves are not sent again and stay end-to-end encrypted.
+     */
+    async function shareHistory(opened, member) {
+        const range = member.history_reset;
+        const recipient = { id: member.id, pub_ecdh: member.pub_ecdh };
+        const url = `/api/chats/${encodeURIComponent(opened.id)}/history/${encodeURIComponent(member.id)}`;
+        let keys = {};
+        let count = 0;
+        let before = range.until_seq + 1;
+        for (;;) {
+            const data = await api(`/api/chats/${encodeURIComponent(opened.id)}/messages?limit=200&before_seq=${before}`);
+            const page = data.messages;
+            for (const message of page) {
+                if (message.seq <= range.from_seq || message.kind !== "e2e" || message.deleted || !message.payload)
+                    continue;
+                try {
+                    await ensureUserKeys([message.sender_id]);
+                    const known = userKeys.get(message.sender_id);
+                    const sender = known ? { id: known.id, ...keysAt(known, message.created_at) } : null;
+                    if (!sender || !sender.pub_ecdh || !sender.pub_sign)
+                        continue;
+                    keys[message.id] = await SeresCrypto.shareMessageKey(identity, opened.id, message.id, { id: sender.id, pub_ecdh: sender.pub_ecdh, pub_sign: sender.pub_sign }, message.payload, recipient, message.share);
+                    count++;
+                }
+                catch (error) {
+                    // Messages this account can't read itself can't be shared.
+                    console.warn("Could not share message", message.id, error);
+                }
+                if (Object.keys(keys).length >= 200) {
+                    await post(url, { keys });
+                    keys = {};
+                }
+            }
+            if (!data.has_more || !page.length || page[0].seq <= range.from_seq)
+                break;
+            before = page[0].seq;
+        }
+        await post(url, { keys, done: true });
+        return count;
     }
     /** Adds new or changed messages. Unknown messages older than the loaded window are skipped. */
     function mergeMessages(list, includeOlder = false) {
@@ -1110,6 +1191,17 @@
         renderSubtitle();
         const receiptsChanged = JSON.stringify(data.receipts || null) !== JSON.stringify(opened.receipts);
         opened.receipts = data.receipts || null;
+        const events = data.messages
+            .filter((message) => message.kind === "system" && !opened.messages.has(message.id))
+            .map((message) => message.payload || {});
+        if (events.some((event) => event.event === "history_shared" && event.target_id === me.id)) {
+            // My old messages are back: load the chat again from the start.
+            await openChat(opened.id);
+            return;
+        }
+        if (events.some((event) => event.event === "keys_reset" || event.event === "history_shared")) {
+            refreshCurrentDetails().catch(() => { });
+        }
         if (mergeMessages(data.messages) || receiptsChanged) {
             await renderMessages({});
             markRead();

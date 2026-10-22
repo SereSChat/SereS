@@ -12,6 +12,11 @@
 // Messages: a fresh AES-256-GCM key per message encrypts the content. That key
 // is wrapped for every chat member (including the sender) with a pairwise key
 // derived from ECDH(sender, member). The whole envelope is signed with ECDSA.
+//
+// After a password reset by e-mail an account has new keys and can't unwrap
+// its old message keys any more. Another member who still can unwraps them
+// and wraps each one again for the new keys ("shared key"); the content and
+// the sender's signature stay the same, the server never sees a message key.
 const SeresCrypto = (() => {
     const subtle = window.crypto.subtle;
     const encoder = new TextEncoder();
@@ -242,6 +247,9 @@ const SeresCrypto = (() => {
     function keyAad(messageId, recipientId) {
         return encoder.encode(["seres-key-v1", messageId, recipientId].join("|"));
     }
+    function shareAad(messageId, recipientId) {
+        return encoder.encode(["seres-share-v1", messageId, recipientId].join("|"));
+    }
     async function encryptMessage(identity, chatId, messageId, content, members) {
         const messageKey = await subtle.generateKey({ name: "AES-GCM", length: 256 }, true, [
             "encrypt",
@@ -261,14 +269,24 @@ const SeresCrypto = (() => {
         const sig = await subtle.sign({ name: "ECDSA", hash: "SHA-256" }, identity.signPriv, signingInput(chatId, messageId, identity.userId, ivB64, ctB64, keys));
         return { v: 1, iv: ivB64, ct: ctB64, sig: toB64(sig), keys };
     }
-    async function decryptMessage(identity, chatId, messageId, sender, envelope) {
+    async function verifyEnvelope(chatId, messageId, sender, envelope) {
         const verified = await subtle.verify({ name: "ECDSA", hash: "SHA-256" }, await importSignPublic(sender.pub_sign), fromB64(envelope.sig), signingInput(chatId, messageId, sender.id, envelope.iv, envelope.ct, envelope.keys));
         if (!verified)
             throw new Error("Invalid signature");
+    }
+    /** The raw message key: from the envelope, or from a key someone shared. */
+    async function messageKeyBytes(identity, messageId, sender, envelope, share) {
+        if (share) {
+            return subtle.decrypt({ name: "AES-GCM", iv: fromB64(share.iv), additionalData: shareAad(messageId, identity.userId) }, await pairKey(identity, share.from_pub), fromB64(share.k));
+        }
         const mine = envelope.keys[identity.userId];
         if (!mine)
             throw new Error("Message was not encrypted for this account");
-        const rawKey = await subtle.decrypt({ name: "AES-GCM", iv: fromB64(mine.iv), additionalData: keyAad(messageId, identity.userId) }, await pairKey(identity, sender.pub_ecdh), fromB64(mine.k));
+        return subtle.decrypt({ name: "AES-GCM", iv: fromB64(mine.iv), additionalData: keyAad(messageId, identity.userId) }, await pairKey(identity, sender.pub_ecdh), fromB64(mine.k));
+    }
+    async function decryptMessage(identity, chatId, messageId, sender, envelope, share) {
+        await verifyEnvelope(chatId, messageId, sender, envelope);
+        const rawKey = await messageKeyBytes(identity, messageId, sender, envelope, share);
         const messageKey = await subtle.importKey("raw", rawKey, "AES-GCM", false, ["decrypt"]);
         const plain = await subtle.decrypt({
             name: "AES-GCM",
@@ -276,6 +294,16 @@ const SeresCrypto = (() => {
             additionalData: contentAad(chatId, messageId, sender.id),
         }, messageKey, fromB64(envelope.ct));
         return JSON.parse(decoder.decode(plain));
+    }
+    /** Wraps the key of a message this account can read for someone who reset their keys. */
+    async function shareMessageKey(identity, chatId, messageId, sender, envelope, recipient, ownShare) {
+        // Never pass on a message whose signature doesn't hold.
+        await verifyEnvelope(chatId, messageId, sender, envelope);
+        const rawKey = new Uint8Array(await messageKeyBytes(identity, messageId, sender, envelope, ownShare));
+        const iv = randomBytes(12);
+        const wrapped = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: shareAad(messageId, recipient.id) }, await pairKey(identity, recipient.pub_ecdh), rawKey);
+        rawKey.fill(0);
+        return { iv: toB64(iv), k: toB64(wrapped) };
     }
     // ----------------------------------------------------------- backup codes
     // Each code looks like "K7QF-2M9X-HP4C-ZT8B". The first group is a public
@@ -368,6 +396,7 @@ const SeresCrypto = (() => {
         safetyNumber,
         encryptMessage,
         decryptMessage,
+        shareMessageKey,
     };
 })();
 window.SeresCrypto = SeresCrypto;
