@@ -142,7 +142,6 @@
     outgoing: [] as UserRef[],
     blocked: [] as UserRef[],
   };
-  let currentView: "chats" | "friends" | "requests" = "chats";
   let current: OpenChat | null = null;
   let chatsSignature = "";
   let friendsSignature = "";
@@ -327,25 +326,6 @@
     return date.toDateString() === new Date().toDateString()
       ? formatTime(iso)
       : date.toLocaleDateString(SeresI18n.getLanguage(), { day: "2-digit", month: "2-digit" });
-  }
-
-  /** Text with clickable http(s) links, built without innerHTML. */
-  function richText(text: string) {
-    const fragment = document.createDocumentFragment();
-    const pattern = /\bhttps?:\/\/[^\s<>"]+/g;
-    let last = 0;
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(text))) {
-      if (match.index > last) fragment.appendChild(document.createTextNode(text.slice(last, match.index)));
-      const link = h("a", {
-        text: match[0],
-        attrs: { href: match[0], target: "_blank", rel: "noopener noreferrer nofollow" },
-      });
-      fragment.appendChild(link);
-      last = match.index + match[0].length;
-    }
-    if (last < text.length) fragment.appendChild(document.createTextNode(text.slice(last)));
-    return fragment;
   }
 
   // ------------------------------------------------------------------ keys
@@ -987,7 +967,6 @@
   }
 
   function switchView(view: "chats" | "friends" | "requests") {
-    currentView = view;
     document.querySelectorAll<HTMLElement>(".list-view-toggle").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.view === view);
     });

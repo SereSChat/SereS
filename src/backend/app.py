@@ -924,7 +924,8 @@ def credential_descriptors(user_id):
             try:
                 transports.append(AuthenticatorTransport(name))
             except ValueError:
-                pass
+                # A transport this webauthn version doesn't know: leave it out.
+                continue
         descriptors.append(
             PublicKeyCredentialDescriptor(id=webauthn.base64url_to_bytes(row["id"]), transports=transports or None)
         )
@@ -2388,7 +2389,8 @@ def remove_file_blob(file_id):
     try:
         os.remove(file_path(file_id))
     except FileNotFoundError:
-        pass
+        # Already gone, nothing to remove.
+        return
 
 
 def forget_message_data(conn, chat_id, message_ids):

@@ -3,8 +3,6 @@ preferences, disappearing messages and last seen."""
 
 import uuid
 
-import pytest
-
 from test_api import alice_bob, envelope, user  # noqa: F401  (fixtures/helpers)
 
 
