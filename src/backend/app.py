@@ -1292,11 +1292,21 @@ def confirm_password_reset():
         # Backup codes wrapped the old keys, they are useless now.
         conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user["id"],))
         conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user["id"],))
-        for chat in conn.execute("SELECT chat_id FROM chat_members WHERE user_id = ?", (user["id"],)).fetchall():
-            # The old messages can't be decrypted with the new keys: hide them for this user only.
+        # Shared keys were wrapped for the old keys as well.
+        conn.execute("DELETE FROM message_key_shares WHERE recipient_id = ?", (user["id"],))
+        for chat in conn.execute(
+            "SELECT chat_id, joined_seq, cleared_seq, reset_seq, reset_cleared_seq FROM chat_members WHERE user_id = ?",
+            (user["id"],),
+        ).fetchall():
+            # The old messages can't be decrypted with the new keys: hide them for
+            # this user until another member shares them again.
+            until = max_seq(conn, chat["chat_id"])
+            before = chat["reset_cleared_seq"] if chat["reset_seq"] else chat["cleared_seq"]
+            waiting = until if db.has_encrypted_between(conn, chat["chat_id"], max(chat["joined_seq"], before), until) else 0
             conn.execute(
-                "UPDATE chat_members SET cleared_seq = ? WHERE chat_id = ? AND user_id = ?",
-                (max_seq(conn, chat["chat_id"]), chat["chat_id"], user["id"]),
+                """UPDATE chat_members SET cleared_seq = ?, reset_seq = ?, reset_cleared_seq = ?
+                   WHERE chat_id = ? AND user_id = ?""",
+                (until, waiting, before if waiting else 0, chat["chat_id"], user["id"]),
             )
             add_system_message(conn, chat["chat_id"], "keys_reset", actor=display_name(user))
     return login_response(user["id"])
@@ -1760,11 +1770,41 @@ def require_membership(chat_id):
 def chat_members(chat_id):
     return get_db().execute(
         """SELECT u.id, u.username, u.display_name, u.pub_ecdh, u.pub_sign, m.role,
-                  u.last_seen, u.show_last_seen
+                  u.last_seen, u.show_last_seen, m.joined_seq, m.reset_seq, m.reset_cleared_seq
            FROM chat_members m JOIN users u ON u.id = m.user_id
            WHERE m.chat_id = ? ORDER BY m.joined_at, u.username COLLATE NOCASE""",
         (chat_id,),
     ).fetchall()
+
+
+def history_reset(member):
+    """Messages a member can't read since a reset by e-mail, or None."""
+    if not member["reset_seq"]:
+        return None
+    return {
+        "from_seq": max(member["joined_seq"], member["reset_cleared_seq"]),
+        "until_seq": member["reset_seq"],
+    }
+
+
+def with_shared_keys(messages, user_id):
+    """Adds the message keys others shared with this user after a reset."""
+    ids = [message["id"] for message in messages]
+    if not ids:
+        return messages
+    placeholders = ",".join("?" * len(ids))
+    shares = {
+        row["message_id"]: {"iv": row["iv"], "k": row["k"], "from_pub": row["sharer_pub_ecdh"]}
+        for row in get_db().execute(
+            f"""SELECT message_id, iv, k, sharer_pub_ecdh FROM message_key_shares
+                WHERE recipient_id = ? AND message_id IN ({placeholders})""",
+            [user_id, *ids],
+        )
+    }
+    for message in messages:
+        if message["id"] in shares:
+            message["share"] = shares[message["id"]]
+    return messages
 
 
 def max_seq(conn, chat_id):
@@ -1993,6 +2033,7 @@ def chat_details(chat_id):
             "pub_sign": row["pub_sign"],
             "previous_keys": history.get(row["id"], []),
             "role": row["role"],
+            "history_reset": history_reset(row),
         }
         for row in members
     ]
@@ -2026,7 +2067,7 @@ def get_chat_messages(chat_id):
         advance_receipt(conn, chat_id, current_user()["id"], "delivered", max(row["seq"] for row in rows))
         conn.commit()
     return ok(
-        messages=[serialize_message(row) for row in rows],
+        messages=with_shared_keys([serialize_message(row) for row in rows], current_user()["id"]),
         has_more=len(rows) == limit,
         typing=typing_users(chat_id, current_user()["id"]),
         receipts=member_receipts(chat_id, current_user()["id"]),
@@ -2420,6 +2461,7 @@ def forget_message_data(conn, chat_id, message_ids):
         conn.execute(
             "DELETE FROM pinned_messages WHERE chat_id = ? AND message_id = ?", (chat_id, message_id)
         )
+        conn.execute("DELETE FROM message_key_shares WHERE message_id = ?", (message_id,))
 
 
 _last_purge = [0.0]
@@ -2524,7 +2566,73 @@ def get_single_message(chat_id, message_id):
     )
     if row is None:
         return error("Message not found", 404)
-    return ok(message=serialize_message(row))
+    return ok(message=with_shared_keys([serialize_message(row)], current_user()["id"])[0])
+
+
+@app.route("/api/chats/<chat_id>/history/<user_id>", methods=["POST"])
+@login_required
+def share_history(chat_id, user_id):
+    """A member who can still read the old messages gives them to someone who
+    reset their password by e-mail: each message key, wrapped again for the
+    new keys. Sent in parts; the last part has "done": true."""
+    me = current_user()
+    chat = require_membership(chat_id)
+    if user_id == me["id"]:
+        return error("You can't share the history with yourself")
+    conn = get_db()
+    target = conn.execute(
+        "SELECT * FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user_id)
+    ).fetchone()
+    if target is None:
+        return error("Chat not found", 404)
+    if not target["reset_seq"]:
+        return error("There is nothing to share", 409)
+    data = json_body()
+    keys = data.get("keys") or {}
+    if not isinstance(keys, dict) or len(keys) > 500:
+        return error("Invalid keys")
+    for message_id, wrapped in keys.items():
+        if not isinstance(message_id, str) or len(message_id) > 64 or not isinstance(wrapped, dict):
+            return error("Invalid keys")
+        for field, max_len in (("iv", 64), ("k", 128)):
+            value = wrapped.get(field)
+            if not isinstance(value, str) or not value or len(value) > max_len or not B64_RE.match(value):
+                return error("Invalid keys")
+    # Only messages the target lost and the sharer can see.
+    lowest = max(target["joined_seq"], target["reset_cleared_seq"], chat["joined_seq"], chat["cleared_seq"])
+    stored = 0
+    with db.write_transaction(conn):
+        if keys:
+            placeholders = ",".join("?" * len(keys))
+            rows = conn.execute(
+                f"""SELECT id FROM messages WHERE chat_id = ? AND id IN ({placeholders})
+                    AND kind = 'e2e' AND deleted = 0 AND seq > ? AND seq <= ?""",
+                [chat_id, *keys, lowest, target["reset_seq"]],
+            ).fetchall()
+            for row in rows:
+                wrapped = keys[row["id"]]
+                stored += conn.execute(
+                    """INSERT OR IGNORE INTO message_key_shares
+                       (message_id, recipient_id, sharer_id, sharer_pub_ecdh, iv, k, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (row["id"], user_id, me["id"], me["pub_ecdh"], wrapped["iv"], wrapped["k"], db.now_iso()),
+                ).rowcount
+        if data.get("done") is True:
+            # Show the old messages again; without a shared key they say so.
+            conn.execute(
+                """UPDATE chat_members SET cleared_seq = MIN(cleared_seq, ?), reset_seq = 0, reset_cleared_seq = 0
+                   WHERE chat_id = ? AND user_id = ? AND cleared_seq <= reset_seq""",
+                (target["reset_cleared_seq"], chat_id, user_id),
+            )
+            conn.execute(
+                "UPDATE chat_members SET reset_seq = 0, reset_cleared_seq = 0 WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            )
+            other = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            add_system_message(
+                conn, chat_id, "history_shared", actor=display_name(me), target=display_name(other), target_id=user_id
+            )
+    return ok(stored=stored)
 
 
 def chat_pins(chat):

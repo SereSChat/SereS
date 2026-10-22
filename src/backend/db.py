@@ -168,6 +168,20 @@ SCHEMA = [
         attempts INTEGER NOT NULL DEFAULT 0,
         expires_at TEXT NOT NULL
     )""",
+    # After a reset by e-mail the old messages can't be decrypted with the new
+    # keys. A member who can still read a message wraps its message key again
+    # for the new keys of `recipient_id`; the server only stores that wrapped key.
+    """CREATE TABLE IF NOT EXISTS message_key_shares (
+        message_id TEXT NOT NULL,
+        recipient_id TEXT NOT NULL,
+        sharer_id TEXT NOT NULL,
+        sharer_pub_ecdh TEXT NOT NULL,
+        iv TEXT NOT NULL,
+        k TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (message_id, recipient_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_key_shares_recipient ON message_key_shares(recipient_id)",
     # Password reset links sent by e-mail. Only a hash of the token is stored.
     """CREATE TABLE IF NOT EXISTS password_resets (
         token_hash TEXT PRIMARY KEY,
@@ -226,6 +240,11 @@ EXTRA_COLUMNS = {
         # Per member: chat pinned to the top / moved to the archive.
         "pinned": "INTEGER NOT NULL DEFAULT 0",
         "archived": "INTEGER NOT NULL DEFAULT 0",
+        # Reset by e-mail: messages up to reset_seq were encrypted for the old
+        # keys and wait for another member to share them again (0 = nothing
+        # waiting). reset_cleared_seq is what the member had cleared before.
+        "reset_seq": "INTEGER NOT NULL DEFAULT 0",
+        "reset_cleared_seq": "INTEGER NOT NULL DEFAULT 0",
     },
     "messages": {
         "edited_at": "TEXT",
@@ -247,10 +266,53 @@ def _migrate_columns(conn):
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _mark_earlier_key_resets(conn):
+    """Once: resets by e-mail from before reset_seq existed also wait for their
+    history to be shared again. Their chats were hidden up to the reset."""
+    if get_meta(conn, "key_resets_marked"):
+        return
+    resets = conn.execute(
+        "SELECT user_id, MAX(replaced_at) AS at FROM user_key_history GROUP BY user_id"
+    ).fetchall()
+    for reset in resets:
+        members = conn.execute(
+            "SELECT chat_id, joined_seq, cleared_seq FROM chat_members WHERE user_id = ? AND reset_seq = 0",
+            (reset["user_id"],),
+        ).fetchall()
+        for member in members:
+            until = conn.execute(
+                """SELECT COALESCE(MAX(seq), 0) AS s FROM messages
+                   WHERE chat_id = ? AND kind != 'system' AND created_at <= ?""",
+                (member["chat_id"], reset["at"]),
+            ).fetchone()["s"]
+            # Still hidden since the reset, and there is something to share.
+            if member["cleared_seq"] < until or not has_encrypted_between(
+                conn, member["chat_id"], member["joined_seq"], until
+            ):
+                continue
+            conn.execute(
+                "UPDATE chat_members SET reset_seq = ?, reset_cleared_seq = 0 WHERE chat_id = ? AND user_id = ?",
+                (until, member["chat_id"], reset["user_id"]),
+            )
+    set_meta(conn, "key_resets_marked", "1")
+
+
+def has_encrypted_between(conn, chat_id, after_seq, until_seq):
+    return (
+        conn.execute(
+            """SELECT 1 FROM messages WHERE chat_id = ? AND kind = 'e2e' AND deleted = 0
+               AND seq > ? AND seq <= ? LIMIT 1""",
+            (chat_id, after_seq, until_seq),
+        ).fetchone()
+        is not None
+    )
+
+
 def init_schema(conn):
     for statement in SCHEMA:
         conn.execute(statement)
     _migrate_columns(conn)
+    _mark_earlier_key_resets(conn)
     for statement in LATE_INDEXES:
         conn.execute(statement)
     try:
