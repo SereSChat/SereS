@@ -86,6 +86,23 @@ Optional environment variables: `PORT`, `HOST`, `SERES_DEBUG=1` (never in produc
 
 ---
 
+## 🖥️ Install on a server (Ubuntu / Debian)
+
+One script installs everything that is missing (Python + venv, git, Node.js + npm, pm2),
+downloads SereS, sets up the venv and keeps SereS running with pm2, also after a reboot:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/SereSChat/SereS/main/deploy/install.sh
+bash install.sh --public-url https://beta.seres-chat.com --rp-id seres-chat.com
+```
+
+Run it as the user SereS should run as (it asks for `sudo`). SereS then listens on
+`http://localhost:2222`; point your Cloudflare tunnel or reverse proxy there. To update
+later, run `~/SereS/deploy/install.sh` again: it pulls the newest version and restarts SereS.
+All options: [deploy/README.md](deploy/README.md).
+
+---
+
 ## 🔒 How the end-to-end encryption works
 
 - **Your password never reaches the server in usable form.** The browser derives a master key with

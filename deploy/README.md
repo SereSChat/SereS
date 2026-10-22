@@ -1,3 +1,41 @@
+# Server setup: install SereS
+
+`install.sh` installs SereS on Ubuntu / Debian and keeps it running with pm2. Run it as the user
+SereS should run as (not root); it asks for `sudo` for the system packages.
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/SereSChat/SereS/main/deploy/install.sh
+bash install.sh --public-url https://beta.seres-chat.com --rp-id seres-chat.com
+```
+
+What it does (everything that is already there is kept):
+
+1. installs Python 3 + venv, git and curl with `apt`
+2. installs Node.js 22 with npm (NodeSource) if there is no Node.js 18 or newer, then `pm2`
+3. clones SereS to `~/SereS` – or, if SereS is already there, updates it with `git pull`
+4. creates `.venv` and installs `requirements.txt` and `gunicorn`
+5. writes `ecosystem.config.js` (gunicorn with `--preload`, on `127.0.0.1` and `::1`) and starts
+   SereS with pm2
+6. sets up `pm2 startup`, so SereS starts again after a reboot, and checks that it answers
+
+| Option | Meaning |
+| --- | --- |
+| `--port` | Port SereS listens on, default `2222` |
+| `--workers` | Number of gunicorn workers, default `4` |
+| `--public-url` | Address of SereS, for the links in mails and for passkeys |
+| `--rp-id` | Domain for passkeys, e.g. `seres-chat.com` (works for all subdomains) |
+| `--dir` | Where SereS is installed, default `~/SereS` |
+| `--branch` | Git branch for a new download, default `main` |
+| `--name` | Name in pm2, default `SereS` |
+| `--no-pull` | Don't run `git pull` |
+| `--no-ipv6` | Only listen on `127.0.0.1` |
+| `--no-startup` | Don't start SereS automatically after a reboot |
+
+**Update:** run `~/SereS/deploy/install.sh` again. `--public-url` and `--rp-id` are remembered
+from the last run. If files in the checkout were changed by hand, the `git pull` is skipped.
+
+---
+
 # Server setup: e-mail for password resets
 
 `setup-mailserver.sh` turns an Ubuntu 22.04 / 24.04 server into a **send-only** mail server for
