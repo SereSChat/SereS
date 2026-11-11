@@ -257,13 +257,29 @@
     return api(path, { method: "POST", body });
   }
 
-  let alertTimer: number | null = null;
-  function showAlert(message: string) {
-    const box = $("alert");
-    $("alert-text").textContent = message;
-    box.classList.remove("hidden");
-    if (alertTimer !== null) clearTimeout(alertTimer);
-    alertTimer = window.setTimeout(() => box.classList.add("hidden"), 4000);
+  function showAlert(message: string, duration = 4200) {
+    const stack = $("toast-stack");
+    const toast = h("div", { className: "app-toast", attrs: { role: "status" } }, [
+      h("span", { className: "material-symbols-rounded app-toast-icon", text: "info" }),
+      h("span", { className: "app-toast-message", text: message }),
+    ]);
+    const close = h("button", { className: "app-toast-close", attrs: { type: "button", "aria-label": t("common.close") } }, [
+      h("span", { className: "material-symbols-rounded", text: "close" }),
+    ]);
+    toast.appendChild(close);
+    stack.appendChild(toast);
+    while (stack.childElementCount > 4) stack.firstElementChild?.remove();
+    const dismiss = () => {
+      toast.classList.add("app-toast-exit");
+      window.setTimeout(() => toast.remove(), 220);
+    };
+    const timer = window.setTimeout(dismiss, duration);
+    close.addEventListener("click", (event) => {
+      event.stopPropagation();
+      clearTimeout(timer);
+      dismiss();
+    });
+    window.requestAnimationFrame(() => toast.classList.add("app-toast-visible"));
   }
 
   function errorText(error: unknown) {
@@ -514,6 +530,24 @@
     );
   }
 
+  window.addEventListener("seres:notification", (event) => {
+    if (!notificationsEnabled()) return;
+    const detail = (event as CustomEvent<{ title: string; body: string; tag: string; onClick?: () => void }>).detail;
+    if (!detail) return;
+    const body = readStore("settings").preview === "off" ? t("notify.newMessage") : detail.body;
+    try {
+      const note = new Notification(detail.title, { body, tag: detail.tag, icon: "assets/favicon.png" });
+      note.onclick = () => {
+        window.focus();
+        detail.onClick?.();
+        note.close();
+      };
+    } catch {
+      /* Notifications may be unavailable in some browsers. */
+    }
+  });
+  window.addEventListener("seres:open-matrix", () => switchView("matrix"));
+
   /** Shows a desktop notification for chats that got new messages while you were away. */
   function notifyNewMessages(previews: (Shown | null)[]) {
     const counts = new Map(chats.map((chat) => [chat.id, chat.unread] as [string, number]));
@@ -581,8 +615,8 @@
           : file.kind === "voice"
             ? t("file.voice", { duration: formatDuration(file.duration || 0) })
             : file.kind === "audio"
-              ? "🎵 " + file.name
-              : "📎 " + file.name;
+              ? file.name
+              : file.name;
     return text ? label + " · " + text : label;
   }
 
@@ -610,7 +644,7 @@
     const archivedCount = chats.filter((chat) => chat.archived).length;
     if (archivedCount && !filter) {
       const toggle = h("div", { className: "list-item archive-toggle" }, [
-        h("div", { className: "avatar archive-icon", text: showArchived ? "←" : "🗄️" }),
+        h("div", { className: "avatar archive-icon" }, [h("span", { className: "material-symbols-rounded", text: showArchived ? "arrow_back" : "archive" })]),
         h("div", { className: "item-info" }, [
           h("span", { className: "item-name", text: showArchived ? t("archive.back") : t("archive.title") }),
           h("span", { className: "item-status", text: t("archive.count", { count: archivedCount }) }),
@@ -636,11 +670,11 @@
       const nameRow = h("div", { className: "item-row" }, [
         h("span", { className: "item-name" }, [
           document.createTextNode(chat.name),
-          chat.muted ? h("span", { className: "muted-icon", text: "🔕", title: t("chat.muted") }) : null,
-          chat.disappear_seconds ? h("span", { className: "muted-icon", text: "⏱️", title: t("disappear.title") }) : null,
+          chat.muted ? h("span", { className: "material-symbols-rounded muted-icon", text: "notifications_off", title: t("chat.muted") }) : null,
+          chat.disappear_seconds ? h("span", { className: "material-symbols-rounded muted-icon", text: "timer", title: t("disappear.title") }) : null,
         ]),
         h("span", { className: "item-time" }, [
-          chat.pinned ? h("span", { className: "pin-icon", text: "📌", title: t("chatMenu.pinned") }) : null,
+          chat.pinned ? h("span", { className: "material-symbols-rounded pin-icon", text: "push_pin", title: t("chatMenu.pinned") }) : null,
           document.createTextNode(formatListTime(chat.last_activity)),
         ]),
       ]);
@@ -895,7 +929,7 @@
           })
         : null,
       button(
-        isGroup ? "🚪 " + t("info.leave") : "🗑️ " + t("info.deleteChat"),
+        t(isGroup ? "info.leave" : "info.deleteChat"),
         "floating-item danger",
         action(
           isGroup ? "leave" : "delete",
@@ -951,8 +985,14 @@
 
   function renderRequests() {
     const list = $("requests-list");
+    const filter = (($("list-search") as HTMLInputElement).value || "").trim().toLowerCase();
     list.textContent = "";
-    if (!friends.incoming.length) {
+    const incoming = friends.incoming.filter((user) =>
+      !filter || user.username.toLowerCase().includes(filter) || nameOf(user).toLowerCase().includes(filter),
+    );
+    if (!incoming.length && filter) {
+      list.appendChild(h("div", { className: "list-empty", text: t("search.none") }));
+    } else if (!incoming.length) {
       list.appendChild(
         h("div", { className: "list-item request-list-item" }, [
           h("div", { className: "avatar", text: "!" }),
@@ -963,7 +1003,7 @@
         ]),
       );
     }
-    friends.incoming.forEach((user) => {
+    incoming.forEach((user) => {
       list.appendChild(
         userRow(user, t("requests.wants"), [
           button(t("requests.accept"), "request-action-btn accept", async () => {
@@ -987,7 +1027,8 @@
     applyTheme();
   }
 
-  function switchView(view: "chats" | "friends" | "requests") {
+  function switchView(view: "chats" | "friends" | "requests" | "matrix") {
+    document.querySelector<HTMLElement>(".list-container")!.scrollTop = 0;
     document.querySelectorAll<HTMLElement>(".list-view-toggle").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.view === view);
     });
@@ -995,7 +1036,21 @@
       panel.classList.toggle("active", panel.dataset.panel === view);
     });
     $("chats-header").style.display = view === "chats" ? "flex" : "none";
-    $("list-search").parentElement!.style.display = view === "requests" ? "none" : "block";
+    $("friends-header").style.display = view === "friends" ? "flex" : "none";
+    $("requests-header").style.display = view === "requests" ? "flex" : "none";
+    $("list-search").parentElement!.style.display = view === "matrix" ? "none" : "block";
+    document.querySelectorAll<HTMLElement>(".rail-nav[data-rail-view]").forEach((button) => {
+      const selected = button.dataset.railView === view;
+      button.classList.toggle("active", selected);
+      if (selected) button.setAttribute("aria-current", "page");
+      else button.removeAttribute("aria-current");
+    });
+    const matrixOpen = view === "matrix";
+    document.querySelector(".main-chat")?.classList.toggle("matrix-open", matrixOpen);
+    $("matrix-app-root").classList.toggle("modal-hidden", !matrixOpen);
+    const matrixController = (window as Window & { SeresMatrix?: { activate(): void; deactivate(): void } }).SeresMatrix;
+    if (matrixOpen) matrixController?.activate();
+    else matrixController?.deactivate();
   }
 
   // ------------------------------------------------------------ open chat
@@ -1094,7 +1149,7 @@
 
   function emptyState() {
     return h("div", { className: "empty-state" }, [
-      h("div", { className: "empty-state-icon", text: "💬" }),
+      h("div", { className: "empty-state-icon material-symbols-rounded", text: "chat_bubble" }),
       h("h2", { text: "SereS" }),
       h("p", { text: t("app.emptyState") }),
     ]);
@@ -1121,7 +1176,7 @@
           : details.presence
             ? presenceText(details.presence)
             : t("chat.dmSub");
-    if (details.disappear_seconds) opened.subtitle = "⏱️ " + disappearLabel(details.disappear_seconds) + " · " + opened.subtitle;
+    if (details.disappear_seconds) opened.subtitle = disappearLabel(details.disappear_seconds) + " · " + opened.subtitle;
     renderSubtitle();
     renderKeyWarning();
     renderPinnedBar().catch(() => {});
@@ -1162,7 +1217,7 @@
     const shown = message ? await showMessage(opened.id, message) : null;
     bar.textContent = "";
     bar.append(
-      h("span", { className: "pinned-icon", text: "📌" }),
+      h("span", { className: "material-symbols-rounded pinned-icon", text: "push_pin" }),
       h("div", { className: "pinned-text" }, [
         h("strong", { text: pins.length > 1 ? t("pins.count", { count: pins.length }) : t("pins.one") }),
         h("span", { text: shown ? contentPreview(shown) : "…" }),
@@ -1578,7 +1633,7 @@
 
     if (view.type === "deleted" || view.type === "error") {
       bubble.classList.add("message-muted");
-      bubble.appendChild(document.createTextNode(view.type === "deleted" ? "🚫 " + view.text : view.text));
+      bubble.appendChild(document.createTextNode(view.text));
     } else if (view.text) {
       const myNames = [me.username.toLowerCase(), nameOf(me).toLowerCase()];
       const formatted = SeresFormat.render(view.text, { myNames, onMention: (name) => openProfile(name) });
@@ -1589,7 +1644,7 @@
     }
 
     const meta = h("span", { className: "message-meta" });
-    if (message.expires_at) meta.appendChild(h("span", { className: "message-expiry", text: "⏱️", title: t("disappear.expires", { time: formatDateTime(message.expires_at) }) }));
+    if (message.expires_at) meta.appendChild(h("span", { className: "material-symbols-rounded message-expiry", text: "timer", title: t("disappear.expires", { time: formatDateTime(message.expires_at) }) }));
     if (message.edited_at) meta.appendChild(h("span", { className: "message-edited", text: t("msg.edited") }));
     if (compact) meta.appendChild(h("span", { className: "message-time-inline", text: formatTime(message.created_at) }));
     if (own && message.kind === "e2e") meta.appendChild(ticks(opened, message));
@@ -1738,7 +1793,7 @@
       const isVideo = file.kind === "video";
       const media = h(isVideo ? "video" : "audio", { className: isVideo ? "message-video" : "message-audio", attrs: { controls: "", preload: "metadata" } });
       const wrap = h("div", { className: "message-media" + (file.kind === "voice" ? " voice" : "") }, [
-        file.kind === "voice" ? h("span", { className: "voice-icon", text: "🎤" }) : null,
+        file.kind === "voice" ? h("span", { className: "material-symbols-rounded voice-icon", text: "mic" }) : null,
         media,
       ]);
       fileUrl(chatId, file)
@@ -1747,7 +1802,7 @@
       return wrap;
     }
     const card = h("div", { className: "file-card" }, [
-      h("span", { className: "file-icon", text: "📄" }),
+      h("span", { className: "material-symbols-rounded file-icon", text: "description" }),
       h("div", { className: "file-info" }, [
         h("strong", { text: file.name }),
         h("span", { text: formatSize(file.size) }),
@@ -1830,14 +1885,14 @@
     element.addEventListener("touchcancel", end);
   }
 
-  /** ✓ sent, ✓✓ delivered to everyone, blue ✓✓ seen by everyone. */
+  /** Symbol indicators show sent, delivered, and read status. */
   function ticks(opened: OpenChat, message: Message) {
     const receipts = opened.receipts;
     const read = !!receipts && receipts.read_seq >= message.seq;
     const delivered = read || (!!receipts && receipts.delivered_seq >= message.seq);
     return h("span", {
-      className: "message-ticks" + (read ? " read" : delivered ? " delivered" : ""),
-      text: delivered ? "✓✓" : "✓",
+      className: "message-ticks material-symbols-rounded" + (read ? " read" : delivered ? " delivered" : ""),
+      text: delivered ? "done_all" : "check",
       title: t(read ? "msgInfo.read" : delivered ? "msgInfo.delivered" : "msgInfo.sent"),
     });
   }
@@ -1942,11 +1997,11 @@
     body.textContent = "";
     const line = (icon: string, label: string, done: boolean, at: string | null) =>
       h("div", { className: "info-line" + (done ? " done" : "") }, [
-        h("span", { className: "info-icon", text: icon }),
+        h("span", { className: "info-icon material-symbols-rounded", text: icon }),
         h("span", { className: "info-label", text: label }),
-        h("span", { className: "info-time", text: done ? (at ? formatDateTime(at) : "✓") : t("msgInfo.notYet") }),
+        h("span", { className: "info-time" }, [done ? (at ? document.createTextNode(formatDateTime(at)) : h("span", { className: "material-symbols-rounded", text: "check" })) : document.createTextNode(t("msgInfo.notYet"))]),
       ]);
-    body.appendChild(line("🕓", t("msgInfo.sent"), true, data.sent_at));
+    body.appendChild(line("schedule", t("msgInfo.sent"), true, data.sent_at));
     if (!data.members.length) body.appendChild(h("p", { className: "list-hint", text: t("msgInfo.noRecipients") }));
     for (const member of data.members) {
       body.appendChild(
@@ -1955,8 +2010,8 @@
             avatarEl(member.username, { label: nameOf(member) }),
             h("strong", { text: nameOf(member) }),
           ]),
-          line("✓", t("msgInfo.delivered"), member.delivered, member.delivered_at),
-          line("✓✓", t("msgInfo.read"), member.read, member.read_at),
+          line("check", t("msgInfo.delivered"), member.delivered, member.delivered_at),
+          line("done_all", t("msgInfo.read"), member.read, member.read_at),
         ]),
       );
     }
@@ -2831,7 +2886,7 @@
           const code = await SeresCrypto.safetyNumber(myFp, fp);
           row.appendChild(
             button(t("info.code"), "request-action-btn more", () => {
-              window.alert(t("info.codeAlert", { name: nameOf(member), code }));
+              showAlert(t("info.codeAlert", { name: nameOf(member), code }), 10000);
             }),
           );
           row.appendChild(verifyToggle(member.id, fp, verified, true));
@@ -2957,7 +3012,7 @@
       avatarEl(user.username, { className: "avatar profile-avatar", label: name }),
       h("h3", { className: "profile-name", text: name }),
       h("span", { className: "profile-username", text: "@" + user.username }),
-      h("span", { className: "profile-status", text: (data.muted ? "🔕 " : "") + status }),
+      h("span", { className: "profile-status" }, [data.muted ? h("span", { className: "material-symbols-rounded", text: "notifications_off" }) : null, document.createTextNode(status)]),
     );
     if (data.presence) {
       head.appendChild(
@@ -3058,7 +3113,7 @@
 
   async function uploadAvatar() {
     const input = $("avatar-upload-input") as HTMLInputElement;
-    const warning = $("settings-warning");
+    const warning = $("avatar-warning");
     warning.textContent = "";
     const file = input.files && input.files[0];
     if (!file) {
@@ -3085,7 +3140,7 @@
   }
 
   async function changePassword() {
-    const warning = $("settings-warning");
+    const warning = $("password-warning");
     const oldPw = ($("old-password") as HTMLInputElement).value;
     const newPw = ($("new-password") as HTMLInputElement).value;
     const repeat = ($("new-password-repeat") as HTMLInputElement).value;
@@ -3207,7 +3262,7 @@
   }
 
   async function saveDisplayName() {
-    const warning = $("settings-warning");
+    const warning = $("display-name-warning");
     warning.textContent = "";
     try {
       const data = await post("/api/profile/display_name", {
@@ -3278,7 +3333,7 @@
     for (const passkey of data.passkeys) {
       list.appendChild(
         h("div", { className: "twofa-item" }, [
-          h("span", { text: "🔑 " + passkey.name }),
+          h("span", {}, [h("span", { className: "material-symbols-rounded", text: "passkey" }), document.createTextNode(" " + passkey.name)]),
           h("span", {
             className: "twofa-meta",
             text: passkey.last_used_at ? t("twofa.lastUsed", { date: formatDateTime(passkey.last_used_at) }) : t("twofa.neverUsed"),
@@ -3301,7 +3356,7 @@
   }
 
   async function twofaAction(work: () => Promise<void>) {
-    const warning = $("settings-warning");
+    const warning = $("twofa-warning");
     warning.textContent = "";
     try {
       await work();
@@ -3377,7 +3432,7 @@
 
   /** Makes 10 new backup codes (old ones stop working) and shows them once. */
   async function generateCodes() {
-    const warning = $("settings-warning");
+    const warning = $("codes-warning");
     const passwordInput = $("codes-password") as HTMLInputElement;
     const password = passwordInput.value;
     warning.textContent = "";
@@ -3417,7 +3472,9 @@
     $("twofa-totp-setup").classList.add("modal-hidden");
     renderSettingsToggles();
     $("user-dropdown-menu").classList.add("modal-hidden");
-    $("settings-warning").textContent = "";
+    ["display-name-warning", "avatar-warning", "twofa-warning", "codes-warning", "password-warning"].forEach((id) => {
+      $(id).textContent = "";
+    });
     ($("display-name-input") as HTMLInputElement).value = nameOf(me);
     showCookieStatus();
     openModal("settings-modal");
@@ -3528,6 +3585,29 @@
   }
 
   function bindEvents() {
+    const resizer = $("pane-resizer");
+    const savedWidth = Number(localStorage.getItem("seres-sidebar-width")) || 450;
+    document.documentElement.style.setProperty("--sidebar-width", `${Math.min(640, Math.max(340, savedWidth))}px`);
+    const resizeAt = (clientX: number) => {
+      const width = Math.min(640, Math.max(340, clientX - 72));
+      document.documentElement.style.setProperty("--sidebar-width", `${width}px`);
+      resizer.setAttribute("aria-valuenow", String(width));
+      localStorage.setItem("seres-sidebar-width", String(width));
+    };
+    resizer.addEventListener("pointerdown", (event) => {
+      resizer.setPointerCapture(event.pointerId);
+      resizeAt(event.clientX);
+    });
+    resizer.addEventListener("pointermove", (event) => {
+      if (resizer.hasPointerCapture(event.pointerId)) resizeAt(event.clientX);
+    });
+    resizer.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight"].includes((event as KeyboardEvent).key)) return;
+      event.preventDefault();
+      const delta = (event as KeyboardEvent).key === "ArrowLeft" ? -20 : 20;
+      const currentWidth = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"), 10) || 450;
+      resizeAt(currentWidth + delta + 72);
+    });
     $("btn-add-friend").addEventListener("click", () => {
       $("warning-add-friend").textContent = "";
       openModal("add-friend-modal");
@@ -3593,7 +3673,7 @@
     // Drop files onto the chat or paste images to attach them.
     const chatArea = document.querySelector(".main-chat") as HTMLElement;
     chatArea.addEventListener("dragover", (event) => {
-      if (!current || !event.dataTransfer?.types.includes("Files")) return;
+      if (chatArea.classList.contains("matrix-open") || !current || !event.dataTransfer?.types.includes("Files")) return;
       event.preventDefault();
       chatArea.classList.add("drag-over");
     });
@@ -3602,16 +3682,13 @@
     });
     chatArea.addEventListener("drop", (event) => {
       chatArea.classList.remove("drag-over");
-      if (!current || !event.dataTransfer?.files.length) return;
+      if (chatArea.classList.contains("matrix-open") || !current || !event.dataTransfer?.files.length) return;
       event.preventDefault();
       addPendingFiles(event.dataTransfer.files);
     });
-    $("menu-toggle").addEventListener("click", () => document.querySelector(".sidebar")?.classList.toggle("open"));
+    document.querySelectorAll<HTMLElement>(".rail-nav[data-rail-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.railView as "chats" | "friends" | "requests" | "matrix")));
+    $("rail-settings").addEventListener("click", openSettings);
     $("user-menu-trigger").addEventListener("click", () => $("user-dropdown-menu").classList.toggle("modal-hidden"));
-    $("menu-settings").addEventListener("click", (event) => {
-      event.preventDefault();
-      openSettings();
-    });
     $("menu-logout").addEventListener("click", (event) => {
       event.preventDefault();
       logout();
@@ -3660,12 +3737,13 @@
     $("language-select-slot").appendChild(SeresI18n.languageSelect(rerenderLanguage));
 
     document.querySelectorAll<HTMLElement>(".list-view-toggle").forEach((btn) => {
-      btn.addEventListener("click", () => switchView(btn.dataset.view as "chats" | "friends" | "requests"));
+      btn.addEventListener("click", () => switchView(btn.dataset.view as "chats" | "friends" | "requests" | "matrix"));
     });
     $("list-search").addEventListener("input", () => {
       chatsSignature = "";
       loadChats().catch(() => {});
       renderFriends();
+      renderRequests();
     });
 
     document.querySelectorAll<HTMLElement>("[data-close-modal]").forEach((btn) => {
@@ -3794,7 +3872,7 @@
     if (recoveredBy === "code") {
       // Point to the backup codes, one of them was just used.
       await openSettings();
-      $("settings-warning").textContent = t("recover.doneCode");
+      $("codes-warning").textContent = t("recover.doneCode");
       $("codes-form").scrollIntoView({ block: "center" });
     }
     if (pendingInvite) {
