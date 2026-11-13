@@ -1,0 +1,19 @@
+# Never put data or secrets into the image.
+.env
+**/.env
+users.db*
+**/users.db*
+src/backend/user_data/
+src/backend/chats/
+src/backend/files/
+data/
+ecosystem.config.js
+
+# Not needed to run SereS.
+.git
+.venv
+**/__pycache__
+.pytest_cache
+node_modules
+tests/
+deploy/
