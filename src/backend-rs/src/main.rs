@@ -109,7 +109,12 @@ async fn main() -> Result<()> {
         .unwrap_or(2222);
     let address: SocketAddr = format!("{host}:{port}").parse()?;
     let mut listeners = vec![(address, TcpListener::bind(address).await?)];
-    if let Ok(extra_host) = std::env::var("SERES_EXTRA_HOST") {
+    // An empty value (e.g. "SERES_EXTRA_HOST=" in .env) means no second listener.
+    if let Some(extra_host) = std::env::var("SERES_EXTRA_HOST")
+        .ok()
+        .map(|host| host.trim().to_owned())
+        .filter(|host| !host.is_empty())
+    {
         let bind_address = if extra_host.contains(':') {
             format!("[{extra_host}]:{port}")
         } else {
