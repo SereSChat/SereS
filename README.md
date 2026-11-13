@@ -66,6 +66,25 @@ Optional environment variables: `PORT`, `HOST`, `SERES_DATA_DIR` (where `users.d
 `SERES_PUBLIC_DIR`, `SERES_ALLOWED_HOSTS`
 (extra hostnames allowed as request `Origin`, comma separated), `URL` (uptime heartbeat).
 
+### OpsecChat account linking
+
+The **Opsec** tab links a separate OpsecChat account. It uses OpsecChat's API and MLS
+client; SereS credentials are never sent to OpsecChat, and OpsecChat credentials and
+access tokens are not sent to the SereS backend. The access token lives in the current
+browser tab. Device keys remain in the browser's encrypted OpsecChat MLS store.
+
+The SereS deployment must set `SERES_OPSECCHAT_API_ORIGINS` to a comma-separated list
+of HTTPS API origins that administrators permit users to enter (for example,
+`https://api.example.org:8443`). The browser's Content Security Policy only allows
+connections to these configured origins. Each OpsecChat API server must also allow the
+exact SereS website origin in its CORS policy and origin check. Do not remove the
+OpsecChat website origin when adding SereS. The current OpsecChat server configuration
+accepts only one origin, so its API needs multi-origin allowlist support before this
+integration can be used alongside the OpsecChat website. Users need accepted OpsecChat
+friendships before they can start an encrypted conversation; their OpsecChat username
+is displayed with the `opsec:` prefix in SereS. This first integration handles text
+messages; attachments, calls, and creating OpsecChat groups are not included.
+
 ---
 
 ## 🖥️ Install on a server (Ubuntu / Debian)

@@ -560,6 +560,82 @@ body.bright-body {
   }
 }
 
+/* ---------------------------------------------------- OpsecChat link */
+
+.opsec-integration {
+  position: fixed;
+  z-index: 20;
+  inset: 0 0 0 300px;
+  display: flex;
+  flex-direction: column;
+  background: #111b21;
+  color: #e9edef;
+}
+
+.opsec-integration.hidden-el { display: none !important; }
+
+.opsec-header {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #2f3b43;
+  background: #202c33;
+}
+
+.opsec-muted { color: #aebac1; font-size: .88rem; }
+.opsec-header .opsec-muted { flex: 1; }
+
+.opsec-layout { display: grid; grid-template-columns: minmax(250px, 320px) minmax(0, 1fr); flex: 1; min-height: 0; }
+.opsec-sidebar { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; padding: 14px; gap: 14px; background: #202c33; border-right: 1px solid #2f3b43; }
+.opsec-login, .opsec-add-friend { display: grid; gap: 10px; }
+.opsec-login label, .opsec-add-friend label { display: grid; gap: 5px; color: #c5d0d6; font-size: .84rem; }
+.opsec-integration input, .opsec-integration textarea { width: 100%; padding: 10px 12px; border: 1px solid #3a4a53; border-radius: 8px; outline: none; background: #111b21; color: #e9edef; font: inherit; }
+.opsec-integration input:focus, .opsec-integration textarea:focus { border-color: #00a884; }
+.opsec-button { border: 0; border-radius: 8px; padding: 9px 12px; background: #00a884; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+.opsec-button:hover { filter: brightness(1.08); }
+.opsec-button.secondary { background: #2a3942; color: #e9edef; }
+.opsec-button.small { padding: 6px 9px; font-size: .82rem; }
+.opsec-requests, .opsec-list { display: grid; gap: 5px; }
+.opsec-list h3 { margin: 10px 0 3px; color: #aebac1; font-size: .78rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.opsec-row, .opsec-friend-row, .opsec-request-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.opsec-row { width: 100%; border: 0; border-radius: 7px; padding: 10px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.opsec-row:hover { background: #2a3942; }
+.opsec-friend-row, .opsec-request-row { padding: 7px 2px; font-size: .9rem; }
+.opsec-status { min-height: 1.3em; margin-top: auto; color: #aebac1; font-size: .82rem; overflow-wrap: anywhere; }
+.opsec-status.error { color: #ff9e9e; }
+.opsec-chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.opsec-chat-title { padding: 16px; border-bottom: 1px solid #2f3b43; font-weight: 600; }
+.opsec-messages { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 8px; overflow-y: auto; padding: 18px; }
+.opsec-message { max-width: min(72%, 620px); align-self: flex-start; padding: 9px 12px 5px; border-radius: 12px 12px 12px 3px; background: #202c33; overflow-wrap: anywhere; }
+.opsec-message.own { align-self: flex-end; background: #005c4b; border-radius: 12px 12px 3px 12px; }
+.opsec-message p { white-space: pre-wrap; }
+.opsec-message time { display: block; margin-top: 3px; color: #aebac1; font-size: .7rem; text-align: right; }
+.opsec-history-note { align-self: center; padding: 8px 12px; }
+.opsec-send { display: flex; align-items: end; gap: 8px; padding: 10px 14px max(10px, env(safe-area-inset-bottom)); border-top: 1px solid #2f3b43; }
+.opsec-send textarea { max-height: 140px; min-height: 42px; resize: vertical; }
+
+body.bright-body .opsec-integration { background: #f0f2f5; color: #111b21; }
+body.bright-body .opsec-header, body.bright-body .opsec-sidebar { background: #fff; border-color: #d8e0e4; }
+body.bright-body .opsec-integration input, body.bright-body .opsec-integration textarea { background: #fff; color: #111b21; border-color: #c6d0d5; }
+body.bright-body .opsec-row:hover, body.bright-body .opsec-button.secondary, body.bright-body .opsec-message { background: #e7edef; color: #111b21; }
+body.bright-body .opsec-message.own { background: #c8f5e6; }
+body.bright-body .opsec-header, body.bright-body .opsec-chat-title, body.bright-body .opsec-send { border-color: #d8e0e4; }
+
+@media (max-width: 768px) {
+  .opsec-integration { inset: 0; }
+  .opsec-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(155px, 34dvh) minmax(0, 1fr); }
+  .opsec-sidebar { order: 0; padding: 10px 12px; border-right: 0; border-bottom: 1px solid #2f3b43; }
+  .opsec-chat { order: 1; }
+  .opsec-login { grid-template-columns: 1fr 1fr; }
+  .opsec-login label:first-child, .opsec-login button { grid-column: 1 / -1; }
+  .opsec-login label { min-width: 0; }
+  .opsec-sidebar:has(#opsec-connected:not(.hidden-el)) { overflow-y: auto; }
+  .opsec-messages { padding: 12px; }
+  .opsec-message { max-width: 88%; }
+}
+
 .last-message {
   white-space: nowrap;
   overflow: hidden;

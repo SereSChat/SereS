@@ -55,6 +55,35 @@ DISAPPEAR_OPTIONS = (0, 3600, 86400, 7 * 86400, 90 * 86400)
 MAX_PINS = 50
 ONLINE_SECONDS = 45
 
+
+def configured_opsecchat_origins():
+    origins = []
+    for raw_origin in os.getenv("SERES_OPSECCHAT_API_ORIGINS", "").split(","):
+        origin = raw_origin.strip()
+        if not origin:
+            continue
+        try:
+            parsed = urllib.parse.urlsplit(origin)
+            parsed.port  # Validate a supplied port before reflecting it into CSP.
+        except ValueError as exc:
+            raise RuntimeError("SERES_OPSECCHAT_API_ORIGINS contains an invalid origin") from exc
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+            or any(char.isspace() or char in ";'\"" for char in origin)
+        ):
+            raise RuntimeError("SERES_OPSECCHAT_API_ORIGINS must contain HTTPS origins only")
+        origins.append(f"https://{parsed.netloc}")
+    return tuple(dict.fromkeys(origins))
+
+
+OPSECCHAT_API_ORIGINS = configured_opsecchat_origins()
+
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,20}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 B64_RE = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
@@ -207,11 +236,12 @@ def csrf_protect():
 
 @app.after_request
 def security_headers(response):
+    connect_sources = " ".join(["'self'", *OPSECCHAT_API_ORIGINS])
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' blob: data:; media-src 'self' blob:; object-src 'self'; "
-        "frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; "
+        f"frame-src 'self'; connect-src {connect_sources}; base-uri 'none'; form-action 'self'; "
         "frame-ancestors 'self'",
     )
     response.headers.setdefault("X-Content-Type-Options", "nosniff")

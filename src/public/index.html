@@ -29,6 +29,7 @@
           <button class="list-view-toggle" type="button" data-view="requests">
             <span data-i18n="app.tabRequests">Requests</span> <span class="tab-badge" id="requests-badge"></span>
           </button>
+          <button class="list-view-toggle" type="button" id="btn-opsecchat" aria-label="Open OpsecChat">Opsec</button>
         </div>
 
         <div class="section-title chat-section-header" id="chats-header">
@@ -73,6 +74,42 @@
         </div>
       </div>
     </div>
+
+    <section id="opsec-integration" class="opsec-integration hidden-el" aria-label="OpsecChat">
+      <header class="opsec-header">
+        <strong>OpsecChat</strong>
+        <span id="opsec-account" class="opsec-muted"></span>
+        <button type="button" id="opsec-close" class="opsec-button secondary">Back to SereS</button>
+      </header>
+      <div class="opsec-layout">
+        <aside class="opsec-sidebar">
+          <form id="opsec-login" class="opsec-login">
+            <label>OpsecChat server<input id="opsec-api-url" type="url" inputmode="url" placeholder="https://chat.example.org" autocomplete="url" required /></label>
+            <label>Username<input id="opsec-username" autocomplete="username" required /></label>
+            <label>Password<input id="opsec-password" type="password" autocomplete="current-password" required /></label>
+            <button class="opsec-button" type="submit">Link OpsecChat account</button>
+          </form>
+          <div id="opsec-connected" class="hidden-el">
+            <form id="opsec-add-friend" class="opsec-add-friend">
+              <label>Add OpsecChat friend<input id="opsec-friend-name" placeholder="Username" autocomplete="off" required /></label>
+              <button class="opsec-button" type="submit">Send request</button>
+            </form>
+            <div id="opsec-requests" class="opsec-requests"></div>
+            <div id="opsec-friends" class="opsec-list"></div>
+            <button type="button" id="opsec-logout" class="opsec-button secondary">Unlink account</button>
+          </div>
+          <p id="opsec-status" class="opsec-status" aria-live="polite"></p>
+        </aside>
+        <div class="opsec-chat">
+          <div id="opsec-chat-title" class="opsec-chat-title">Choose an OpsecChat friend or conversation.</div>
+          <div id="opsec-messages" class="opsec-messages" aria-live="polite"></div>
+          <form id="opsec-send" class="opsec-send hidden-el">
+            <textarea id="opsec-message" rows="1" maxlength="4000" placeholder="Message" required></textarea>
+            <button class="opsec-button" type="submit">Send</button>
+          </form>
+        </div>
+      </div>
+    </section>
 
     <div id="alert" class="alert-box hidden">
       <span id="alert-text"></span>
@@ -407,5 +444,6 @@
     <script src="passkeys.js"></script>
     <script src="calls.js"></script>
     <script src="index.js"></script>
+    <script src="opsec-integration.js"></script>
   </body>
 </html>
