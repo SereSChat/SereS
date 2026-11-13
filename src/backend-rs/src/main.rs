@@ -1,5 +1,6 @@
 mod api;
 mod db;
+mod heartbeat;
 mod state;
 
 use anyhow::Result;
@@ -90,6 +91,7 @@ async fn main() -> Result<()> {
     db::migrate_binary_files(&pool, &data_dir).await?;
     db::ensure_server_secret(&pool).await?;
     tokio::spawn(api::chats::scheduled_loop(pool.clone()));
+    heartbeat::start();
     let state = state::AppState::new(pool);
 
     let app = Router::new()
