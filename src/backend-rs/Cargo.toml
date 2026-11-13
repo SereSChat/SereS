@@ -26,10 +26,19 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
-tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "compression-br", "compression-gzip"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 webauthn-rs-core = "0.5"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+# Argon2 and image decoding are unusably slow unoptimized; optimize
+# dependencies even in debug builds (only this crate stays fast to compile).
+[profile.dev.package."*"]
+opt-level = 3

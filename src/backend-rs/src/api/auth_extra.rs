@@ -138,6 +138,19 @@ async fn replace_recovery_codes(
     if !auth::verify_password(stored.as_deref(), old_hash) {
         return error("Password is wrong", StatusCode::BAD_REQUEST);
     }
+    // Hash all ten codes in parallel before the transaction starts, so the
+    // write lock is not held while Argon2 runs.
+    let hashes: Vec<_> = {
+        let inputs: Vec<&str> = validated.iter().map(|(_, _, h, _)| h.as_str()).collect();
+        auth::hash_passwords(&inputs)
+    };
+    let mut hashed_codes = Vec::with_capacity(validated.len());
+    for ((slot, salt, _, enc), hashed) in validated.into_iter().zip(hashes) {
+        match hashed {
+            Ok(v) => hashed_codes.push((slot, salt, v, enc)),
+            Err(e) => return axum::response::IntoResponse::into_response(e),
+        }
+    }
     let created = now();
     let mut tx = match state.db.begin().await {
         Ok(v) => v,
@@ -151,11 +164,7 @@ async fn replace_recovery_codes(
     {
         return db_error();
     }
-    for (slot, salt, hash, enc) in validated {
-        let hashed = match auth::hash_password(&hash) {
-            Ok(v) => v,
-            Err(e) => return axum::response::IntoResponse::into_response(e),
-        };
+    for (slot, salt, hashed, enc) in hashed_codes {
         if sqlx::query("INSERT INTO recovery_codes(user_id,slot,kdf_salt,auth_hash,enc_private,created_at) VALUES(?,?,?,?,?,?)").bind(&user_id).bind(slot).bind(salt).bind(hashed).bind(enc).bind(&created).execute(&mut *tx).await.is_err(){return db_error()}
     }
     if tx.commit().await.is_err() {

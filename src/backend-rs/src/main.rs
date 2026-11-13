@@ -6,7 +6,33 @@ use anyhow::Result;
 use axum::{Router, middleware};
 use std::{net::SocketAddr, path::PathBuf};
 use tokio::{net::TcpListener, sync::watch, task::JoinSet};
-use tower_http::{services::ServeDir, trace::TraceLayer};
+use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
+
+/// Compress only text-like responses: media, PDFs and encrypted attachment
+/// bytes don't shrink and would just cost CPU.
+fn compressible(
+    _: axum::http::StatusCode,
+    _: axum::http::Version,
+    headers: &axum::http::HeaderMap,
+    _: &axum::http::Extensions,
+) -> bool {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let large_enough = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .is_none_or(|len| len >= 1024);
+    large_enough
+        && (content_type.starts_with("text/html")
+            || content_type.starts_with("text/css")
+            || content_type.starts_with("text/javascript")
+            || content_type.starts_with("application/javascript")
+            || content_type.starts_with("application/json")
+            || content_type.starts_with("image/svg+xml"))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,6 +64,7 @@ async fn main() -> Result<()> {
         .fallback_service(ServeDir::new(public_dir).append_index_html_on_directories(true))
         .with_state(state)
         .layer(middleware::from_fn(api::security_middleware))
+        .layer(CompressionLayer::new().compress_when(compressible))
         .layer(TraceLayer::new_for_http());
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".into());

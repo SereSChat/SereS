@@ -122,7 +122,18 @@ fn password_hasher() -> Argon2<'static> {
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
-pub(crate) fn hash_password(password: &str) -> ApiResult<String> {
+/// Runs CPU-heavy work (Argon2) without stalling the async worker it is called
+/// from: other requests on that worker move to another thread meanwhile.
+fn cpu_bound<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
+fn hash_password_now(password: &str) -> ApiResult<String> {
     let salt = SaltString::generate(&mut OsRng);
     password_hasher()
         .hash_password(password.as_bytes(), &salt)
@@ -135,15 +146,45 @@ pub(crate) fn hash_password(password: &str) -> ApiResult<String> {
         })
 }
 
+pub(crate) fn hash_password(password: &str) -> ApiResult<String> {
+    cpu_bound(|| hash_password_now(password))
+}
+
+/// Hashes several credentials at once, one thread each, returning results in
+/// input order.
+pub(crate) fn hash_passwords(passwords: &[&str]) -> Vec<ApiResult<String>> {
+    cpu_bound(|| {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = passwords
+                .iter()
+                .map(|password| scope.spawn(move || hash_password_now(password)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(ApiError::new(
+                            "Could not hash credential",
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        ))
+                    })
+                })
+                .collect()
+        })
+    })
+}
+
 pub(crate) fn verify_password(stored: Option<&str>, candidate: &str) -> bool {
     static DUMMY: OnceLock<String> = OnceLock::new();
     let hash = stored.unwrap_or_else(|| {
         DUMMY.get_or_init(|| hash_password("constant-time-invalid-user-check").unwrap_or_default())
     });
     let valid = PasswordHash::new(hash).ok().is_some_and(|parsed| {
-        password_hasher()
-            .verify_password(candidate.as_bytes(), &parsed)
-            .is_ok()
+        cpu_bound(|| {
+            password_hasher()
+                .verify_password(candidate.as_bytes(), &parsed)
+                .is_ok()
+        })
     });
     stored.is_some() && valid
 }

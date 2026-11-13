@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use sqlx::{
     Row, SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode,
-    sqlite::SqlitePoolOptions,
+    sqlite::SqlitePoolOptions, sqlite::SqliteSynchronous,
 };
 use std::{collections::HashSet, fs, path::Path, str::FromStr, time::Duration};
 use uuid::Uuid;
@@ -14,6 +14,8 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
+        // Safe with WAL (no corruption risk) and avoids an fsync per commit.
+        .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(15));
     let pool = SqlitePoolOptions::new()
         .max_connections(16)
