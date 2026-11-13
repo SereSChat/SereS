@@ -71,6 +71,50 @@ async fn recovery_status(
     match sqlx::query("SELECT COUNT(*) total,COALESCE(SUM(used_at IS NULL),0) unused,MAX(created_at) created_at FROM recovery_codes WHERE user_id=?").bind(id).fetch_one(&state.db).await{Ok(row)=>json_ok(json!({"total":row.try_get::<i64,_>("total").unwrap_or(0),"unused":row.try_get::<i64,_>("unused").unwrap_or(0),"created_at":row.try_get::<Option<String>,_>("created_at").ok().flatten()})).into_response(),Err(_)=>db_error()}
 }
 
+/// One backup code as sent by the browser: (slot, kdf_salt, auth_hash, enc_private).
+pub(crate) type RecoveryCode = (String, String, String, String);
+
+/// Checks the ten backup codes of a request body.
+pub(crate) fn validate_recovery_codes(codes: Option<&Value>) -> ApiResult<Vec<RecoveryCode>> {
+    let bad = |message: &str| ApiError::new(message, StatusCode::BAD_REQUEST);
+    let codes = codes
+        .and_then(Value::as_array)
+        .filter(|codes| codes.len() == 10)
+        .ok_or_else(|| bad("Exactly 10 codes are needed"))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut validated = Vec::with_capacity(codes.len());
+    for code in codes {
+        let slot = code
+            .get("slot")
+            .and_then(Value::as_str)
+            .filter(|slot| slot_valid(slot))
+            .ok_or_else(|| bad("Invalid code slot"))?;
+        let salt = code.get("kdf_salt").and_then(Value::as_str);
+        let hash = code.get("auth_hash").and_then(Value::as_str);
+        let enc = code.get("enc_private").and_then(Value::as_str);
+        let (Some(salt), Some(hash), Some(enc)) = (salt, hash, enc) else {
+            return Err(bad("Invalid code"));
+        };
+        if !(salt.len() <= 64 && valid_b64(salt))
+            || !(hash.len() <= 128 && valid_b64(hash))
+            || enc.is_empty()
+            || enc.len() > 8192
+        {
+            return Err(bad("Invalid code"));
+        }
+        if !seen.insert(slot.to_string()) {
+            return Err(bad("Code slots must be different"));
+        }
+        validated.push((
+            slot.to_string(),
+            salt.to_string(),
+            hash.to_string(),
+            enc.to_string(),
+        ));
+    }
+    Ok(validated)
+}
+
 async fn replace_recovery_codes(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -91,43 +135,10 @@ async fn replace_recovery_codes(
             StatusCode::BAD_REQUEST,
         );
     };
-    let Some(codes) = body.get("codes").and_then(Value::as_array) else {
-        return error("Exactly 10 codes are needed", StatusCode::BAD_REQUEST);
+    let validated = match validate_recovery_codes(body.get("codes")) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
     };
-    if codes.len() != 10 {
-        return error("Exactly 10 codes are needed", StatusCode::BAD_REQUEST);
-    }
-    let mut seen = std::collections::HashSet::new();
-    let mut validated = Vec::new();
-    for code in codes {
-        let Some(slot) = code.get("slot").and_then(Value::as_str) else {
-            return error("Invalid code slot", StatusCode::BAD_REQUEST);
-        };
-        if !slot_valid(slot) {
-            return error("Invalid code slot", StatusCode::BAD_REQUEST);
-        }
-        let salt = code.get("kdf_salt").and_then(Value::as_str);
-        let hash = code.get("auth_hash").and_then(Value::as_str);
-        let enc = code.get("enc_private").and_then(Value::as_str);
-        if !salt.is_some_and(|v| v.len() <= 64 && valid_b64(v))
-            || !hash.is_some_and(|v| v.len() <= 128 && valid_b64(v))
-            || !enc.is_some_and(|v| !v.is_empty() && v.len() <= 8192)
-        {
-            return error("Invalid code", StatusCode::BAD_REQUEST);
-        }
-        if !seen.insert(slot.to_string()) {
-            return error("Code slots must be different", StatusCode::BAD_REQUEST);
-        }
-        let (Some(salt), Some(hash), Some(enc)) = (salt, hash, enc) else {
-            return error("Invalid code", StatusCode::BAD_REQUEST);
-        };
-        validated.push((
-            slot.to_string(),
-            salt.to_string(),
-            hash.to_string(),
-            enc.to_string(),
-        ));
-    }
     if state.rate_limited(format!("recovery-codes:{user_id}"), 5, 300) {
         return error(
             "Too many attempts, please wait a few minutes",

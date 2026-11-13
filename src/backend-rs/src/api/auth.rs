@@ -421,24 +421,64 @@ async fn register(
         Ok(None) => {}
         Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
     }
-    let hashed = match hash_password(auth_hash) {
+    // Backup codes may come with the registration, so the account, its codes and
+    // the first session are created in one round trip.
+    let codes = match body.get("recovery_codes") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(codes) => match super::auth_extra::validate_recovery_codes(Some(codes)) {
+            Ok(v) => v,
+            Err(e) => return axum::response::IntoResponse::into_response(e),
+        },
+    };
+    // The password and all codes are hashed at the same time.
+    let mut inputs = vec![auth_hash];
+    inputs.extend(codes.iter().map(|(_, _, hash, _)| hash.as_str()));
+    let mut hashes = Vec::with_capacity(inputs.len());
+    for hashed in hash_passwords(&inputs) {
+        match hashed {
+            Ok(v) => hashes.push(v),
+            Err(e) => return axum::response::IntoResponse::into_response(e),
+        }
+    }
+    let mut hashes = hashes.into_iter();
+    let hashed = hashes.next().unwrap_or_default();
+    let user_id = Uuid::new_v4().to_string();
+    let created = now_iso();
+    let mut tx = match state.db.begin().await {
         Ok(v) => v,
-        Err(e) => return axum::response::IntoResponse::into_response(e),
+        Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
     };
     let result=sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version,kdf_salt,kdf_iterations,pub_ecdh,pub_sign,enc_private,created_at) VALUES(?,?,?,?,1,?,?,?,?,?,?)")
-        .bind(Uuid::new_v4().to_string()).bind(email).bind(username).bind(hashed).bind(kdf_salt).bind(kdf_iterations).bind(pub_ecdh).bind(pub_sign).bind(enc_private).bind(now_iso()).execute(&state.db).await;
+        .bind(&user_id).bind(email).bind(username).bind(hashed).bind(kdf_salt).bind(kdf_iterations).bind(pub_ecdh).bind(pub_sign).bind(enc_private).bind(&created).execute(&mut *tx).await;
     match result {
-        Ok(_) => json_response(
-            StatusCode::OK,
-            json!({"message":"User created successfully!","success":true}),
-        ),
+        Ok(_) => {}
         Err(sqlx::Error::Database(e))
             if e.is_unique_violation() || e.message() == "Email already in use" =>
         {
-            api_bad_request("Username already taken or email already in use")
+            return api_bad_request("Username already taken or email already in use");
         }
-        Err(_) => error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
+        Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
     }
+    let codes_saved = !codes.is_empty();
+    for ((slot, salt, _, enc), code_hash) in codes.into_iter().zip(hashes) {
+        if sqlx::query("INSERT INTO recovery_codes(user_id,slot,kdf_salt,auth_hash,enc_private,created_at) VALUES(?,?,?,?,?,?)")
+            .bind(&user_id).bind(slot).bind(salt).bind(code_hash).bind(enc).bind(&created)
+            .execute(&mut *tx).await.is_err()
+        {
+            return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+    if tx.commit().await.is_err() {
+        return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    // A new account has no second factor yet, so its session can start now.
+    session_response(
+        &state,
+        &user_id,
+        &headers,
+        json!({"message":"User created successfully!","recovery_codes_saved":codes_saved}),
+    )
+    .await
 }
 
 async fn login(
@@ -550,6 +590,22 @@ pub(crate) async fn login_response(
     user_id: &str,
     headers: &HeaderMap,
 ) -> Response {
+    session_response(
+        state,
+        user_id,
+        headers,
+        json!({"message":"Login succesfull!"}),
+    )
+    .await
+}
+
+/// Starts a session for `user_id`; `extra` fields are merged into the reply.
+async fn session_response(
+    state: &AppState,
+    user_id: &str,
+    headers: &HeaderMap,
+    extra: Value,
+) -> Response {
     let user = match sqlx::query("SELECT * FROM users WHERE id=?")
         .bind(user_id)
         .fetch_optional(&state.db)
@@ -574,10 +630,11 @@ pub(crate) async fn login_response(
     {
         return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
     }
-    let mut response = json_response(
-        StatusCode::OK,
-        json!({"message":"Login succesfull!","success":true,"user":own_user(&user),"enc_private":user.try_get::<Option<String>,_>("enc_private").ok().flatten()}),
-    );
+    let mut reply = json!({"success":true,"user":own_user(&user),"enc_private":user.try_get::<Option<String>,_>("enc_private").ok().flatten()});
+    if let (Some(reply), Value::Object(extra)) = (reply.as_object_mut(), extra) {
+        reply.extend(extra);
+    }
+    let mut response = json_response(StatusCode::OK, reply);
     let persistent = cookie_value(headers, CONSENT_COOKIE).as_deref() == Some("accepted");
     login_cookie(&mut response, &token, headers, persistent);
     response

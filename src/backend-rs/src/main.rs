@@ -34,6 +34,38 @@ fn compressible(
             || content_type.starts_with("image/svg+xml"))
 }
 
+/// Windows 11 may run a window-less background process as "EcoQoS" on its
+/// efficiency cores, which made Argon2 (login, registration) 2-5x slower.
+/// Opt out, so password hashing always gets full CPU speed.
+#[cfg(windows)]
+fn disable_power_throttling() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+        ProcessPowerThrottling, SetProcessInformation,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // SAFETY: the pointer and size describe a live, correctly typed struct.
+    let ok = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            (&state as *const PROCESS_POWER_THROTTLING_STATE).cast(),
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
+    if ok == 0 {
+        tracing::warn!("could not opt out of Windows power throttling");
+    }
+}
+
+#[cfg(not(windows))]
+fn disable_power_throttling() {}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -43,6 +75,7 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "seres_backend=info,tower_http=warn".into()),
         )
         .init();
+    disable_power_throttling();
 
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let data_dir = std::env::var_os("SERES_DATA_DIR")

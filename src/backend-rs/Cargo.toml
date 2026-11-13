@@ -34,8 +34,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 webauthn-rs-core = "0.5"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [profile.release]
-lto = "fat"
+# Thin LTO gives nearly all of fat LTO's speed at a fraction of the build time.
+lto = "thin"
 codegen-units = 1
 
 # Argon2 and image decoding are unusably slow unoptimized; optimize
