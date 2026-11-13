@@ -94,15 +94,18 @@ mkdir -p data
 docker compose up -d --build
 ```
 
-SereS then listens on `http://localhost:2222` (point your Cloudflare tunnel or reverse proxy
-there). Database, profile pictures and attachments are kept in `./data`, the settings and
-passwords in `.env` – neither ends up in git or in the image.
+The image builds the Rust backend (the first build takes a few minutes). SereS then listens on
+`http://localhost:2222` (point your Cloudflare tunnel or reverse proxy there). The database,
+including profile pictures and attachments, is kept in `./data`, the settings and passwords in
+`.env` – neither ends up in git or in the image.
 
 - **Update:** `git pull && docker compose up -d --build`
 - **Log:** `docker compose logs -f`
-- **Move an existing installation:** stop it (`pm2 stop SereS`), copy `users.db`, `user_data/`,
-  `files/` and `chats/` from `src/backend/` into `./data`, put its settings into `.env`, then
-  start the container.
+- **Move an existing installation:** build first (`docker compose build`, the old one keeps
+  running), then stop it (`pm2 stop SereS`), copy `users.db`, `user_data/`, `files/` and `chats/`
+  from `src/backend/` into `./data`, put its settings into `.env` and start the container. On the
+  first start, profile pictures and attachments from older versions are copied into the database;
+  the files stay as a backup.
 - The container uses the host's network (`network_mode: host`, Linux), so a mail server and the
   TURN server on the same machine are reached at `localhost` as before.
 
