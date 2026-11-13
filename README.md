@@ -104,6 +104,27 @@ new and restarts SereS. All options and the ports for calls: [deploy/README.md](
 
 ---
 
+## 🐳 Run with Docker
+
+```bash
+git clone https://github.com/SereSChat/SereS.git && cd SereS
+cp .env.example .env        # fill in mail, TURN and so on; .env is never committed
+mkdir -p data
+docker compose up -d --build
+```
+
+SereS then listens on `http://localhost:2222` (point your Cloudflare tunnel or reverse proxy
+there). Database, profile pictures and attachments are kept in `./data`, the settings and
+passwords in `.env` – neither ends up in git or in the image.
+
+- **Update:** `git pull && docker compose up -d --build`
+- **Log:** `docker compose logs -f`
+- **Move an existing installation:** stop it (`pm2 stop SereS`), copy `users.db`, `user_data/`,
+  `files/` and `chats/` from `src/backend/` into `./data`, put its settings into `.env`, then
+  start the container.
+- The container uses the host's network (`network_mode: host`, Linux), so a mail server and the
+  TURN server on the same machine are reached at `localhost` as before.
+
 ## 📞 Voice calls (browser)
 
 - The 📞 button in a chat calls everyone in it; the others get a ringing card with *Answer* and
