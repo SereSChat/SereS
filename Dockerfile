@@ -1,24 +1,27 @@
-# SereS as a container. The data (database, profile pictures, attachments)
-# lives in the volume /data, the settings come from .env (see .env.example).
-FROM python:3.13-slim
+# SereS (Rust backend) as a container. The data (database with pictures and
+# attachments) lives in the volume /data, the settings come from .env (see
+# .env.example).
 
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+# Build the backend.
+FROM rust:1-bookworm AS build
+WORKDIR /build
+COPY src/backend-rs/ ./
+RUN cargo build --release --locked && mkdir /data
 
-COPY src/ src/
+# Small runtime image: glibc, OpenSSL and CA certificates, no shell.
+FROM gcr.io/distroless/cc-debian12
+COPY --from=build /build/target/release/seres-backend /usr/local/bin/seres-backend
+COPY src/public/ /app/public/
+COPY --from=build --chown=1000:1000 /data /data
 
 # Doesn't run as root. UID 1000 so files in ./data belong to the usual first
 # user on the host.
-RUN useradd --system --uid 1000 --home /data seres && mkdir -p /data && chown seres /data
-USER seres
-WORKDIR /app/src/backend
-
-# GUNICORN_CMD_ARGS can be changed in .env, e.g. to also listen on [::1].
+USER 1000:1000
+# HOST, PORT and SERES_EXTRA_HOST (e.g. ::1) can be changed in .env.
 ENV SERES_DATA_DIR=/data \
-    PYTHONUNBUFFERED=1 \
-    GUNICORN_CMD_ARGS="--bind=127.0.0.1:2222 --workers=4"
+    SERES_PUBLIC_DIR=/app/public \
+    HOST=127.0.0.1 \
+    PORT=2222
 
 EXPOSE 2222
-# --preload: the database is migrated once before the workers start.
-CMD ["gunicorn", "--preload", "--no-control-socket", "app:app"]
+CMD ["/usr/local/bin/seres-backend"]

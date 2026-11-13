@@ -3,16 +3,15 @@
 **/.env
 users.db*
 **/users.db*
-src/backend/user_data/
-src/backend/chats/
-src/backend/files/
-src/backend/friends/
 data/
 ecosystem.config.js
 
-# Not needed to run SereS.
+# Only src/backend-rs and src/public are needed to build the image.
 .git
 .venv
+src/backend/
+src/backend-rs/target/
+src/frontend/
 **/__pycache__
 .pytest_cache
 node_modules
