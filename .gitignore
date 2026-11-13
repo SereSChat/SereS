@@ -9,3 +9,4 @@ users.db-wal
 users.db-shm
 .pytest_cache/
 ecosystem.config.js
+data/

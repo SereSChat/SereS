@@ -6,6 +6,7 @@ users.db*
 src/backend/user_data/
 src/backend/chats/
 src/backend/files/
+src/backend/friends/
 data/
 ecosystem.config.js
 
