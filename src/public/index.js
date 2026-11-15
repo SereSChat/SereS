@@ -2773,7 +2773,7 @@
         if (id === "avatar-modal")
             $("avatar-upload-input").value = "";
         if (id === "password-modal") {
-            ["new-password", "new-password-repeat"].forEach((field) => ($(field).value = ""));
+            ["old-password", "new-password", "new-password-repeat"].forEach((field) => ($(field).value = ""));
         }
         openModal(id);
     }
@@ -2873,9 +2873,14 @@
     }
     async function changePassword() {
         const warning = $("password-warning");
+        const oldPw = $("old-password").value;
         const newPw = $("new-password").value;
         const repeat = $("new-password-repeat").value;
         warning.textContent = "";
+        if (!oldPw) {
+            warning.textContent = t("twofa.needPassword");
+            return;
+        }
         if (newPw.length < 8) {
             warning.textContent = t("settings.passwordShort");
             return;
@@ -2884,9 +2889,6 @@
             warning.textContent = t("settings.passwordMismatch");
             return;
         }
-        const oldPw = await askPassword(t("pwPrompt.password"));
-        if (oldPw === null)
-            return;
         warning.textContent = t("settings.changingPassword");
         try {
             const fresh = (await api("/api/me")).user;
@@ -2908,7 +2910,7 @@
                 kdf_iterations: SeresCrypto.DEFAULT_ITERATIONS,
                 enc_private: encPrivate,
             });
-            ["new-password", "new-password-repeat"].forEach((id) => ($(id).value = ""));
+            ["old-password", "new-password", "new-password-repeat"].forEach((id) => ($(id).value = ""));
             warning.textContent = "";
             closeSubModal("password-modal");
             showAlert(t("settings.passwordChanged"));

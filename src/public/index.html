@@ -427,7 +427,8 @@
       <form class="modal-box" id="password-form" autocomplete="on">
         <h3 data-i18n="settings.changeButton">Change password</h3>
         <input type="text" id="password-username" class="visually-hidden" autocomplete="username" tabindex="-1" aria-hidden="true" readonly />
-        <input type="password" id="new-password" placeholder="New password (min. 8 characters)" data-i18n-placeholder="settings.newPassword" autocomplete="new-password" data-autofocus />
+        <input type="password" id="old-password" placeholder="Current password" data-i18n-placeholder="settings.oldPassword" autocomplete="current-password" data-autofocus />
+        <input type="password" id="new-password" placeholder="New password (min. 8 characters)" data-i18n-placeholder="settings.newPassword" autocomplete="new-password" />
         <input type="password" id="new-password-repeat" placeholder="Repeat new password" data-i18n-placeholder="settings.repeatPassword" autocomplete="new-password" />
         <p class="settings-hint settings-notice" id="password-warning" role="status" aria-live="polite"></p>
         <div class="modal-buttons">
