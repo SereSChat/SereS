@@ -4464,3 +4464,22 @@ body.bright-body .settings-notice:not(:empty) {
 
 .matrix-mobile-rooms.matrix-small-button { display: none; }
 @media (max-width: 768px) { .matrix-mobile-rooms.matrix-small-button { display: inline-flex; } }
+
+/* Settings: value + button in one row; small dialogs above the settings */
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.settings-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sub-modal .modal-box {
+  width: min(420px, calc(100vw - 32px));
+}

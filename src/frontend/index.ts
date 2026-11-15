@@ -3101,8 +3101,23 @@
   function openModal(id: string) {
     closeFloatingMenus();
     $(id).classList.remove("modal-hidden");
-    const input = $(id).querySelector<HTMLInputElement>("input[type=text]");
+    const input = $(id).querySelector<HTMLInputElement>("[data-autofocus]") || $(id).querySelector<HTMLInputElement>("input[type=text]");
     if (input) setTimeout(() => input.focus(), 30);
+  }
+
+  /** Closes one of the small dialogs opened from the settings; the settings stay open. */
+  function closeSubModal(id: string) {
+    $(id).classList.add("modal-hidden");
+  }
+
+  function openSubModal(id: string) {
+    $(id).querySelectorAll(".settings-notice").forEach((notice) => (notice.textContent = ""));
+    if (id === "display-name-modal") ($("display-name-input") as HTMLInputElement).value = nameOf(me);
+    if (id === "avatar-modal") ($("avatar-upload-input") as HTMLInputElement).value = "";
+    if (id === "password-modal") {
+      ["new-password", "new-password-repeat"].forEach((field) => (($(field) as HTMLInputElement).value = ""));
+    }
+    openModal(id);
   }
 
   function closeAllModals() {
@@ -3133,6 +3148,7 @@
       input.value = "";
       avatarState.delete(me.username);
       loadOwnAvatar();
+      closeSubModal("avatar-modal");
       showAlert(t("settings.avatarUpdated"));
     } catch (error) {
       warning.textContent = errorText(error);
@@ -3236,6 +3252,7 @@
       });
       ["new-password", "new-password-repeat"].forEach((id) => (($(id) as HTMLInputElement).value = ""));
       warning.textContent = "";
+      closeSubModal("password-modal");
       showAlert(t("settings.passwordChanged"));
     } catch (error) {
       warning.textContent = errorText(error);
@@ -3331,8 +3348,10 @@
       });
       me.display_name = data.display_name;
       ($("display-name-input") as HTMLInputElement).value = data.display_name;
+      $("display-name-current").textContent = data.display_name;
       showOwnName();
       loadOwnAvatar();
+      closeSubModal("display-name-modal");
       showAlert(t("settings.displayNameSaved"));
     } catch (error) {
       warning.textContent = errorText(error);
@@ -3527,7 +3546,8 @@
     ["display-name-warning", "avatar-warning", "twofa-warning", "codes-warning", "password-warning"].forEach((id) => {
       $(id).textContent = "";
     });
-    ($("display-name-input") as HTMLInputElement).value = nameOf(me);
+    $("display-name-current").textContent = nameOf(me);
+    ["display-name-modal", "avatar-modal", "password-modal"].forEach(closeSubModal);
     showCookieStatus();
     openModal("settings-modal");
     const fp = await SeresCrypto.fingerprint(identity.pubEcdh, identity.pubSign);
@@ -3758,9 +3778,15 @@
     });
     $("invite-link").addEventListener("focus", () => ($("invite-link") as HTMLInputElement).select());
     $("profile-close").addEventListener("click", () => $("profile-modal").classList.add("modal-hidden"));
-    $("save-display-name").addEventListener("click", saveDisplayName);
-    $("display-name-input").addEventListener("keydown", (event) => {
-      if ((event as KeyboardEvent).key === "Enter") saveDisplayName();
+    $("display-name-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveDisplayName();
+    });
+    document.querySelectorAll<HTMLElement>("[data-open-sub]").forEach((btn) => {
+      btn.addEventListener("click", () => openSubModal(btn.dataset.openSub!));
+    });
+    document.querySelectorAll<HTMLElement>("[data-close-sub]").forEach((btn) => {
+      btn.addEventListener("click", () => closeSubModal(btn.closest<HTMLElement>(".modal-overlay")!.id));
     });
     $("upload-avatar-btn").addEventListener("click", uploadAvatar);
     $("theme-toggle-btn").addEventListener("click", toggleTheme);
@@ -3803,7 +3829,10 @@
     });
     document.querySelectorAll<HTMLElement>(".modal-overlay").forEach((overlay) => {
       overlay.addEventListener("click", (event) => {
-        if (event.target === overlay) closeAllModals();
+        if (event.target !== overlay) return;
+        // A click next to a small settings dialog only closes that dialog.
+        if (overlay.classList.contains("sub-modal")) closeSubModal(overlay.id);
+        else closeAllModals();
       });
     });
 
