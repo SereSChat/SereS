@@ -229,6 +229,8 @@ window.SeresLang.fr = {
   "settings.displayNameText": "Nom affiché (visible par tous à la place de ton nom d'utilisateur, 32 caractères max.) :",
   "settings.displayNamePlaceholder": "Nom affiché",
   "settings.displayNameSave": "Enregistrer le nom",
+  "settings.edit": "Modifier",
+  "settings.avatarChange": "Changer la photo de profil",
   "settings.displayNameSaved": "Nom affiché enregistré !",
 
   "msg.menuEdit": " Modifier",

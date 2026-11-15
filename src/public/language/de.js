@@ -229,6 +229,8 @@ window.SeresLang.de = {
   "settings.displayNameText": "Anzeigename (wird allen statt deines Benutzernamens angezeigt, max. 32 Zeichen):",
   "settings.displayNamePlaceholder": "Anzeigename",
   "settings.displayNameSave": "Namen speichern",
+  "settings.edit": "Ändern",
+  "settings.avatarChange": "Profilbild ändern",
   "settings.displayNameSaved": "Anzeigename gespeichert!",
 
   "msg.menuEdit": " Bearbeiten",

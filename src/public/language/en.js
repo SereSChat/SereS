@@ -229,6 +229,8 @@ window.SeresLang.en = {
   "settings.displayNameText": "Display name (shown to everyone instead of your username, max. 32 characters):",
   "settings.displayNamePlaceholder": "Display name",
   "settings.displayNameSave": "Save name",
+  "settings.edit": "Change",
+  "settings.avatarChange": "Change profile picture",
   "settings.displayNameSaved": "Display name saved!",
 
   "msg.menuEdit": " Edit",
