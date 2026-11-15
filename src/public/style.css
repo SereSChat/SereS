@@ -4243,6 +4243,8 @@ body.bright-body .rail-nav:hover { background: var(--ui-hover-surface); color: v
 .dropdown-username { color: var(--ui-text); }
 .dropdown-item { color: var(--ui-text); }
 .dropdown-item:hover { background: var(--ui-hover-surface); }
+.dropdown-item.logout-item { color: #ea0038; }
+.dropdown-item.logout-item:hover { background: rgba(234, 0, 56, 0.1); }
 
 .modal-box,
 .modal-box.bright-modal-box {
