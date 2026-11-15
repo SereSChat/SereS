@@ -59,6 +59,11 @@ The frontend is written in TypeScript (`src/frontend/`). It is compiled to
 `src/public/` and the compiled `.js` files are committed;
 after changing a `.ts` file run `tsc -p .` in the repository root.
 
+The Matrix tab has its own SDK bundle and Rust/WASM crypto asset. After changing
+its frontend, build it from `src/matrix/` with `npm ci`, `npm run typecheck`,
+and `npm run build`. See [src/matrix/README.md](src/matrix/README.md) for Matrix
+login, encryption, calling, and deployment notes.
+
 Format and compile the backend with `cargo fmt --manifest-path src/backend-rs/Cargo.toml` and
 `cargo check --manifest-path src/backend-rs/Cargo.toml`.
 
