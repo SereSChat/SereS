@@ -1147,6 +1147,9 @@
 
     try {
       await refreshCurrentDetails();
+      scheduled = null;
+      renderScheduledBar();
+      loadScheduled(opened);
       const data = await api(`/api/chats/${encodeURIComponent(chatId)}/messages?limit=50`);
       if (current !== opened) return;
       opened.receipts = data.receipts || null;
@@ -2317,9 +2320,149 @@
 
   /** Shows the microphone when there is nothing to send (like WhatsApp). */
   function updateSendButton() {
-    const empty = !($("message-input-field") as HTMLTextAreaElement).value.trim() && !pendingFiles.length && !editing;
+    const text = ($("message-input-field") as HTMLTextAreaElement).value.trim();
+    const empty = !text && !pendingFiles.length && !editing;
     $("send-btn").classList.toggle("modal-hidden", empty && voiceSupported());
     $("record-btn").classList.toggle("modal-hidden", !(empty && voiceSupported()));
+    // Only text can be scheduled (attachments are uploaded when they are sent).
+    $("schedule-btn").classList.toggle("modal-hidden", !text || !!editing || pendingFiles.length > 0);
+  }
+
+  // ------------------------------------------------------- send later
+  // The message is encrypted now, like any other; the server sends it at the
+  // chosen time (and drops it if the members or the keys changed meanwhile).
+
+  interface Scheduled {
+    id: string;
+    send_at: string;
+    payload: any;
+  }
+  let scheduled: { chatId: string; items: Scheduled[] } | null = null;
+
+  async function loadScheduled(opened: OpenChat) {
+    try {
+      const data = await api(`/api/chats/${encodeURIComponent(opened.id)}/scheduled`);
+      if (current !== opened) return;
+      scheduled = { chatId: opened.id, items: data.messages || [] };
+    } catch {
+      scheduled = null;
+    }
+    renderScheduledBar();
+  }
+
+  function renderScheduledBar() {
+    const count = scheduled && current && scheduled.chatId === current.id ? scheduled.items.length : 0;
+    $("scheduled-bar").classList.toggle("modal-hidden", !count);
+    $("scheduled-bar-text").textContent = t(count === 1 ? "schedule.barOne" : "schedule.bar", { count });
+  }
+
+  function localInputValue(date: Date) {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  function openScheduleDialog() {
+    const text = ($("message-input-field") as HTMLTextAreaElement).value.trim();
+    if (!current || !text || editing || pendingFiles.length) return;
+    $("schedule-preview").textContent = text.length > 160 ? text.slice(0, 160) + "…" : text;
+    $("schedule-warning").textContent = "";
+    const input = $("schedule-time") as HTMLInputElement;
+    const soon = new Date(Date.now() + 60 * 60 * 1000);
+    input.min = localInputValue(new Date(Date.now() + 2 * 60 * 1000));
+    input.value = localInputValue(soon);
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(8, 0, 0, 0);
+    const quick = $("schedule-quick");
+    quick.textContent = "";
+    for (const [label, date] of [
+      [t("schedule.inHour"), soon],
+      [t("schedule.tomorrow"), tomorrow],
+    ] as [string, Date][]) {
+      quick.appendChild(button(label, "pill-btn secondary", () => (input.value = localInputValue(date))));
+    }
+    openModal("schedule-modal");
+  }
+
+  async function scheduleMessage() {
+    const input = $("message-input-field") as HTMLTextAreaElement;
+    const text = input.value.trim();
+    const when = new Date(($("schedule-time") as HTMLInputElement).value);
+    if (!current || !text) return;
+    if (Number.isNaN(when.getTime()) || when.getTime() < Date.now() + 60 * 1000) {
+      $("schedule-warning").textContent = t("schedule.tooSoon");
+      return;
+    }
+    const opened = current;
+    const reply =
+      replyTo && replyTo.chatId === opened.id
+        ? { id: replyTo.message.id, sender_id: replyTo.message.sender_id, preview: replyTo.preview }
+        : undefined;
+    try {
+      for (let attempt = 0; ; attempt++) {
+        const details = await readyToSend(opened, attempt > 0);
+        const id = newMessageId();
+        const payload = await SeresCrypto.encryptMessage(identity, opened.id, id, reply ? { text, reply } : { text }, encryptionMembers(details));
+        try {
+          await post(`/api/chats/${encodeURIComponent(opened.id)}/scheduled`, { id, payload, send_at: when.toISOString() });
+          break;
+        } catch (error) {
+          // The members changed: encrypt again for the current ones.
+          if (error instanceof ApiError && error.status === 409 && attempt === 0) continue;
+          throw error;
+        }
+      }
+      $("schedule-modal").classList.add("modal-hidden");
+      input.value = "";
+      drafts.delete(opened.id);
+      autoGrow(input);
+      cancelReply();
+      updateSendButton();
+      showAlert(t("schedule.done", { time: formatDateTime(when.toISOString()) }));
+      await loadScheduled(opened);
+    } catch (error) {
+      $("schedule-warning").textContent = errorText(error);
+    }
+  }
+
+  async function openScheduledList() {
+    if (!current || !scheduled) return;
+    const opened = current;
+    const list = $("scheduled-list");
+    list.textContent = "";
+    for (const item of scheduled.items) {
+      let text = t("msg.decryptError");
+      try {
+        const content = await SeresCrypto.decryptMessage(
+          identity,
+          opened.id,
+          item.id,
+          { id: me.id, pub_ecdh: me.pub_ecdh, pub_sign: me.pub_sign },
+          item.payload,
+        );
+        text = String(content?.text ?? "");
+      } catch {
+        // Encrypted with keys from before a password reset.
+      }
+      const row = h("div", { className: "scheduled-item" }, [
+        h("div", { className: "scheduled-info" }, [
+          h("span", { className: "scheduled-time", text: formatDateTime(item.send_at) }),
+          h("span", { className: "scheduled-text", text }),
+        ]),
+        button(t("schedule.cancel"), "request-action-btn discard", async () => {
+          try {
+            await api(`/api/chats/${encodeURIComponent(opened.id)}/scheduled/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+            row.remove();
+            await loadScheduled(opened);
+            if (!scheduled?.items.length) $("scheduled-modal").classList.add("modal-hidden");
+          } catch (error) {
+            showAlert(errorText(error));
+          }
+        }),
+      ]);
+      list.appendChild(row);
+    }
+    openModal("scheduled-modal");
   }
 
   // ------------------------------------------------------- voice messages
@@ -3748,6 +3891,8 @@
       if (!(error instanceof ApiError && error.status === 401)) console.error(error);
     });
     if (current) await refreshCurrentDetails().catch(() => {});
+    // Scheduled messages that went out disappear from the bar.
+    if (current && scheduled?.items.length) loadScheduled(current);
   }
 
   function bindEvents() {
@@ -3891,6 +4036,18 @@
       saveStatus(($("status-input") as HTMLInputElement).value);
     });
     $("status-clear").addEventListener("click", () => saveStatus(""));
+    $("schedule-btn").addEventListener("click", openScheduleDialog);
+    // Right-click (or long press) on "Send" also schedules.
+    $("send-btn").addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      openScheduleDialog();
+    });
+    $("schedule-cancel").addEventListener("click", () => $("schedule-modal").classList.add("modal-hidden"));
+    $("schedule-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      scheduleMessage();
+    });
+    $("scheduled-bar").addEventListener("click", () => openScheduledList());
     $("display-name-form").addEventListener("submit", (event) => {
       event.preventDefault();
       saveDisplayName();

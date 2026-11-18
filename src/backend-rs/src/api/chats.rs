@@ -1410,8 +1410,9 @@ async fn scheduled_list(
     {
         return error("Chat not found", StatusCode::NOT_FOUND);
     }
-    match sqlx::query("SELECT id,send_at,created_at FROM scheduled_messages WHERE chat_id=? AND sender_id=? ORDER BY send_at").bind(&chat_id).bind(&me.id).fetch_all(&state.db).await {
-        Ok(rows) => json_ok(json!({"messages":rows.iter().map(|r| json!({"id":r.try_get::<String,_>("id").unwrap_or_default(),"send_at":r.try_get::<String,_>("send_at").unwrap_or_default(),"created_at":r.try_get::<String,_>("created_at").unwrap_or_default()})).collect::<Vec<_>>()})).into_response(),
+    // The (still encrypted) message goes along, so the sender can read what is planned.
+    match sqlx::query("SELECT id,send_at,created_at,payload FROM scheduled_messages WHERE chat_id=? AND sender_id=? ORDER BY send_at").bind(&chat_id).bind(&me.id).fetch_all(&state.db).await {
+        Ok(rows) => json_ok(json!({"messages":rows.iter().map(|r| json!({"id":r.try_get::<String,_>("id").unwrap_or_default(),"send_at":r.try_get::<String,_>("send_at").unwrap_or_default(),"created_at":r.try_get::<String,_>("created_at").unwrap_or_default(),"payload":r.try_get::<String,_>("payload").ok().and_then(|p| serde_json::from_str::<Value>(&p).ok())})).collect::<Vec<_>>()})).into_response(),
         Err(_) => db_error()
     }
 }
