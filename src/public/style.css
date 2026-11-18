@@ -4581,3 +4581,60 @@ body.bright-body .device-item {
     justify-content: flex-start;
   }
 }
+
+/* Video in calls: camera and shared screen replace the profile picture */
+.call-window.has-video {
+  width: 640px;
+}
+
+.call-window.has-video .call-tiles {
+  max-height: min(72vh, 720px);
+}
+
+.call-tile.with-video .call-tile-avatar {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 12px;
+  background-color: #000000;
+}
+
+.call-tile.with-video.screen {
+  grid-column: 1 / -1;
+}
+
+.call-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  cursor: zoom-in;
+}
+
+.call-tile.screen .call-video {
+  object-fit: contain;
+}
+
+.call-video.mirrored {
+  transform: scaleX(-1);
+}
+
+.call-video:fullscreen {
+  object-fit: contain;
+  cursor: zoom-out;
+}
+
+.call-btn.call-camera.on,
+.call-btn.call-screen.on {
+  background-color: #00a884;
+}
+
+body.call-popup .call-window.has-video {
+  width: 100%;
+}
+
+@media (max-width: 700px) {
+  .call-window.has-video {
+    width: calc(100vw - 16px);
+  }
+}
