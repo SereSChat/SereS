@@ -47,6 +47,13 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
         ],
     )
     .await?;
+    // Per device: when it was last used and which browser / system it is.
+    ensure_columns(
+        &pool,
+        "user_sessions",
+        &[("last_seen", "TEXT"), ("user_agent", "TEXT")],
+    )
+    .await?;
     ensure_columns(
         &pool,
         "blocks",

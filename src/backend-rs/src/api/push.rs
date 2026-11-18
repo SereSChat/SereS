@@ -28,6 +28,8 @@ use web_push::{
 };
 
 const MAX_SUBSCRIPTIONS_PER_USER: i64 = 10;
+/// A device that asked the server within this time has SereS open.
+const OPEN_SECONDS: i64 = 30;
 /// Hosts of the push services of Chrome/Edge (Google), Firefox, Safari and Windows.
 /// The server sends requests to these only, never to a URL a client made up.
 const PUSH_HOSTS: [&str; 5] = [
@@ -224,9 +226,15 @@ async fn send(pool: &SqlitePool, user_ids: &[String], payload: &Value, delivery:
     let sql = format!(
         "SELECT p.endpoint,p.p256dh,p.auth FROM push_subscriptions p
          JOIN user_sessions s ON s.token_hash=p.session_hash AND s.expires_at>?
-         WHERE p.user_id IN ({placeholders})"
+         WHERE (s.last_seen IS NULL OR s.last_seen<?) AND p.user_id IN ({placeholders})"
     );
-    let mut query = sqlx::query(&sql).bind(super::auth::now_iso());
+    // Devices with SereS open right now show notifications themselves.
+    let open_since = (chrono::Utc::now() - chrono::Duration::seconds(OPEN_SECONDS))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let mut query = sqlx::query(&sql)
+        .bind(super::auth::now_iso())
+        .bind(open_since);
     for id in user_ids {
         query = query.bind(id);
     }

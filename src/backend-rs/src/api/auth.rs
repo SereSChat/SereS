@@ -45,14 +45,28 @@ fn api_bad_request(message: impl Into<String>) -> Response {
 
 pub(crate) async fn current_user(state: &AppState, headers: &HeaderMap) -> Option<SqliteRow> {
     let token = cookie_value(headers, SESSION_COOKIE)?;
+    let token_hash = hash_token(&token);
     let row = sqlx::query(
-        "SELECT u.* FROM user_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
+        "SELECT u.*, s.last_seen AS session_seen FROM user_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
     )
-    .bind(hash_token(&token))
+    .bind(&token_hash)
     .bind(now_iso())
     .fetch_optional(&state.db)
     .await
     .ok()??;
+    // The device was used just now (for the device list and to skip push
+    // notifications while SereS is open on it).
+    let session_seen: Option<String> = row.try_get("session_seen").ok().flatten();
+    if session_seen
+        .as_deref()
+        .is_none_or(|old| seconds_between(old, &now_iso()) >= 20.0)
+    {
+        let _ = sqlx::query("UPDATE user_sessions SET last_seen=? WHERE token_hash=?")
+            .bind(now_iso())
+            .bind(&token_hash)
+            .execute(&state.db)
+            .await;
+    }
     let last_seen: Option<String> = row.try_get("last_seen").ok().flatten();
     let user_id: String = row.try_get("id").ok()?;
     let now = now_iso();
@@ -622,13 +636,19 @@ async fn session_response(
     let token = format!("{}.{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let created = now_iso();
     let expires = iso_after(SESSION_DAYS * 24 * 60 * 60);
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.chars().take(300).collect::<String>());
     if sqlx::query(
-        "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+        "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,last_seen,user_agent) VALUES(?,?,?,?,?,?)",
     )
     .bind(hash_token(&token))
     .bind(user_id)
     .bind(expires)
-    .bind(created)
+    .bind(&created)
+    .bind(&created)
+    .bind(user_agent)
     .execute(&state.db)
     .await
     .is_err()
