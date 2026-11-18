@@ -69,7 +69,7 @@ pub async fn security_middleware(request: Request<Body>, next: Next) -> Response
     headers
         .entry("Permissions-Policy")
         .or_insert(HeaderValue::from_static(
-            "camera=(), microphone=(self), geolocation=()",
+            "camera=(self), microphone=(self), display-capture=(self), geolocation=()",
         ));
     if is_api {
         headers
