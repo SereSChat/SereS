@@ -507,4 +507,7 @@ window.SeresLang.de = {
   "link.checkCompare": "Prüfcode: {code} – erlaube es nur, wenn das neue Gerät denselben Code zeigt.",
   "link.needPassword": "Gib einmal dein Passwort ein, um von diesem Gerät aus Geräte zu koppeln.",
   "link.done": "Das Gerät ist gekoppelt.",
+  "call.reconnecting": "verbindet neu…",
+  "call.routeRelay": "über Relay",
+  "call.routeTcp": "über Relay (TCP), kann ruckeln",
 };

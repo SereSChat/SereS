@@ -507,4 +507,7 @@ window.SeresLang.fr = {
   "link.checkCompare": "Code de contrôle : {code} – autorise seulement si le nouvel appareil affiche le même code.",
   "link.needPassword": "Saisis ton mot de passe une fois pour associer des appareils depuis cet appareil.",
   "link.done": "L'appareil est associé.",
+  "call.reconnecting": "reconnexion…",
+  "call.routeRelay": "via relais",
+  "call.routeTcp": "via relais (TCP), peut saccader",
 };

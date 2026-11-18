@@ -507,4 +507,7 @@ window.SeresLang.en = {
   "link.checkCompare": "Check code: {code} – only allow it if the new device shows the same code.",
   "link.needPassword": "Enter your password once to link devices from this device.",
   "link.done": "The device is linked.",
+  "call.reconnecting": "reconnecting…",
+  "call.routeRelay": "via relay",
+  "call.routeTcp": "via relay (TCP), may lag",
 };
