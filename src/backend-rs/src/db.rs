@@ -63,6 +63,8 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
         ],
     )
     .await?;
+    // Invite link of a group (only the owner sees and changes it).
+    ensure_columns(&pool, "chats", &[("invite_token", "TEXT")]).await?;
     ensure_columns(
         &pool,
         "blocks",

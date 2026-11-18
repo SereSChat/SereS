@@ -172,6 +172,8 @@
     const params = new URLSearchParams({ login: "true", ...extraParams });
     const invite = new URLSearchParams(window.location.search).get("invite");
     if (invite) params.set("invite", invite);
+    const join = new URLSearchParams(window.location.search).get("join");
+    if (join) params.set("join", join);
     window.location.href = "index.html?" + params.toString();
   }
 
@@ -683,6 +685,7 @@
       openResetLink(resetToken);
     }
     if (params.get("invite")) setWarning(t("invite.loginHint"));
+    if (params.get("join")) setWarning(t("groupInvite.loginHint"));
     if (reason === "keys") {
       setWarning(t("login.reloginKeys"));
     }

@@ -226,6 +226,20 @@
       </div>
     </div>
 
+    <!-- Join a group through an invite link -->
+    <div class="modal-overlay modal-hidden" id="group-join-modal">
+      <div class="modal-box">
+        <h3 data-i18n="groupInvite.joinTitle">Join group</h3>
+        <div class="info-user" id="group-join-group"></div>
+        <p data-i18n="groupInvite.joinText">You were invited to this group. Everyone in it will see that you joined. You will only see messages sent after you joined.</p>
+        <h4 class="modal-warning" id="warning-group-join"></h4>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.cancel">Cancel</button>
+          <button class="modal-btn confirm-btn" type="button" id="confirm-group-join" data-i18n="groupInvite.join">Join</button>
+        </div>
+      </div>
+    </div>
+
     <!-- New message: one friend = direct chat, several = group -->
     <div class="modal-overlay modal-hidden" id="new-chat-modal">
       <div class="modal-box">

@@ -4877,3 +4877,22 @@ a.link-preview:hover {
 .message-text a.link-preview * {
   text-decoration: none;
 }
+
+/* ---------- Group invite links ---------- */
+.group-invite .group-invite-link {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 0.85em;
+}
+.group-invite-qr {
+  width: 160px;
+  margin: 8px 0;
+  padding: 8px;
+  background: #fff;
+  border-radius: 8px;
+}
+.group-invite-qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}

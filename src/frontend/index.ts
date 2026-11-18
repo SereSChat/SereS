@@ -169,6 +169,9 @@
   let editing: { chatId: string; message: Message; content: Content } | null = null;
   // Invite token from a link like /?invite=..., kept across the login redirect.
   const pendingInvite = new URLSearchParams(window.location.search).get("invite");
+  // Group invite from a link like /?join=..., kept across the login redirect as well.
+  const pendingJoin = new URLSearchParams(window.location.search).get("join");
+  let joinToAccept: string | null = null;
   // Set by the login page after a password reset ("code" or "mail").
   const recoveredBy = new URLSearchParams(window.location.search).get("recovered");
   let inviteToAccept: { token: string; name: string } | null = null;
@@ -246,6 +249,7 @@
     const params = new URLSearchParams();
     if (reason) params.set("reason", reason);
     if (pendingInvite) params.set("invite", pendingInvite);
+    if (pendingJoin) params.set("join", pendingJoin);
     const query = params.toString();
     window.location.href = "login.html" + (query ? "?" + query : "");
   }
@@ -454,6 +458,7 @@
       case "pinned":
       case "keys_reset":
       case "history_shared":
+      case "joined_link":
         return t("system." + payload.event, {
           actor: payload.actor ?? "",
           target: payload.target ?? "",
@@ -1843,6 +1848,15 @@
     return match[0].replace(/[.,;:!?]+$/, "");
   }
 
+  /** Links to this SereS (like group invites) need no preview. */
+  function isOwnLink(url: string) {
+    try {
+      return new URL(url).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+
   function safeUrl(value: unknown) {
     try {
       const url = new URL(String(value));
@@ -1857,14 +1871,16 @@
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
-        const scale = Math.min(1, 320 / Math.max(img.width, img.height));
+        // Encrypted messages are limited to 64 KB, so the picture stays small.
+        const scale = Math.min(1, 240 / Math.max(img.width, img.height));
         const canvas = document.createElement("canvas");
         canvas.width = Math.max(1, Math.round(img.width * scale));
         canvas.height = Math.max(1, Math.round(img.height * scale));
         const ctx = canvas.getContext("2d");
         if (!ctx) return resolve(null);
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL("image/jpeg", 0.75));
+        const small = canvas.toDataURL("image/jpeg", 0.7);
+        resolve(small.length <= 24000 ? small : null);
       };
       img.onerror = () => resolve(null);
       img.src = dataUrl;
@@ -1900,7 +1916,7 @@
   async function previewFor(text: string): Promise<LinkPreview | null> {
     if (!linkPreviewsOn()) return null;
     const url = firstUrl(text);
-    if (!url) return null;
+    if (!url || isOwnLink(url)) return null;
     if (linkPreview && linkPreview.url === url && linkPreview.dismissed) return null;
     const timeout = new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 3000));
     return Promise.race([fetchPreview(url), timeout]);
@@ -1915,7 +1931,7 @@
     if (linkTimer !== null) clearTimeout(linkTimer);
     linkTimer = window.setTimeout(() => {
       const url = linkPreviewsOn() && !editing ? firstUrl(($("message-input-field") as HTMLTextAreaElement).value) : null;
-      if (!url) return clearLinkPreview();
+      if (!url || isOwnLink(url)) return clearLinkPreview();
       if (linkPreview?.url === url) return;
       linkPreview = { url, data: null, dismissed: false };
       renderLinkPreviewBar();
@@ -3347,6 +3363,8 @@
             button(t("info.rename"), "pill-btn", action("rename", () => post(`/api/chats/${encodeURIComponent(details.id)}/rename`, { name: nameInput.value }))),
           ]),
         );
+        const invite = await groupInviteSection(details.id);
+        if (invite) body.appendChild(invite);
       }
       body.appendChild(h("p", { text: t("info.groupMembers", { count: members.length }) }));
       for (const member of members) {
@@ -3819,6 +3837,110 @@
       await refreshAll();
     } catch (error) {
       $("warning-invite").textContent = errorText(error);
+    }
+  }
+
+  // ------------------------------------------------------- group invites
+
+  function groupInviteUrl(token: string) {
+    return new URL("/?join=" + encodeURIComponent(token), window.location.origin).href;
+  }
+
+  /** The owner's part of the group info: make, copy, renew or turn off the link. */
+  async function groupInviteSection(chatId: string) {
+    const box = h("div", { className: "settings-section group-invite" });
+    box.appendChild(h("p", { text: t("groupInvite.title") }));
+    let token: string | null = null;
+    try {
+      token = (await api(`/api/chats/${encodeURIComponent(chatId)}/invite`)).token;
+    } catch {
+      return null;
+    }
+    const render = () => {
+      box.querySelectorAll(":scope > :not(p:first-child)").forEach((node) => node.remove());
+      if (!token) {
+        box.appendChild(h("p", { className: "settings-hint", text: t("groupInvite.none") }));
+        box.appendChild(button(t("groupInvite.create"), "pill-btn", () => change("create")));
+        return;
+      }
+      const url = groupInviteUrl(token);
+      const input = h("input", { className: "group-invite-link", attrs: { type: "text", readonly: "true", value: url } }) as HTMLInputElement;
+      input.value = url;
+      box.appendChild(input);
+      const qr = h("div", { className: "group-invite-qr" });
+      qr.appendChild(SeresQR.toSvg(url));
+      box.appendChild(qr);
+      box.appendChild(
+        h("div", { className: "info-actions" }, [
+          button(t("groupInvite.copy"), "pill-btn", async () => {
+            try {
+              await navigator.clipboard.writeText(url);
+            } catch {
+              input.select();
+              document.execCommand("copy");
+            }
+            showAlert(t("invite.copied"));
+          }),
+          typeof navigator.share === "function"
+            ? button(t("invite.share"), "pill-btn", () => navigator.share({ title: "SereS", url }).catch(() => {}))
+            : null,
+          button(t("groupInvite.renew"), "pill-btn", () => {
+            if (window.confirm(t("groupInvite.renewConfirm"))) change("create");
+          }),
+          button(t("groupInvite.off"), "pill-btn danger", () => {
+            if (window.confirm(t("groupInvite.offConfirm"))) change("delete");
+          }),
+        ]),
+      );
+      box.appendChild(h("p", { className: "settings-hint", text: t("groupInvite.hint") }));
+    };
+    const change = async (what: "create" | "delete") => {
+      try {
+        const data = await api(`/api/chats/${encodeURIComponent(chatId)}/invite`, { method: what === "create" ? "POST" : "DELETE", body: what === "create" ? {} : undefined });
+        token = data.token;
+        render();
+      } catch (error) {
+        showAlert(errorText(error));
+      }
+    };
+    render();
+    return box;
+  }
+
+  /** Someone opened a group invite link: show the group and ask. */
+  async function showGroupInvite(token: string) {
+    try {
+      const data = await api("/api/invites/" + encodeURIComponent(token));
+      if (data.member && data.chat_id) {
+        switchView("chats");
+        await openChat(data.chat_id);
+        return;
+      }
+      joinToAccept = token;
+      const box = $("group-join-group");
+      box.textContent = "";
+      box.append(avatarEl(data.name, { group: true, label: data.name }), h("div", { className: "item-info" }, [
+        h("strong", { text: data.name }),
+        h("span", { className: "item-status", text: t("groupInvite.members", { count: data.member_count }) }),
+      ]));
+      $("warning-group-join").textContent = "";
+      openModal("group-join-modal");
+    } catch (error) {
+      showAlert(error instanceof ApiError && error.status === 404 ? t("groupInvite.invalid") : errorText(error));
+    }
+  }
+
+  async function joinGroup() {
+    if (!joinToAccept) return;
+    try {
+      const data = await post("/api/invites/" + encodeURIComponent(joinToAccept) + "/join");
+      joinToAccept = null;
+      closeAllModals();
+      await loadChats();
+      switchView("chats");
+      await openChat(data.chat_id);
+    } catch (error) {
+      $("warning-group-join").textContent = errorText(error);
     }
   }
 
@@ -4338,6 +4460,21 @@
       openInviteModal();
     });
     $("add-friend-invite").addEventListener("click", () => openInviteModal());
+    document.addEventListener("click", (event) => {
+      const link = (event.target as Element).closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!link || event.ctrlKey || event.metaKey) return;
+      try {
+        const url = new URL(link.href);
+        const token = url.origin === window.location.origin ? url.searchParams.get("join") : null;
+        if (!token) return;
+        event.preventDefault();
+        event.stopPropagation();
+        showGroupInvite(token);
+      } catch {
+        // not a URL
+      }
+    }, true);
+    $("confirm-group-join").addEventListener("click", () => joinGroup());
     $("confirm-invite").addEventListener("click", acceptInvite);
     $("invite-copy").addEventListener("click", copyInvite);
     $("invite-share").addEventListener("click", shareInvite);
@@ -4888,10 +5025,11 @@
         openChat(event.data.chat);
       }
     });
-    if (pendingInvite) {
+    if (pendingInvite || pendingJoin) {
       // Remove the token from the address bar so a reload doesn't ask again.
       window.history.replaceState({}, document.title, window.location.pathname);
-      showInvite(pendingInvite);
+      if (pendingInvite) showInvite(pendingInvite);
+      else if (pendingJoin) showGroupInvite(pendingJoin);
     }
 
     // A cached page from before calls existed doesn't load calls.js.

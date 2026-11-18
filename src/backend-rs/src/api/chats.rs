@@ -57,6 +57,12 @@ pub fn router() -> Router<AppState> {
             post(remove_member_route),
         )
         .route("/api/chats/{chat_id}/rename", post(rename_group))
+        .route(
+            "/api/chats/{chat_id}/invite",
+            get(invite_get).post(invite_create).delete(invite_revoke),
+        )
+        .route("/api/invites/{token}", get(invite_info))
+        .route("/api/invites/{token}/join", post(invite_join))
         .route("/api/chats/{chat_id}/leave", post(delete_chat))
         .route("/api/chats/{chat_id}/delete", post(delete_chat))
         .route(
@@ -2290,4 +2296,212 @@ async fn presence(pool: &SqlitePool, me: &str, other: &str) -> Result<Option<Val
     let online = time
         .is_some_and(|v| (chrono::Utc::now() - v.with_timezone(&chrono::Utc)).num_seconds() < 45);
     Ok(Some(json!({"online":online,"last_seen":last})))
+}
+
+// ------------------------------------------------------------ invite links
+// The owner of a group can make a link; anyone logged in who has it can join.
+// A new link replaces the old one, and the owner can turn it off.
+
+fn valid_token(token: &str) -> bool {
+    token.len() == 32 && token.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+async fn owner_of_group(
+    state: &AppState,
+    headers: &HeaderMap,
+    chat_id: &str,
+) -> Result<User, axum::response::Response> {
+    let me = user(state, headers)
+        .await
+        .map_err(axum::response::IntoResponse::into_response)?;
+    let chat = match membership(&state.db, chat_id, &me.id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return Err(error("Chat not found", StatusCode::NOT_FOUND)),
+        Err(_) => return Err(db_error()),
+    };
+    if chat.try_get::<String, _>("type").ok().as_deref() != Some("group") {
+        return Err(error("Only possible in groups", StatusCode::BAD_REQUEST));
+    }
+    if chat.try_get::<String, _>("role").ok().as_deref() != Some("owner") {
+        return Err(error(
+            "Only the owner of the group can do this",
+            StatusCode::FORBIDDEN,
+        ));
+    }
+    Ok(me)
+}
+
+async fn invite_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(chat_id): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) = owner_of_group(&state, &headers, &chat_id).await {
+        return response;
+    }
+    match sqlx::query_scalar::<_, Option<String>>("SELECT invite_token FROM chats WHERE id=?")
+        .bind(&chat_id)
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(token) => json_ok(json!({"token":token})).into_response(),
+        Err(_) => db_error(),
+    }
+}
+
+async fn invite_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(chat_id): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) = owner_of_group(&state, &headers, &chat_id).await {
+        return response;
+    }
+    let token = Uuid::new_v4().simple().to_string();
+    match sqlx::query("UPDATE chats SET invite_token=? WHERE id=?")
+        .bind(&token)
+        .bind(&chat_id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(_) => json_ok(json!({"token":token})).into_response(),
+        Err(_) => db_error(),
+    }
+}
+
+async fn invite_revoke(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(chat_id): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) = owner_of_group(&state, &headers, &chat_id).await {
+        return response;
+    }
+    match sqlx::query("UPDATE chats SET invite_token=NULL WHERE id=?")
+        .bind(&chat_id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(_) => json_ok(json!({"token":null})).into_response(),
+        Err(_) => db_error(),
+    }
+}
+
+async fn invited_group(state: &AppState, token: &str) -> Result<Option<SqliteRow>, sqlx::Error> {
+    if !valid_token(token) {
+        return Ok(None);
+    }
+    sqlx::query("SELECT id,name FROM chats WHERE invite_token=? AND type='group'")
+        .bind(token)
+        .fetch_optional(&state.db)
+        .await
+}
+
+async fn invite_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+) -> axum::response::Response {
+    let me = match user(&state, &headers).await {
+        Ok(v) => v,
+        Err(e) => return axum::response::IntoResponse::into_response(e),
+    };
+    if state.rate_limited(format!("invite:{}", me.id), 30, 60) {
+        return error(
+            "Too many tries, wait a minute",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
+    let chat = match invited_group(&state, &token).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return error(
+                "This invite link is not valid (any more)",
+                StatusCode::NOT_FOUND,
+            );
+        }
+        Err(_) => return db_error(),
+    };
+    let chat_id: String = chat.try_get("id").unwrap_or_default();
+    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chat_members WHERE chat_id=?")
+        .bind(&chat_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+    let member = matches!(membership(&state.db, &chat_id, &me.id).await, Ok(Some(_)));
+    json_ok(json!({
+        "chat_id": if member { Some(chat_id.clone()) } else { None },
+        "name": chat.try_get::<Option<String>, _>("name").ok().flatten().unwrap_or_default(),
+        "member_count": count,
+        "member": member,
+    }))
+    .into_response()
+}
+
+async fn invite_join(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+) -> axum::response::Response {
+    let me = match user(&state, &headers).await {
+        Ok(v) => v,
+        Err(e) => return axum::response::IntoResponse::into_response(e),
+    };
+    if state.rate_limited(format!("invite:{}", me.id), 30, 60) {
+        return error(
+            "Too many tries, wait a minute",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
+    if me.pub_sign.is_none() {
+        return error("Your account has no keys yet", StatusCode::BAD_REQUEST);
+    }
+    let chat = match invited_group(&state, &token).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return error(
+                "This invite link is not valid (any more)",
+                StatusCode::NOT_FOUND,
+            );
+        }
+        Err(_) => return db_error(),
+    };
+    let chat_id: String = chat.try_get("id").unwrap_or_default();
+    if let Ok(Some(_)) = membership(&state.db, &chat_id, &me.id).await {
+        // Already in it: show it again if it was hidden.
+        let _ = sqlx::query("UPDATE chat_members SET hidden=0 WHERE chat_id=? AND user_id=?")
+            .bind(&chat_id)
+            .bind(&me.id)
+            .execute(&state.db)
+            .await;
+        return json_ok(json!({"chat_id":chat_id})).into_response();
+    }
+    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chat_members WHERE chat_id=?")
+        .bind(&chat_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+    if count >= MAX_GROUP_MEMBERS as i64 {
+        return error("The group is full", StatusCode::BAD_REQUEST);
+    }
+    let mut tx = match state.db.begin().await {
+        Ok(v) => v,
+        Err(_) => return db_error(),
+    };
+    if insert_member(&mut tx, &chat_id, &me.id, "member")
+        .await
+        .is_err()
+        || system_message(
+            &mut tx,
+            &chat_id,
+            "joined_link",
+            json!({"actor":me.display_name}),
+        )
+        .await
+        .is_err()
+        || tx.commit().await.is_err()
+    {
+        return db_error();
+    }
+    json_ok(json!({"chat_id":chat_id})).into_response()
 }
