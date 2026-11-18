@@ -817,6 +817,22 @@ async fn serialize_call(pool: &SqlitePool, id: &str, me: &str) -> Result<Value, 
         .and_then(|v| v.try_get::<String, _>("type").ok())
         .unwrap_or_else(|| "dm".into());
     let participants=sqlx::query("SELECT p.user_id,p.state,u.username,u.display_name FROM call_participants p JOIN users u ON u.id=p.user_id WHERE p.call_id=? ORDER BY u.username COLLATE NOCASE").bind(id).fetch_all(pool).await?;
+    // A direct chat has no name of its own: it is called after the other person.
+    let name = if name.is_empty() && kind == "dm" {
+        participants
+            .iter()
+            .find(|r| r.try_get::<String, _>("user_id").ok().as_deref() != Some(me))
+            .map(|r| {
+                r.try_get::<Option<String>, _>("display_name")
+                    .ok()
+                    .flatten()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| r.try_get("username").unwrap_or_default())
+            })
+            .unwrap_or_default()
+    } else {
+        name
+    };
     Ok(
         json!({"id":id,"chat_id":chat_id,"chat_name":name,"chat_type":kind,"started_by":call.try_get::<String,_>("started_by")?,"started_at":call.try_get::<String,_>("started_at")?,"answered_at":call.try_get::<Option<String>,_>("answered_at")?,"participants":participants.iter().map(|r|json!({"id":r.try_get::<String,_>("user_id").unwrap_or_default(),"username":r.try_get::<String,_>("username").unwrap_or_default(),"display_name":r.try_get::<Option<String>,_>("display_name").ok().flatten().filter(|v|!v.is_empty()).or_else(||r.try_get("username").ok()),"state":r.try_get::<String,_>("state").unwrap_or_default()})).collect::<Vec<_>>()}),
     )
