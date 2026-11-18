@@ -516,4 +516,13 @@ window.SeresLang.fr = {
   "call.screenOff": "Arrêter le partage",
   "call.noCamera": "Pas d'accès à la caméra. Autorise-la dans ton navigateur.",
   "call.noScreen": "Le partage d'écran n'est pas possible dans ce navigateur.",
+  "status.text": "Statut (affiché sous ton profil) :",
+  "status.title": "Statut",
+  "status.hint": "Tes amis et les personnes avec qui tu discutes le voient sous ton nom.",
+  "status.placeholder": "Salut, j'utilise SereS",
+  "status.clear": "Supprimer",
+  "status.save": "Enregistrer",
+  "status.none": "Pas de statut",
+  "status.saved": "Statut enregistré.",
+  "status.removed": "Statut supprimé.",
 };

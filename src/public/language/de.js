@@ -516,4 +516,13 @@ window.SeresLang.de = {
   "call.screenOff": "Teilen beenden",
   "call.noCamera": "Kein Zugriff auf die Kamera. Erlaube sie im Browser.",
   "call.noScreen": "Bildschirm teilen ist in diesem Browser nicht möglich.",
+  "status.text": "Status (wird unter deinem Profil angezeigt):",
+  "status.title": "Status",
+  "status.hint": "Freunde und Leute, mit denen du chattest, sehen ihn unter deinem Namen.",
+  "status.placeholder": "Hey, ich benutze SereS",
+  "status.clear": "Entfernen",
+  "status.save": "Speichern",
+  "status.none": "Kein Status",
+  "status.saved": "Status gespeichert.",
+  "status.removed": "Status entfernt.",
 };

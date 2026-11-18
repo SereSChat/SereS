@@ -4638,3 +4638,21 @@ body.call-popup .call-window.has-video {
     width: calc(100vw - 16px);
   }
 }
+
+/* Status text under the profile and in the settings */
+.profile-about {
+  max-width: 320px;
+  margin: 6px auto 0;
+  font-style: italic;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.status-current {
+  overflow-wrap: anywhere;
+}
+
+.status-current.empty {
+  color: #8696a0;
+  font-style: italic;
+}

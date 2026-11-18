@@ -516,4 +516,13 @@ window.SeresLang.en = {
   "call.screenOff": "Stop sharing",
   "call.noCamera": "No access to the camera. Allow it in your browser.",
   "call.noScreen": "Screen sharing is not possible in this browser.",
+  "status.text": "Status (shown under your profile):",
+  "status.title": "Status",
+  "status.hint": "Friends and people you chat with see it under your name.",
+  "status.placeholder": "Hey there, I am using SereS",
+  "status.clear": "Remove",
+  "status.save": "Save",
+  "status.none": "No status",
+  "status.saved": "Status saved.",
+  "status.removed": "Status removed.",
 };
