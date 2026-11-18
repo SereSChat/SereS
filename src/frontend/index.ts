@@ -766,7 +766,8 @@
       onLongPress(item, (x, y) => openChatMenu(chat, x, y));
       list.appendChild(item);
     });
-    if (!list.querySelector(".chat-list-item")) {
+    const hits = filter ? appendMessageHits(list, filter) : 0;
+    if (!list.querySelector(".chat-list-item") && !hits) {
       list.appendChild(
         h("div", { className: "list-empty" }, [
           h("p", { text: t(filter ? "list.noChatsFound" : "list.noChats") }),
@@ -779,6 +780,160 @@
       );
     }
     applyTheme();
+  }
+
+  // ------------------------------------------------- search in all chats
+  // The server can't read messages, so the browser loads the latest ones of
+  // every chat, decrypts them and searches locally. Nothing about the search
+  // leaves the device.
+
+  interface IndexedMessage {
+    id: string;
+    seq: number;
+    created_at: string;
+    sender: string;
+    text: string;
+    lower: string;
+  }
+  const SEARCH_DEPTH = 400;
+  const messageIndex = new Map<string, { at: number; rows: IndexedMessage[] }>();
+  let globalSearch: { query: string; running: boolean; done: number; total: number } | null = null;
+  let globalSearchTimer: number | null = null;
+
+  /** Text that can be searched: the message, a poll question and options, a file name. */
+  function searchableText(view: Shown) {
+    const content = view.content || {};
+    const parts = [view.text];
+    if (content.poll && validPoll(content.poll)) parts.push(String(content.poll.question), ...content.poll.options.map(String));
+    if (content.file?.name && content.file.kind !== "voice") parts.push(String(content.file.name));
+    if (content.preview?.title) parts.push(String(content.preview.title));
+    return parts.filter(Boolean).join(" \n");
+  }
+
+  async function indexChat(chat: ChatSummary) {
+    const cached = messageIndex.get(chat.id);
+    if (cached && Date.now() - cached.at < 2 * 60 * 1000) return;
+    const rows: IndexedMessage[] = [];
+    let before = "";
+    for (let loaded = 0; loaded < SEARCH_DEPTH; ) {
+      const data = await api(`/api/chats/${encodeURIComponent(chat.id)}/messages?limit=200${before}`);
+      const messages: Message[] = data.messages || [];
+      loaded += messages.length;
+      const views = await Promise.all(messages.map((m) => (m.silent || m.deleted ? null : showMessage(chat.id, m))));
+      messages.forEach((message, i) => {
+        const view = views[i];
+        if (!view || (view.type !== "text" && view.type !== "legacy")) return;
+        const text = searchableText(view).trim();
+        if (!text) return;
+        rows.push({
+          id: message.id,
+          seq: message.seq,
+          created_at: message.created_at,
+          sender: message.sender_id === me.id ? t("msg.you") : message.sender_display || message.sender || "",
+          text,
+          lower: text.toLowerCase(),
+        });
+      });
+      if (!data.has_more || !messages.length) break;
+      before = `&before_seq=${Math.min(...messages.map((m) => m.seq))}`;
+    }
+    messageIndex.set(chat.id, { at: Date.now(), rows });
+  }
+
+  function startGlobalSearch() {
+    if (globalSearchTimer !== null) clearTimeout(globalSearchTimer);
+    const query = (($("list-search") as HTMLInputElement).value || "").trim().toLowerCase();
+    if (query.length < 2) {
+      globalSearch = null;
+      return;
+    }
+    globalSearchTimer = window.setTimeout(async () => {
+      const list = chats.slice();
+      const search = { query, running: true, done: 0, total: list.length };
+      globalSearch = search;
+      chatsSignature = "";
+      loadChats().catch(() => {});
+      // A few chats at a time, so the browser stays responsive.
+      let next = 0;
+      const worker = async () => {
+        while (next < list.length && globalSearch === search) {
+          const chat = list[next++];
+          try {
+            await indexChat(chat);
+          } catch {
+            // Skip a chat that can't be loaded.
+          }
+          search.done++;
+          if (search.done % 4 === 0 && globalSearch === search) {
+            chatsSignature = "";
+            loadChats().catch(() => {});
+          }
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+      if (globalSearch !== search) return;
+      search.running = false;
+      chatsSignature = "";
+      loadChats().catch(() => {});
+    }, 350);
+  }
+
+  function highlighted(text: string, query: string) {
+    // A short piece around the first match, with the match marked.
+    const index = text.toLowerCase().indexOf(query);
+    const start = index > 18 ? index - 12 : 0;
+    const piece = (start > 0 ? "…" : "") + text.slice(start, index + query.length + 80).replace(/\s+/g, " ");
+    const span = h("span", { className: "item-status search-snippet" });
+    const lower = piece.toLowerCase();
+    const at = lower.indexOf(query);
+    if (at < 0) {
+      span.textContent = piece;
+      return span;
+    }
+    span.append(document.createTextNode(piece.slice(0, at)), h("mark", { text: piece.slice(at, at + query.length) }), document.createTextNode(piece.slice(at + query.length)));
+    return span;
+  }
+
+  /** Adds the matching messages below the chats; returns how many there are. */
+  function appendMessageHits(list: HTMLElement, filter: string) {
+    const query = filter.trim();
+    if (query.length < 2 || !globalSearch || globalSearch.query !== query) return 0;
+    const hits: { chat: ChatSummary; row: IndexedMessage }[] = [];
+    for (const chat of chats) {
+      for (const row of messageIndex.get(chat.id)?.rows || []) {
+        if (row.lower.includes(query)) hits.push({ chat, row });
+      }
+    }
+    hits.sort((a, b) => (a.row.created_at < b.row.created_at ? 1 : -1));
+    list.appendChild(
+      h("div", { className: "list-section-title" }, [
+        h("span", { text: t("search.messages") }),
+        globalSearch.running ? h("span", { className: "search-progress", text: t("search.progress", { done: globalSearch.done, total: globalSearch.total }) }) : null,
+      ]),
+    );
+    for (const { chat, row } of hits.slice(0, 60)) {
+      const item = h("div", { className: "list-item search-hit" });
+      const avatarName = chat.type === "dm" && chat.other_user ? chat.other_user : chat.name;
+      item.appendChild(avatarEl(avatarName, { group: chat.type === "group", label: chat.name }));
+      item.appendChild(
+        h("div", { className: "item-info" }, [
+          h("div", { className: "item-row" }, [
+            h("span", { className: "item-name", text: chat.type === "group" && row.sender ? `${chat.name} · ${row.sender}` : chat.name }),
+            h("span", { className: "item-time", text: formatListTime(row.created_at) }),
+          ]),
+          h("div", { className: "item-row" }, [highlighted(row.text, query)]),
+        ]),
+      );
+      item.addEventListener("click", async () => {
+        await openChat(chat.id);
+        await jumpToMessage(row.id);
+      });
+      list.appendChild(item);
+    }
+    if (!hits.length && !globalSearch.running) list.appendChild(h("p", { className: "list-hint", text: t("search.noMessages") }));
+    if (hits.length > 60) list.appendChild(h("p", { className: "list-hint", text: t("search.more", { count: hits.length - 60 }) }));
+    list.appendChild(h("p", { className: "list-hint", text: t("search.depth", { count: SEARCH_DEPTH }) }));
+    return hits.length || 1;
   }
 
   function updateBadges() {
@@ -4540,6 +4695,7 @@
       btn.addEventListener("click", () => switchView(btn.dataset.view as "chats" | "friends" | "requests" | "matrix"));
     });
     $("list-search").addEventListener("input", () => {
+      startGlobalSearch();
       chatsSignature = "";
       loadChats().catch(() => {});
       renderFriends();

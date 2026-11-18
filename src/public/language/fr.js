@@ -568,4 +568,9 @@ window.SeresLang.fr = {
   "groupInvite.loginHint": "Connecte-toi pour rejoindre le groupe.",
   "system.joined_link": "{actor} a rejoint via le lien d'invitation",
   "groupInvite.members": "{count} membres",
+  "search.messages": "Messages",
+  "search.progress": "recherche {done}/{total} discussions…",
+  "search.noMessages": "Aucun message trouvé.",
+  "search.more": "et {count} de plus – précise ta recherche",
+  "search.depth": "Recherche dans les {count} derniers messages de chaque discussion, uniquement sur cet appareil.",
 };

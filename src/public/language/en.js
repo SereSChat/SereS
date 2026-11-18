@@ -568,4 +568,9 @@ window.SeresLang.en = {
   "groupInvite.loginHint": "Log in to join the group.",
   "system.joined_link": "{actor} joined through the invite link",
   "groupInvite.members": "{count} members",
+  "search.messages": "Messages",
+  "search.progress": "searching {done}/{total} chats…",
+  "search.noMessages": "No messages found.",
+  "search.more": "and {count} more – type more to narrow it down",
+  "search.depth": "Searches the latest {count} messages of each chat, on this device only.",
 };

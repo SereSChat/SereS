@@ -4896,3 +4896,31 @@ a.link-preview:hover {
   width: 100%;
   height: auto;
 }
+
+/* ---------- Search in all chats ---------- */
+.list-section-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 14px 16px 6px;
+  font-size: 0.8em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+.search-progress {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.search-snippet mark {
+  background: rgba(255, 210, 0, 0.35);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.search-hit {
+  cursor: pointer;
+}

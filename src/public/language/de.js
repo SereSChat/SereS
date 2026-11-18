@@ -568,4 +568,9 @@ window.SeresLang.de = {
   "groupInvite.loginHint": "Melde dich an, um der Gruppe beizutreten.",
   "system.joined_link": "{actor} ist über den Einladungslink beigetreten",
   "groupInvite.members": "{count} Mitglieder",
+  "search.messages": "Nachrichten",
+  "search.progress": "durchsuche {done}/{total} Chats…",
+  "search.noMessages": "Keine Nachrichten gefunden.",
+  "search.more": "und {count} weitere – tippe mehr, um einzugrenzen",
+  "search.depth": "Durchsucht die letzten {count} Nachrichten jedes Chats, nur auf diesem Gerät.",
 };
