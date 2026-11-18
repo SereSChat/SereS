@@ -548,4 +548,8 @@ window.SeresLang.de = {
   "poll.multi": "Eine oder mehrere auswählen",
   "poll.votes": "{count} Stimmen",
   "poll.votesOne": "1 Stimme",
+  "links.on": "Link-Vorschau: an",
+  "links.off": "Link-Vorschau: aus",
+  "links.remove": "Keine Vorschau",
+  "links.hint": "Die Vorschau holt dein SereS-Server, wenn du einen Link sendest, und sie geht verschlüsselt mit; wer die Nachricht bekommt, ruft die Seite nicht auf.",
 };

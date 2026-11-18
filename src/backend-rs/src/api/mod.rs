@@ -4,6 +4,7 @@ mod avatars;
 mod calls;
 pub(crate) mod chats;
 pub(crate) mod devices;
+mod links;
 mod password_reset;
 mod profile;
 pub(crate) mod push;
@@ -33,6 +34,7 @@ pub fn router() -> Router<AppState> {
         .merge(chats::router())
         .merge(calls::router())
         .merge(devices::router())
+        .merge(links::router())
         .merge(profile::router())
         .merge(push::router())
         .merge(social::router())

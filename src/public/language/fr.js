@@ -548,4 +548,8 @@ window.SeresLang.fr = {
   "poll.multi": "Choisis-en une ou plusieurs",
   "poll.votes": "{count} votes",
   "poll.votesOne": "1 vote",
+  "links.on": "Aperçu des liens : activé",
+  "links.off": "Aperçu des liens : désactivé",
+  "links.remove": "Pas d'aperçu",
+  "links.hint": "L'aperçu est récupéré par ton serveur SereS quand tu envoies un lien et part chiffré ; qui reçoit le message ne contacte pas le site.",
 };

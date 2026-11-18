@@ -4810,3 +4810,70 @@ body.call-popup .call-window.has-video {
   gap: 8px;
   cursor: pointer;
 }
+
+/* ---------- Link previews ---------- */
+.link-preview {
+  display: flex;
+  flex-direction: column;
+  max-width: 340px;
+  margin: 2px 0 6px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.16);
+  border-left: 3px solid rgba(255, 255, 255, 0.35);
+  color: inherit;
+  text-decoration: none;
+}
+a.link-preview:hover {
+  background: rgba(0, 0, 0, 0.24);
+}
+.link-preview-image {
+  width: 100%;
+  max-height: 180px;
+  object-fit: cover;
+  display: block;
+}
+.link-preview-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px 8px;
+  min-width: 0;
+}
+.link-preview-site {
+  font-size: 0.75em;
+  opacity: 0.7;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.link-preview-title {
+  font-size: 0.95em;
+  word-break: break-word;
+}
+.link-preview-desc {
+  font-size: 0.85em;
+  opacity: 0.85;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.link-preview-bar .link-preview {
+  flex-direction: row;
+  max-width: none;
+  margin: 0;
+  background: transparent;
+  border-left: none;
+}
+.link-preview-bar .link-preview-image {
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+}
+.link-preview-bar .link-preview-desc {
+  -webkit-line-clamp: 1;
+}
+.message-text a.link-preview,
+.message-text a.link-preview * {
+  text-decoration: none;
+}

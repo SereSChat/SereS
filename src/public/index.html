@@ -132,6 +132,10 @@
         <span class="material-symbols-rounded">edit</span><span data-i18n="msg.editing">Editing message</span>
         <button class="edit-cancel" type="button" id="edit-cancel" aria-label="Cancel" data-i18n-aria-label="common.cancel">✕</button>
       </div>
+      <div class="reply-bar link-preview-bar modal-hidden" id="link-preview-bar">
+        <div class="reply-bar-content" id="link-preview-bar-content"></div>
+        <button class="edit-cancel" type="button" id="link-preview-cancel" aria-label="No preview" data-i18n-aria-label="links.remove">✕</button>
+      </div>
       <div class="reply-bar modal-hidden" id="reply-bar">
         <div class="reply-bar-content">
           <strong id="reply-bar-name"></strong>
@@ -358,6 +362,8 @@
           <p class="settings-hint" data-i18n="privacy.hint">If you hide your last seen, you can't see other people's either.</p>
           <button class="modal-btn secondary-btn" type="button" id="notify-toggle"></button>
           <button class="modal-btn secondary-btn" type="button" id="notify-preview-toggle"></button>
+          <button class="modal-btn secondary-btn" type="button" id="links-toggle"></button>
+          <p class="settings-hint" data-i18n="links.hint">Previews are made by your SereS server when you send a link and go along encrypted; whoever gets the message does not contact the site.</p>
         </div>
 
         <div class="settings-section">

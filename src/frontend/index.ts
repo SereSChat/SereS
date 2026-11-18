@@ -70,6 +70,16 @@
     // A poll; the votes are silent messages with the chosen option numbers.
     poll?: { question: string; options: string[]; multi: boolean };
     choices?: number[];
+    // Made by the sender, so the people receiving it never contact the site.
+    preview?: LinkPreview;
+  }
+
+  interface LinkPreview {
+    url: string;
+    title: string;
+    description?: string | null;
+    site?: string | null;
+    image?: string | null;
   }
 
   interface Presence {
@@ -1710,6 +1720,11 @@
       if (formatted.mentioned && !own) row.classList.add("mentioned");
     }
 
+    if (content.preview && view.type === "text" && linkPreviewsOn()) {
+      const card = previewCard(content.preview);
+      if (card) bubble.insertBefore(card, bubble.querySelector(".message-body"));
+    }
+
     const meta = h("span", { className: "message-meta" });
     if (message.expires_at) meta.appendChild(h("span", { className: "material-symbols-rounded message-expiry", text: "timer", title: t("disappear.expires", { time: formatDateTime(message.expires_at) }) }));
     if (message.edited_at) meta.appendChild(h("span", { className: "message-edited", text: t("msg.edited") }));
@@ -1806,6 +1821,148 @@
       if (error instanceof ApiError && error.status === 409) await refreshCurrentDetails().catch(() => {});
       showAlert(errorText(error));
     }
+  }
+
+  // ---------------------------------------------------------- link previews
+  // Fetched (through the SereS server) while the sender types; the result is
+  // sent inside the encrypted message. Can be turned off in the settings.
+
+  const URL_PATTERN = /\bhttps?:\/\/[^\s<>"')\]]+/i;
+  const previewCache = new Map<string, Promise<LinkPreview | null>>();
+  let linkPreview: { url: string; data: LinkPreview | null; dismissed: boolean } | null = null;
+  let linkTimer: number | null = null;
+
+  function linkPreviewsOn() {
+    return readStore("settings").links !== "off";
+  }
+
+  function firstUrl(text: string) {
+    const match = URL_PATTERN.exec(text);
+    if (!match) return null;
+    // Punctuation at the end belongs to the sentence.
+    return match[0].replace(/[.,;:!?]+$/, "");
+  }
+
+  function safeUrl(value: unknown) {
+    try {
+      const url = new URL(String(value));
+      return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Makes the picture small, so the message stays small. */
+  function shrinkImage(dataUrl: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, 320 / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return resolve(null);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.75));
+      };
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    });
+  }
+
+  function fetchPreview(url: string) {
+    let pending = previewCache.get(url);
+    if (!pending) {
+      pending = (async () => {
+        try {
+          const data = await api(`/api/link-preview?url=${encodeURIComponent(url)}`);
+          const href = safeUrl(data.url) || url;
+          const image = typeof data.image === "string" && data.image.startsWith("data:image/") ? await shrinkImage(data.image) : null;
+          return {
+            url: href,
+            title: String(data.title || "").slice(0, 200),
+            description: data.description ? String(data.description).slice(0, 300) : null,
+            site: data.site ? String(data.site).slice(0, 80) : null,
+            image,
+          } as LinkPreview;
+        } catch {
+          return null;
+        }
+      })();
+      previewCache.set(url, pending);
+      if (previewCache.size > 50) previewCache.delete(previewCache.keys().next().value!);
+    }
+    return pending;
+  }
+
+  /** The preview for the link in a message about to be sent (waits a little if needed). */
+  async function previewFor(text: string): Promise<LinkPreview | null> {
+    if (!linkPreviewsOn()) return null;
+    const url = firstUrl(text);
+    if (!url) return null;
+    if (linkPreview && linkPreview.url === url && linkPreview.dismissed) return null;
+    const timeout = new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 3000));
+    return Promise.race([fetchPreview(url), timeout]);
+  }
+
+  function clearLinkPreview() {
+    linkPreview = null;
+    renderLinkPreviewBar();
+  }
+
+  function watchLinkPreview() {
+    if (linkTimer !== null) clearTimeout(linkTimer);
+    linkTimer = window.setTimeout(() => {
+      const url = linkPreviewsOn() && !editing ? firstUrl(($("message-input-field") as HTMLTextAreaElement).value) : null;
+      if (!url) return clearLinkPreview();
+      if (linkPreview?.url === url) return;
+      linkPreview = { url, data: null, dismissed: false };
+      renderLinkPreviewBar();
+      fetchPreview(url).then((data) => {
+        if (linkPreview?.url !== url) return;
+        linkPreview.data = data;
+        renderLinkPreviewBar();
+      });
+    }, 500);
+  }
+
+  function renderLinkPreviewBar() {
+    const bar = $("link-preview-bar");
+    const content = $("link-preview-bar-content");
+    content.textContent = "";
+    const show = !!linkPreview && !linkPreview.dismissed && !!linkPreview.data;
+    bar.classList.toggle("modal-hidden", !show);
+    if (show) {
+      const card = previewCard(linkPreview!.data!, false);
+      if (card) content.appendChild(card);
+    }
+  }
+
+  function previewCard(preview: LinkPreview, clickable = true) {
+    const url = safeUrl(preview?.url);
+    if (!url || !preview.title) return null;
+    const image = typeof preview.image === "string" && preview.image.startsWith("data:image/") ? preview.image : null;
+    let host = "";
+    try {
+      host = new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      // checked above
+    }
+    const card = h(clickable ? "a" : "div", { className: "link-preview" + (image ? "" : " no-image") }, [
+      image ? h("img", { className: "link-preview-image", attrs: { src: image, alt: "", loading: "lazy" } }) : null,
+      h("div", { className: "link-preview-text" }, [
+        h("span", { className: "link-preview-site", text: String(preview.site || host) }),
+        h("strong", { className: "link-preview-title", text: String(preview.title) }),
+        preview.description ? h("span", { className: "link-preview-desc", text: String(preview.description) }) : null,
+      ]),
+    ]);
+    if (clickable) {
+      card.setAttribute("href", url);
+      card.setAttribute("target", "_blank");
+      card.setAttribute("rel", "noopener noreferrer");
+    }
+    return card;
   }
 
   // ------------------------------------------------------------------ polls
@@ -2328,9 +2485,13 @@
           }
           clearPendingFiles();
         } else {
-          await sendContent(opened, reply ? { text, reply } : { text });
+          const content: Content = reply ? { text, reply } : { text };
+          const preview = await previewFor(text);
+          if (preview) content.preview = preview;
+          await sendContent(opened, content);
         }
         cancelReply();
+        clearLinkPreview();
       }
       input.value = "";
       drafts.delete(opened.id);
@@ -2528,11 +2689,14 @@
       replyTo && replyTo.chatId === opened.id
         ? { id: replyTo.message.id, sender_id: replyTo.message.sender_id, preview: replyTo.preview }
         : undefined;
+    const linkPreview = await previewFor(text);
     try {
       for (let attempt = 0; ; attempt++) {
         const details = await readyToSend(opened, attempt > 0);
         const id = newMessageId();
-        const payload = await SeresCrypto.encryptMessage(identity, opened.id, id, reply ? { text, reply } : { text }, encryptionMembers(details));
+        const content: Content = reply ? { text, reply } : { text };
+        if (linkPreview) content.preview = linkPreview;
+        const payload = await SeresCrypto.encryptMessage(identity, opened.id, id, content, encryptionMembers(details));
         try {
           await post(`/api/chats/${encodeURIComponent(opened.id)}/scheduled`, { id, payload, send_at: when.toISOString() });
           break;
@@ -2547,6 +2711,7 @@
       drafts.delete(opened.id);
       autoGrow(input);
       cancelReply();
+      clearLinkPreview();
       updateSendButton();
       showAlert(t("schedule.done", { time: formatDateTime(when.toISOString()) }));
       await loadScheduled(opened);
@@ -3715,6 +3880,7 @@
     $("privacy-toggle").textContent = t(me.show_last_seen === false ? "privacy.showOff" : "privacy.showOn");
     $("notify-toggle").textContent = t(settings.notify === "on" && notificationsEnabled() ? "notify.on" : "notify.off");
     $("notify-preview-toggle").textContent = t(settings.preview === "off" ? "notify.previewOff" : "notify.previewOn");
+    $("links-toggle").textContent = t(settings.links === "off" ? "links.off" : "links.on");
     $("notify-preview-toggle").classList.toggle("modal-hidden", settings.notify !== "on");
   }
 
@@ -4110,6 +4276,19 @@
     $("messages").addEventListener("scroll", updateJumpButton, { passive: true });
     $("lightbox").addEventListener("click", () => $("lightbox").classList.add("modal-hidden"));
     $("privacy-toggle").addEventListener("click", togglePrivacy);
+    $("links-toggle").addEventListener("click", () => {
+      const settings = readStore("settings");
+      settings.links = settings.links === "off" ? "on" : "off";
+      writeStore("settings", settings);
+      renderSettingsToggles();
+      clearLinkPreview();
+      if (current) renderMessages({ keepPosition: true });
+    });
+    $("message-input-field").addEventListener("input", watchLinkPreview);
+    $("link-preview-cancel").addEventListener("click", () => {
+      if (linkPreview) linkPreview.dismissed = true;
+      renderLinkPreviewBar();
+    });
     $("notify-toggle").addEventListener("click", () => toggleNotifications().catch(() => {}));
     $("notify-preview-toggle").addEventListener("click", () => {
       const settings = readStore("settings");

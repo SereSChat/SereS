@@ -548,4 +548,8 @@ window.SeresLang.en = {
   "poll.multi": "Choose one or more",
   "poll.votes": "{count} votes",
   "poll.votesOne": "1 vote",
+  "links.on": "Link previews: on",
+  "links.off": "Link previews: off",
+  "links.remove": "No preview",
+  "links.hint": "Previews are made by your SereS server when you send a link and go along encrypted; whoever gets the message does not contact the site.",
 };
