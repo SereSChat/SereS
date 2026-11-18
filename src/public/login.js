@@ -51,7 +51,7 @@
             showTwofa();
             return;
         }
-        await finishLogin(res.data.user, wrapKey);
+        await finishLogin(res.data.user, wrapKey, {}, !!res.data.approval_required);
     }
     // ------------------------------------------------------------------ 2FA
     let twofa = null;
@@ -86,7 +86,7 @@
                 }
                 throw new Error(res.status === 429 ? res.data.message : t("twofa.wrong"));
             }
-            await finishLogin(res.data.user, current.wrapKey);
+            await finishLogin(res.data.user, current.wrapKey, {}, !!res.data.approval_required);
         }
         catch (error) {
             warning.textContent = error instanceof Error ? error.message : t("common.unreachable");
@@ -124,8 +124,11 @@
         const keys = await SeresCrypto.deriveCodeKeys(parsed.code, pre.data.kdf_salt);
         await sendSecondFactor({ method: "backup", slot: parsed.slot, auth_hash: keys.authHash });
     }
-    /** Unlocks the private keys after a successful login and opens the chats. */
-    async function finishLogin(user, wrapKey, extraParams = {}) {
+    /**
+     * Unlocks the private keys after a successful login and opens the chats.
+     * With a main device on the account, the login first waits until it is allowed there.
+     */
+    async function finishLogin(user, wrapKey, extraParams = {}, waitForMain = false) {
         let identity;
         try {
             identity = await SeresCrypto.unlockIdentity(user.id, user.enc_private, wrapKey, user.pub_ecdh, user.pub_sign);
@@ -136,6 +139,11 @@
         }
         await SeresCrypto.clearIdentities();
         await SeresCrypto.saveIdentity(identity);
+        if (waitForMain && !(await waitForMainDevice()))
+            return;
+        openChats(extraParams);
+    }
+    function openChats(extraParams = {}) {
         const params = new URLSearchParams({ login: "true", ...extraParams });
         const invite = new URLSearchParams(window.location.search).get("invite");
         if (invite)
@@ -213,13 +221,132 @@
         el("login-panel").classList.toggle("modal-hidden", panel !== "login");
         el("recover-panel").classList.toggle("modal-hidden", panel !== "recover");
         el("reset-panel").classList.toggle("modal-hidden", panel !== "reset");
-        el("landr").textContent = t(panel === "twofa" ? "twofa.loginTitle" : panel !== "login" ? "recover.title" : mode === "register" ? "login.registerTitle" : "login.title");
+        el("approval-panel").classList.toggle("modal-hidden", panel !== "approval");
+        el("link-panel").classList.toggle("modal-hidden", panel !== "link");
+        if (panel !== "link")
+            stopLinking();
+        el("landr").textContent = t(panel === "twofa"
+            ? "twofa.loginTitle"
+            : panel === "approval"
+                ? "approval.title"
+                : panel === "link"
+                    ? "link.title"
+                    : panel !== "login"
+                        ? "recover.title"
+                        : mode === "register"
+                            ? "login.registerTitle"
+                            : "login.title");
         el("recover-warning").textContent = "";
         if (panel === "recover") {
             const typed = el("email").value.trim();
             if (typed)
                 el("recover-name").value = typed;
             el(typed ? "recover-code" : "recover-name").focus();
+        }
+    }
+    // ------------------------------------------------------- main device
+    function deviceText(userAgent) {
+        const device = SeresDevices.describe(userAgent);
+        return `${device.os} · ${device.browser}`;
+    }
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let waitingForMain = false;
+    /** Waits until the main device allows this login; false when refused or cancelled. */
+    async function waitForMainDevice() {
+        showPanel("approval");
+        setBusy(false);
+        el("approval-warning").textContent = "";
+        waitingForMain = true;
+        while (waitingForMain) {
+            const res = await fetch("/api/devices/approval", { credentials: "include" }).catch(() => null);
+            if (res && res.status === 401) {
+                waitingForMain = false;
+                await SeresCrypto.clearIdentities();
+                el("approval-warning").textContent = t("approval.refused");
+                return false;
+            }
+            const data = res && res.ok ? await res.json().catch(() => null) : null;
+            if (data?.approved) {
+                waitingForMain = false;
+                return true;
+            }
+            if (data?.main) {
+                el("approval-main").textContent = t("approval.mainIs", { device: deviceText(data.main.user_agent) });
+            }
+            await sleep(2500);
+        }
+        return false;
+    }
+    async function cancelWaiting() {
+        waitingForMain = false;
+        await fetch("/api/logout", { method: "POST", credentials: "include" }).catch(() => { });
+        await SeresCrypto.clearIdentities();
+        showPanel("login");
+    }
+    // ---------------------------------------------------------- linking
+    let linking = null;
+    function stopLinking() {
+        if (linking)
+            linking.stop = true;
+        linking = null;
+    }
+    /**
+     * This device asks to be linked by the main device: it shows a QR code, a
+     * link and a short code, then waits for the account keys sealed for it.
+     */
+    async function startLinking() {
+        showPanel("link");
+        el("link-warning").textContent = "";
+        el("link-qr").textContent = "";
+        const keys = await SeresCrypto.newLinkKeyPair();
+        const res = await postJson("/api/link/start", { pub: keys.pub });
+        if (!res.ok) {
+            el("link-warning").textContent = res.data.message || t("common.requestFailed");
+            return;
+        }
+        const session = { token: res.data.token, stop: false };
+        linking = session;
+        const url = `${window.location.origin}/?link=${encodeURIComponent(session.token)}`;
+        el("link-qr").appendChild(SeresQR.toSvg(url));
+        el("link-url").value = url;
+        const code = String(res.data.code);
+        el("link-code").textContent = code.slice(0, 4) + "-" + code.slice(4);
+        el("link-check").textContent = t("link.check", { code: await SeresCrypto.linkCheckCode(keys.pub) });
+        const until = Date.now() + Number(res.data.expires_in || 600) * 1000;
+        while (!session.stop) {
+            await sleep(2000);
+            if (session.stop)
+                return;
+            if (Date.now() > until) {
+                el("link-warning").textContent = t("link.expired");
+                return;
+            }
+            const status = await fetch("/api/link/status?token=" + encodeURIComponent(session.token), { credentials: "include" }).catch(() => null);
+            if (!status)
+                continue;
+            if (status.status === 410) {
+                el("link-warning").textContent = t("link.expired");
+                return;
+            }
+            const data = await status.json().catch(() => null);
+            if (data?.state === "denied") {
+                el("link-warning").textContent = t("link.denied");
+                return;
+            }
+            if (data?.state === "approved") {
+                try {
+                    const user = data.user;
+                    const identity = await SeresCrypto.openSealedIdentity(user.id, keys.privateKey, data.sealed, user.pub_ecdh, user.pub_sign);
+                    await SeresCrypto.clearIdentities();
+                    await SeresCrypto.saveIdentity(identity);
+                    openChats();
+                }
+                catch {
+                    await fetch("/api/logout", { method: "POST", credentials: "include" }).catch(() => { });
+                    el("link-warning").textContent = t("link.failed");
+                }
+                return;
+            }
         }
     }
     /** Asks the server to e-mail a reset link. */
@@ -457,6 +584,31 @@
         });
         el("forgot-link").addEventListener("click", (event) => {
             event.preventDefault();
+            showPanel("recover");
+        });
+        el("link-device-link").addEventListener("click", (event) => {
+            event.preventDefault();
+            startLinking().catch(() => (el("link-warning").textContent = t("common.requestFailed")));
+        });
+        el("link-back").addEventListener("click", (event) => {
+            event.preventDefault();
+            showPanel("login");
+        });
+        el("link-copy").addEventListener("click", () => {
+            navigator.clipboard
+                ?.writeText(el("link-url").value)
+                .then(() => (el("link-warning").textContent = t("link.copied")))
+                .catch(() => el("link-url").select());
+        });
+        el("approval-cancel").addEventListener("click", (event) => {
+            event.preventDefault();
+            cancelWaiting();
+        });
+        // Main device lost: a reset with a backup code logs out every device, so
+        // this one becomes the main device.
+        el("approval-lost").addEventListener("click", (event) => {
+            event.preventDefault();
+            waitingForMain = false;
             showPanel("recover");
         });
         el("recover-back").addEventListener("click", (event) => {

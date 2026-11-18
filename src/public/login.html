@@ -42,6 +42,30 @@
         <button type="button" id="register_redirect" data-i18n="login.registerButton">Register</button>
         <a id="ahaa"></a>
         <a href="#" class="forgot-link" id="forgot-link" data-i18n="recover.forgot">Forgot password?</a>
+        <a href="#" class="forgot-link" id="link-device-link" data-i18n="link.start">Link with your main device (QR code)</a>
+      </div>
+
+      <!-- A new login waits until the main device allows it -->
+      <div class="login-f modal-hidden" id="approval-panel">
+        <p class="recover-hint" data-i18n="approval.hint">Allow this login on your main device. SereS opens as soon as it is allowed.</p>
+        <p class="recover-hint" id="approval-main"></p>
+        <p class="login-warning" id="approval-warning" role="status"></p>
+        <a href="#" class="forgot-link" id="approval-lost" data-i18n="approval.lost">Lost your main device? Reset with a backup code</a>
+        <a href="#" class="forgot-link" id="approval-cancel" data-i18n="recover.back">← Back to login</a>
+      </div>
+
+      <!-- A new device linked by the main device: QR code, link or code -->
+      <div class="login-f modal-hidden" id="link-panel">
+        <p class="recover-hint" data-i18n="link.hint">Scan the QR code with your main device, open the link there, or enter the code in its settings under "Your devices".</p>
+        <div class="qr-wrap" id="link-qr"></div>
+        <div class="link-code" id="link-code"></div>
+        <div class="input">
+          <input type="text" id="link-url" readonly />
+        </div>
+        <button type="button" class="action-button" id="link-copy" data-i18n="link.copy">Copy link</button>
+        <p class="recover-hint" id="link-check"></p>
+        <p class="login-warning" id="link-warning" role="status"></p>
+        <a href="#" class="forgot-link" id="link-back" data-i18n="recover.back">← Back to login</a>
       </div>
 
       <!-- Second factor after the password (2FA is on) -->
@@ -111,6 +135,8 @@
     <script src="language/fr.js"></script>
     <script src="i18n.js"></script>
     <script src="consent.js"></script>
+    <script src="qr.js"></script>
+    <script src="devices.js"></script>
     <script src="crypto.js"></script>
     <script src="codes.js"></script>
     <script src="passkeys.js"></script>
