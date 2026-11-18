@@ -459,4 +459,5 @@ window.SeresLang.en = {
   "pwPrompt.codes": "Enter your password to create new backup codes. The old ones stop working.",
   "app.install": "Install app",
   "app.installIos": "To install SereS: tap the share button in Safari, then \"Add to Home Screen\".",
+  "notify.installFirst": "On iPhone and iPad, notifications only work in the installed app: tap Share in Safari, then \"Add to Home Screen\", and open SereS from there.",
 };

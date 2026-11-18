@@ -459,4 +459,5 @@ window.SeresLang.fr = {
   "pwPrompt.codes": "Saisis ton mot de passe pour créer de nouveaux codes de secours. Les anciens ne marcheront plus.",
   "app.install": "Installer l'app",
   "app.installIos": "Pour installer SereS : touche Partager dans Safari, puis \"Sur l'écran d'accueil\".",
+  "notify.installFirst": "Sur iPhone et iPad, les notifications ne marchent que dans l'app installée : touche Partager dans Safari, puis \"Sur l'écran d'accueil\", et ouvre SereS depuis là.",
 };

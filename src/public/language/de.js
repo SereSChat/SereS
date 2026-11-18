@@ -459,4 +459,5 @@ window.SeresLang.de = {
   "pwPrompt.codes": "Gib dein Passwort ein, um neue Backup-Codes zu erstellen. Die alten gelten dann nicht mehr.",
   "app.install": "App installieren",
   "app.installIos": "So installierst du SereS: Tippe in Safari auf Teilen und dann auf \"Zum Home-Bildschirm\".",
+  "notify.installFirst": "Auf iPhone und iPad gehen Benachrichtigungen nur in der installierten App: Tippe in Safari auf Teilen, dann auf \"Zum Home-Bildschirm\", und öffne SereS von dort.",
 };
