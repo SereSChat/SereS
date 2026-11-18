@@ -3419,6 +3419,11 @@
             event.preventDefault();
             logout();
         });
+        $("menu-install").addEventListener("click", (event) => {
+            event.preventDefault();
+            $("user-dropdown-menu").classList.add("modal-hidden");
+            installApp();
+        });
         $("menu-invite").addEventListener("click", (event) => {
             event.preventDefault();
             openInviteModal();
@@ -3578,6 +3583,45 @@
             }
         });
     }
+    // ------------------------------------------------------------- app
+    // The browser's own install dialog (Chrome, Edge), kept until the menu entry is used.
+    let installPrompt = null;
+    function isInstalled() {
+        return window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+    }
+    function isIos() {
+        return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    }
+    /** SereS as an installable app: the service worker and the "Install app" menu entry. */
+    function setupApp() {
+        if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.register("/sw.js").catch((error) => console.warn("Service worker not registered", error));
+        }
+        window.addEventListener("beforeinstallprompt", (event) => {
+            event.preventDefault();
+            installPrompt = event;
+            $("menu-install").classList.remove("modal-hidden");
+        });
+        window.addEventListener("appinstalled", () => {
+            installPrompt = null;
+            $("menu-install").classList.add("modal-hidden");
+        });
+        // Safari on iPhone and iPad has no install dialog, only "Add to Home Screen".
+        if (isIos() && !isInstalled())
+            $("menu-install").classList.remove("modal-hidden");
+    }
+    async function installApp() {
+        if (installPrompt) {
+            const prompt = installPrompt;
+            installPrompt = null;
+            prompt.prompt();
+            await prompt.userChoice.catch(() => null);
+            $("menu-install").classList.add("modal-hidden");
+        }
+        else if (isIos()) {
+            showAlert(t("app.installIos"));
+        }
+    }
     async function boot() {
         SeresI18n.apply();
         $("my-username-display").textContent = t("common.loading");
@@ -3585,6 +3629,7 @@
         $("current-chat-name").textContent = t("app.welcome");
         cleanLoginRedirect();
         applyTheme();
+        setupApp();
         try {
             me = (await api("/api/me")).user;
         }
