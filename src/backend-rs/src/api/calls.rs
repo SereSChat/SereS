@@ -99,6 +99,7 @@ async fn call_chat(
         return err_db();
     };
     let active=sqlx::query("SELECT id FROM calls WHERE chat_id=? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1").bind(&chat_id).fetch_optional(&mut *tx).await;
+    let mut started = false;
     let call_id = match active {
         Ok(Some(row)) => {
             let id: String = row.try_get("id").unwrap_or_default();
@@ -116,7 +117,10 @@ async fn call_chat(
             id
         }
         Ok(None) => match start_call(&mut tx, &chat_id, &me.id).await {
-            Ok(v) => v,
+            Ok(v) => {
+                started = true;
+                v
+            }
             Err(_) => return err_db(),
         },
         Err(_) => return err_db(),
@@ -124,6 +128,9 @@ async fn call_chat(
     if tx.commit().await.is_err() {
         return err_db();
     };
+    if started {
+        crate::api::push::call_started(state.db.clone(), call_id.clone());
+    }
     match serialize_call(&state.db, &call_id, &me.id).await {
         Ok(v) => json_ok(json!({"call":v})).into_response(),
         Err(_) => err_db(),
@@ -476,6 +483,7 @@ async fn add_to_call(
     if tx.commit().await.is_err() {
         return err_db();
     }
+    crate::api::push::call_started(state.db.clone(), new_call.clone());
     match serialize_call(&state.db, &new_call, &me.id).await {
         Ok(v) => json_ok(json!({"chat_id":chat_id,"call":v})).into_response(),
         Err(_) => err_db(),
@@ -809,6 +817,22 @@ async fn serialize_call(pool: &SqlitePool, id: &str, me: &str) -> Result<Value, 
         .and_then(|v| v.try_get::<String, _>("type").ok())
         .unwrap_or_else(|| "dm".into());
     let participants=sqlx::query("SELECT p.user_id,p.state,u.username,u.display_name FROM call_participants p JOIN users u ON u.id=p.user_id WHERE p.call_id=? ORDER BY u.username COLLATE NOCASE").bind(id).fetch_all(pool).await?;
+    // A direct chat has no name of its own: it is called after the other person.
+    let name = if name.is_empty() && kind == "dm" {
+        participants
+            .iter()
+            .find(|r| r.try_get::<String, _>("user_id").ok().as_deref() != Some(me))
+            .map(|r| {
+                r.try_get::<Option<String>, _>("display_name")
+                    .ok()
+                    .flatten()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| r.try_get("username").unwrap_or_default())
+            })
+            .unwrap_or_default()
+    } else {
+        name
+    };
     Ok(
         json!({"id":id,"chat_id":chat_id,"chat_name":name,"chat_type":kind,"started_by":call.try_get::<String,_>("started_by")?,"started_at":call.try_get::<String,_>("started_at")?,"answered_at":call.try_get::<Option<String>,_>("answered_at")?,"participants":participants.iter().map(|r|json!({"id":r.try_get::<String,_>("user_id").unwrap_or_default(),"username":r.try_get::<String,_>("username").unwrap_or_default(),"display_name":r.try_get::<Option<String>,_>("display_name").ok().flatten().filter(|v|!v.is_empty()).or_else(||r.try_get("username").ok()),"state":r.try_get::<String,_>("state").unwrap_or_default()})).collect::<Vec<_>>()}),
     )

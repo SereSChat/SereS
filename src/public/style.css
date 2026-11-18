@@ -4485,3 +4485,442 @@ body.bright-body .settings-notice:not(:empty) {
 .sub-modal .modal-box {
   width: min(420px, calc(100vw - 32px));
 }
+
+/* Devices in the settings and when picking the main device */
+.devices-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.device-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.device-item.main {
+  box-shadow: inset 3px 0 0 #00a884;
+}
+
+.device-icon {
+  font-size: 1.6rem;
+  color: #8696a0;
+}
+
+.device-info {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+}
+
+.device-meta {
+  color: #8696a0;
+  font-size: 0.8rem;
+}
+
+.device-badges {
+  color: #00a884;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* The device list uses the whole width of the settings. */
+#settings-modal .settings-section.settings-wide {
+  grid-column: 1 / -1;
+}
+
+body.bright-body .device-item {
+  background-color: #f0f2f5;
+}
+
+/* Linking a new device: the code to type in and the check code */
+.link-code {
+  margin: 10px 0 4px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 1.7rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-align: center;
+}
+
+.link-check {
+  font-weight: 600;
+}
+
+#link-qr svg {
+  width: 200px;
+  height: 200px;
+  margin: 0 auto;
+  display: block;
+  background: #ffffff;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+@media (max-width: 600px) {
+  .device-item {
+    flex-wrap: wrap;
+  }
+
+  .device-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+/* Video in calls: camera and shared screen replace the profile picture */
+.call-window.has-video {
+  width: 640px;
+}
+
+.call-window.has-video .call-tiles {
+  max-height: min(72vh, 720px);
+}
+
+.call-tile.with-video .call-tile-avatar {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 12px;
+  background-color: #000000;
+}
+
+.call-tile.with-video.screen {
+  grid-column: 1 / -1;
+}
+
+.call-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  cursor: zoom-in;
+}
+
+.call-tile.screen .call-video {
+  object-fit: contain;
+}
+
+.call-video.mirrored {
+  transform: scaleX(-1);
+}
+
+.call-video:fullscreen {
+  object-fit: contain;
+  cursor: zoom-out;
+}
+
+.call-btn.call-camera.on,
+.call-btn.call-screen.on {
+  background-color: #00a884;
+}
+
+body.call-popup .call-window.has-video {
+  width: 100%;
+}
+
+@media (max-width: 700px) {
+  .call-window.has-video {
+    width: calc(100vw - 16px);
+  }
+}
+
+/* Status text under the profile and in the settings */
+.profile-about {
+  max-width: 320px;
+  margin: 6px auto 0;
+  font-style: italic;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.status-current {
+  overflow-wrap: anywhere;
+}
+
+.status-current.empty {
+  color: #8696a0;
+  font-style: italic;
+}
+
+/* ---------- Send later ---------- */
+.scheduled-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 16px 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-color, rgba(127, 127, 127, 0.25));
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.9em;
+  cursor: pointer;
+  opacity: 0.85;
+}
+.scheduled-bar:hover {
+  opacity: 1;
+}
+.scheduled-bar .material-symbols-rounded {
+  font-size: 18px;
+}
+.schedule-preview {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.12);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow: auto;
+}
+.schedule-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+#schedule-time {
+  width: 100%;
+  box-sizing: border-box;
+}
+.scheduled-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50vh;
+  overflow: auto;
+}
+.scheduled-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.1);
+}
+.scheduled-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.scheduled-time {
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+.scheduled-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- Polls ---------- */
+.poll {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: min(260px, 70vw);
+  max-width: 360px;
+}
+.poll-question {
+  font-weight: 600;
+  word-break: break-word;
+}
+.poll-kind,
+.poll-total {
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+.poll-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.12);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+.poll-option:hover {
+  border-color: rgba(127, 127, 127, 0.6);
+}
+.poll-option.chosen {
+  border-color: currentColor;
+}
+.poll-option > span:not(.poll-bar) {
+  position: relative;
+  z-index: 1;
+}
+.poll-check {
+  font-size: 20px;
+}
+.poll-label {
+  flex: 1;
+  word-break: break-word;
+}
+.poll-count {
+  font-size: 0.85em;
+  opacity: 0.8;
+}
+.poll-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.14);
+  transition: width 0.3s ease;
+}
+#poll-question,
+.poll-option-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.poll-options-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+  max-height: 40vh;
+  overflow: auto;
+}
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+/* ---------- Link previews ---------- */
+.link-preview {
+  display: flex;
+  flex-direction: column;
+  max-width: 340px;
+  margin: 2px 0 6px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.16);
+  border-left: 3px solid rgba(255, 255, 255, 0.35);
+  color: inherit;
+  text-decoration: none;
+}
+a.link-preview:hover {
+  background: rgba(0, 0, 0, 0.24);
+}
+.link-preview-image {
+  width: 100%;
+  max-height: 180px;
+  object-fit: cover;
+  display: block;
+}
+.link-preview-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px 8px;
+  min-width: 0;
+}
+.link-preview-site {
+  font-size: 0.75em;
+  opacity: 0.7;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.link-preview-title {
+  font-size: 0.95em;
+  word-break: break-word;
+}
+.link-preview-desc {
+  font-size: 0.85em;
+  opacity: 0.85;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.link-preview-bar .link-preview {
+  flex-direction: row;
+  max-width: none;
+  margin: 0;
+  background: transparent;
+  border-left: none;
+}
+.link-preview-bar .link-preview-image {
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+}
+.link-preview-bar .link-preview-desc {
+  -webkit-line-clamp: 1;
+}
+.message-text a.link-preview,
+.message-text a.link-preview * {
+  text-decoration: none;
+}
+
+/* ---------- Group invite links ---------- */
+.group-invite .group-invite-link {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 0.85em;
+}
+.group-invite-qr {
+  width: 160px;
+  margin: 8px 0;
+  padding: 8px;
+  background: #fff;
+  border-radius: 8px;
+}
+.group-invite-qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* ---------- Search in all chats ---------- */
+.list-section-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 14px 16px 6px;
+  font-size: 0.8em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+.search-progress {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.search-snippet mark {
+  background: rgba(255, 210, 0, 0.35);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.search-hit {
+  cursor: pointer;
+}

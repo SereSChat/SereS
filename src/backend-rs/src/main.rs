@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
     db::import_legacy(&pool, &data_dir).await?;
     db::migrate_binary_files(&pool, &data_dir).await?;
     db::ensure_server_secret(&pool).await?;
+    api::push::ensure_vapid_key(&pool).await?;
     tokio::spawn(api::chats::scheduled_loop(pool.clone()));
     heartbeat::start();
     let state = state::AppState::new(pool);

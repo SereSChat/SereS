@@ -5,6 +5,8 @@
     id: string;
     username: string;
     display_name?: string | null;
+    // The short text under the profile (only friends and chat partners see it).
+    status?: string | null;
   }
 
   interface Me extends UserRef {
@@ -61,10 +63,23 @@
     reply?: { id: string; sender_id: string | null; preview: string };
     file?: FileRef;
     forwarded?: boolean;
-    // Reactions are silent messages pointing at another message.
-    type?: "reaction";
+    // Reactions and poll votes are silent messages pointing at another message.
+    type?: "reaction" | "vote";
     target?: string;
     emoji?: string;
+    // A poll; the votes are silent messages with the chosen option numbers.
+    poll?: { question: string; options: string[]; multi: boolean };
+    choices?: number[];
+    // Made by the sender, so the people receiving it never contact the site.
+    preview?: LinkPreview;
+  }
+
+  interface LinkPreview {
+    url: string;
+    title: string;
+    description?: string | null;
+    site?: string | null;
+    image?: string | null;
   }
 
   interface Presence {
@@ -154,6 +169,9 @@
   let editing: { chatId: string; message: Message; content: Content } | null = null;
   // Invite token from a link like /?invite=..., kept across the login redirect.
   const pendingInvite = new URLSearchParams(window.location.search).get("invite");
+  // Group invite from a link like /?join=..., kept across the login redirect as well.
+  const pendingJoin = new URLSearchParams(window.location.search).get("join");
+  let joinToAccept: string | null = null;
   // Set by the login page after a password reset ("code" or "mail").
   const recoveredBy = new URLSearchParams(window.location.search).get("recovered");
   let inviteToAccept: { token: string; name: string } | null = null;
@@ -231,6 +249,7 @@
     const params = new URLSearchParams();
     if (reason) params.set("reason", reason);
     if (pendingInvite) params.set("invite", pendingInvite);
+    if (pendingJoin) params.set("join", pendingJoin);
     const query = params.toString();
     window.location.href = "login.html" + (query ? "?" + query : "");
   }
@@ -439,6 +458,7 @@
       case "pinned":
       case "keys_reset":
       case "history_shared":
+      case "joined_link":
         return t("system." + payload.event, {
           actor: payload.actor ?? "",
           target: payload.target ?? "",
@@ -577,9 +597,11 @@
     const settings = readStore("settings");
     if (settings.notify === "on") {
       settings.notify = "off";
+      unsubscribePush();
     } else {
       if (!("Notification" in window)) {
-        showAlert(t("notify.unsupported"));
+        // Safari on iPhone and iPad only allows notifications for installed apps.
+        showAlert(t(isIos() && !isInstalled() ? "notify.installFirst" : "notify.unsupported"));
         return;
       }
       const permission = await Notification.requestPermission();
@@ -588,9 +610,52 @@
         return;
       }
       settings.notify = "on";
+      subscribePush().catch((error) => console.warn("Push not available", error));
     }
     writeStore("settings", settings);
     renderSettingsToggles();
+  }
+
+  function pushSupported() {
+    return "serviceWorker" in navigator && "PushManager" in window;
+  }
+
+  function base64UrlBytes(value: string) {
+    const base64 = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
+    return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  }
+
+  /**
+   * Push notifications while SereS is closed: this device subscribes with its
+   * browser's push service and tells the server. Also run at every start, so
+   * the subscription belongs to the current login of this device.
+   */
+  async function subscribePush() {
+    if (!pushSupported()) return;
+    const registration = await navigator.serviceWorker.ready;
+    const key = base64UrlBytes((await api("/api/push/key")).public_key);
+    let subscription = await registration.pushManager.getSubscription();
+    const usedKey = subscription?.options.applicationServerKey;
+    if (subscription && usedKey && !new Uint8Array(usedKey).every((byte, i) => byte === key[i])) {
+      // Made for another server key: start over.
+      await subscription.unsubscribe();
+      subscription = null;
+    }
+    subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+    await post("/api/push/subscribe", subscription.toJSON());
+  }
+
+  async function unsubscribePush() {
+    if (!pushSupported()) return;
+    try {
+      const registration = await navigator.serviceWorker.getRegistration();
+      const subscription = await registration?.pushManager.getSubscription();
+      if (!subscription) return;
+      await post("/api/push/unsubscribe", { endpoint: subscription.endpoint }).catch(() => {});
+      await subscription.unsubscribe();
+    } catch (error) {
+      console.warn("Could not unsubscribe from push", error);
+    }
   }
 
   function previewText(chat: ChatSummary, shown: Shown | null) {
@@ -606,6 +671,8 @@
   function contentPreview(shown: Shown) {
     const file = shown.content?.file;
     const text = SeresFormat.plain(shown.text);
+    const poll = shown.content?.poll;
+    if (poll && validPoll(poll)) return "📊 " + String(poll.question);
     if (!file) return text;
     const label =
       file.kind === "image"
@@ -699,7 +766,8 @@
       onLongPress(item, (x, y) => openChatMenu(chat, x, y));
       list.appendChild(item);
     });
-    if (!list.querySelector(".chat-list-item")) {
+    const hits = filter ? appendMessageHits(list, filter) : 0;
+    if (!list.querySelector(".chat-list-item") && !hits) {
       list.appendChild(
         h("div", { className: "list-empty" }, [
           h("p", { text: t(filter ? "list.noChatsFound" : "list.noChats") }),
@@ -712,6 +780,160 @@
       );
     }
     applyTheme();
+  }
+
+  // ------------------------------------------------- search in all chats
+  // The server can't read messages, so the browser loads the latest ones of
+  // every chat, decrypts them and searches locally. Nothing about the search
+  // leaves the device.
+
+  interface IndexedMessage {
+    id: string;
+    seq: number;
+    created_at: string;
+    sender: string;
+    text: string;
+    lower: string;
+  }
+  const SEARCH_DEPTH = 400;
+  const messageIndex = new Map<string, { at: number; rows: IndexedMessage[] }>();
+  let globalSearch: { query: string; running: boolean; done: number; total: number } | null = null;
+  let globalSearchTimer: number | null = null;
+
+  /** Text that can be searched: the message, a poll question and options, a file name. */
+  function searchableText(view: Shown) {
+    const content = view.content || {};
+    const parts = [view.text];
+    if (content.poll && validPoll(content.poll)) parts.push(String(content.poll.question), ...content.poll.options.map(String));
+    if (content.file?.name && content.file.kind !== "voice") parts.push(String(content.file.name));
+    if (content.preview?.title) parts.push(String(content.preview.title));
+    return parts.filter(Boolean).join(" \n");
+  }
+
+  async function indexChat(chat: ChatSummary) {
+    const cached = messageIndex.get(chat.id);
+    if (cached && Date.now() - cached.at < 2 * 60 * 1000) return;
+    const rows: IndexedMessage[] = [];
+    let before = "";
+    for (let loaded = 0; loaded < SEARCH_DEPTH; ) {
+      const data = await api(`/api/chats/${encodeURIComponent(chat.id)}/messages?limit=200${before}`);
+      const messages: Message[] = data.messages || [];
+      loaded += messages.length;
+      const views = await Promise.all(messages.map((m) => (m.silent || m.deleted ? null : showMessage(chat.id, m))));
+      messages.forEach((message, i) => {
+        const view = views[i];
+        if (!view || (view.type !== "text" && view.type !== "legacy")) return;
+        const text = searchableText(view).trim();
+        if (!text) return;
+        rows.push({
+          id: message.id,
+          seq: message.seq,
+          created_at: message.created_at,
+          sender: message.sender_id === me.id ? t("msg.you") : message.sender_display || message.sender || "",
+          text,
+          lower: text.toLowerCase(),
+        });
+      });
+      if (!data.has_more || !messages.length) break;
+      before = `&before_seq=${Math.min(...messages.map((m) => m.seq))}`;
+    }
+    messageIndex.set(chat.id, { at: Date.now(), rows });
+  }
+
+  function startGlobalSearch() {
+    if (globalSearchTimer !== null) clearTimeout(globalSearchTimer);
+    const query = (($("list-search") as HTMLInputElement).value || "").trim().toLowerCase();
+    if (query.length < 2) {
+      globalSearch = null;
+      return;
+    }
+    globalSearchTimer = window.setTimeout(async () => {
+      const list = chats.slice();
+      const search = { query, running: true, done: 0, total: list.length };
+      globalSearch = search;
+      chatsSignature = "";
+      loadChats().catch(() => {});
+      // A few chats at a time, so the browser stays responsive.
+      let next = 0;
+      const worker = async () => {
+        while (next < list.length && globalSearch === search) {
+          const chat = list[next++];
+          try {
+            await indexChat(chat);
+          } catch {
+            // Skip a chat that can't be loaded.
+          }
+          search.done++;
+          if (search.done % 4 === 0 && globalSearch === search) {
+            chatsSignature = "";
+            loadChats().catch(() => {});
+          }
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+      if (globalSearch !== search) return;
+      search.running = false;
+      chatsSignature = "";
+      loadChats().catch(() => {});
+    }, 350);
+  }
+
+  function highlighted(text: string, query: string) {
+    // A short piece around the first match, with the match marked.
+    const index = text.toLowerCase().indexOf(query);
+    const start = index > 18 ? index - 12 : 0;
+    const piece = (start > 0 ? "…" : "") + text.slice(start, index + query.length + 80).replace(/\s+/g, " ");
+    const span = h("span", { className: "item-status search-snippet" });
+    const lower = piece.toLowerCase();
+    const at = lower.indexOf(query);
+    if (at < 0) {
+      span.textContent = piece;
+      return span;
+    }
+    span.append(document.createTextNode(piece.slice(0, at)), h("mark", { text: piece.slice(at, at + query.length) }), document.createTextNode(piece.slice(at + query.length)));
+    return span;
+  }
+
+  /** Adds the matching messages below the chats; returns how many there are. */
+  function appendMessageHits(list: HTMLElement, filter: string) {
+    const query = filter.trim();
+    if (query.length < 2 || !globalSearch || globalSearch.query !== query) return 0;
+    const hits: { chat: ChatSummary; row: IndexedMessage }[] = [];
+    for (const chat of chats) {
+      for (const row of messageIndex.get(chat.id)?.rows || []) {
+        if (row.lower.includes(query)) hits.push({ chat, row });
+      }
+    }
+    hits.sort((a, b) => (a.row.created_at < b.row.created_at ? 1 : -1));
+    list.appendChild(
+      h("div", { className: "list-section-title" }, [
+        h("span", { text: t("search.messages") }),
+        globalSearch.running ? h("span", { className: "search-progress", text: t("search.progress", { done: globalSearch.done, total: globalSearch.total }) }) : null,
+      ]),
+    );
+    for (const { chat, row } of hits.slice(0, 60)) {
+      const item = h("div", { className: "list-item search-hit" });
+      const avatarName = chat.type === "dm" && chat.other_user ? chat.other_user : chat.name;
+      item.appendChild(avatarEl(avatarName, { group: chat.type === "group", label: chat.name }));
+      item.appendChild(
+        h("div", { className: "item-info" }, [
+          h("div", { className: "item-row" }, [
+            h("span", { className: "item-name", text: chat.type === "group" && row.sender ? `${chat.name} · ${row.sender}` : chat.name }),
+            h("span", { className: "item-time", text: formatListTime(row.created_at) }),
+          ]),
+          h("div", { className: "item-row" }, [highlighted(row.text, query)]),
+        ]),
+      );
+      item.addEventListener("click", async () => {
+        await openChat(chat.id);
+        await jumpToMessage(row.id);
+      });
+      list.appendChild(item);
+    }
+    if (!hits.length && !globalSearch.running) list.appendChild(h("p", { className: "list-hint", text: t("search.noMessages") }));
+    if (hits.length > 60) list.appendChild(h("p", { className: "list-hint", text: t("search.more", { count: hits.length - 60 }) }));
+    list.appendChild(h("p", { className: "list-hint", text: t("search.depth", { count: SEARCH_DEPTH }) }));
+    return hits.length || 1;
   }
 
   function updateBadges() {
@@ -815,7 +1037,7 @@
     list.appendChild(sectionTitle(t("friends.title", { count: friends.friends.length })));
     friends.friends.filter(match).forEach((friend) => {
       list.appendChild(
-        userRow(friend, t("friends.status"), [
+        userRow(friend, friend.status || t("friends.status"), [
           button(t("friends.message"), "request-action-btn accept", () => startDm(friend.username)),
           button("⋯", "request-action-btn more", (event) => openUserMenu(friend, event)),
         ]),
@@ -1100,6 +1322,9 @@
 
     try {
       await refreshCurrentDetails();
+      scheduled = null;
+      renderScheduledBar();
+      loadScheduled(opened);
       const data = await api(`/api/chats/${encodeURIComponent(chatId)}/messages?limit=50`);
       if (current !== opened) return;
       opened.receipts = data.receipts || null;
@@ -1505,6 +1730,8 @@
 
   // Latest reaction of each member per message: target id -> sender id -> emoji.
   type Reactions = Map<string, Map<string, { emoji: string; seq: number }>>;
+  // Latest vote of each member per poll: poll id -> sender id -> chosen options.
+  type Votes = Map<string, Map<string, { choices: number[]; seq: number }>>;
 
   async function renderMessages(options: { forceBottom?: boolean; keepPosition?: boolean }) {
     if (!current) return;
@@ -1516,6 +1743,7 @@
 
     // Reactions are silent messages; collect them instead of showing them as rows.
     const reactions: Reactions = new Map();
+    const votes: Votes = new Map();
     const ordered: Message[] = [];
     const shown: Shown[] = [];
     all.forEach((message, index) => {
@@ -1527,6 +1755,13 @@
           const previous = perSender.get(message.sender_id);
           if (!previous || previous.seq < message.seq) perSender.set(message.sender_id, { emoji: content.emoji || "", seq: message.seq });
           reactions.set(content.target, perSender);
+        }
+        if (content && content.type === "vote" && content.target && message.sender_id && Array.isArray(content.choices)) {
+          const perSender = votes.get(content.target) || new Map();
+          const previous = perSender.get(message.sender_id);
+          const choices = content.choices.filter((n) => Number.isInteger(n) && n >= 0);
+          if (!previous || previous.seq < message.seq) perSender.set(message.sender_id, { choices, seq: message.seq });
+          votes.set(content.target, perSender);
         }
         return;
       }
@@ -1572,7 +1807,7 @@
         previous !== null &&
         previous.sender_id === message.sender_id &&
         date.getTime() - parseTime(previous.created_at).getTime() < 5 * 60 * 1000;
-      fragment.appendChild(messageRow(opened, message, view, compact, reactions.get(message.id)));
+      fragment.appendChild(messageRow(opened, message, view, compact, reactions.get(message.id), votes.get(message.id)));
       previous = message;
     });
 
@@ -1595,6 +1830,7 @@
     view: Shown,
     compact: boolean,
     reactions?: Map<string, { emoji: string; seq: number }>,
+    votes?: Map<string, { choices: number[]; seq: number }>,
   ) {
     const own = message.sender_id === me.id;
     const sender = message.sender_display || message.sender || t("msg.unknown");
@@ -1630,6 +1866,7 @@
     if (content.forwarded) bubble.appendChild(h("div", { className: "message-forwarded", text: t("msg.forwarded") }));
     if (content.reply) bubble.appendChild(replyQuote(opened, content.reply));
     if (content.file) bubble.appendChild(renderFile(opened, content.file));
+    if (content.poll && view.type === "text") bubble.appendChild(renderPoll(opened, message, content.poll, votes));
 
     if (view.type === "deleted" || view.type === "error") {
       bubble.classList.add("message-muted");
@@ -1641,6 +1878,11 @@
       body.appendChild(formatted.fragment);
       bubble.appendChild(body);
       if (formatted.mentioned && !own) row.classList.add("mentioned");
+    }
+
+    if (content.preview && view.type === "text" && linkPreviewsOn()) {
+      const card = previewCard(content.preview);
+      if (card) bubble.insertBefore(card, bubble.querySelector(".message-body"));
     }
 
     const meta = h("span", { className: "message-meta" });
@@ -1738,6 +1980,272 @@
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) await refreshCurrentDetails().catch(() => {});
       showAlert(errorText(error));
+    }
+  }
+
+  // ---------------------------------------------------------- link previews
+  // Fetched (through the SereS server) while the sender types; the result is
+  // sent inside the encrypted message. Can be turned off in the settings.
+
+  const URL_PATTERN = /\bhttps?:\/\/[^\s<>"')\]]+/i;
+  const previewCache = new Map<string, Promise<LinkPreview | null>>();
+  let linkPreview: { url: string; data: LinkPreview | null; dismissed: boolean } | null = null;
+  let linkTimer: number | null = null;
+
+  function linkPreviewsOn() {
+    return readStore("settings").links !== "off";
+  }
+
+  function firstUrl(text: string) {
+    const match = URL_PATTERN.exec(text);
+    if (!match) return null;
+    // Punctuation at the end belongs to the sentence.
+    return match[0].replace(/[.,;:!?]+$/, "");
+  }
+
+  /** Links to this SereS (like group invites) need no preview. */
+  function isOwnLink(url: string) {
+    try {
+      return new URL(url).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  function safeUrl(value: unknown) {
+    try {
+      const url = new URL(String(value));
+      return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Makes the picture small, so the message stays small. */
+  function shrinkImage(dataUrl: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        // Encrypted messages are limited to 64 KB, so the picture stays small.
+        const scale = Math.min(1, 240 / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return resolve(null);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const small = canvas.toDataURL("image/jpeg", 0.7);
+        resolve(small.length <= 24000 ? small : null);
+      };
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    });
+  }
+
+  function fetchPreview(url: string) {
+    let pending = previewCache.get(url);
+    if (!pending) {
+      pending = (async () => {
+        try {
+          const data = await api(`/api/link-preview?url=${encodeURIComponent(url)}`);
+          const href = safeUrl(data.url) || url;
+          const image = typeof data.image === "string" && data.image.startsWith("data:image/") ? await shrinkImage(data.image) : null;
+          return {
+            url: href,
+            title: String(data.title || "").slice(0, 200),
+            description: data.description ? String(data.description).slice(0, 300) : null,
+            site: data.site ? String(data.site).slice(0, 80) : null,
+            image,
+          } as LinkPreview;
+        } catch {
+          return null;
+        }
+      })();
+      previewCache.set(url, pending);
+      if (previewCache.size > 50) previewCache.delete(previewCache.keys().next().value!);
+    }
+    return pending;
+  }
+
+  /** The preview for the link in a message about to be sent (waits a little if needed). */
+  async function previewFor(text: string): Promise<LinkPreview | null> {
+    if (!linkPreviewsOn()) return null;
+    const url = firstUrl(text);
+    if (!url || isOwnLink(url)) return null;
+    if (linkPreview && linkPreview.url === url && linkPreview.dismissed) return null;
+    const timeout = new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 3000));
+    return Promise.race([fetchPreview(url), timeout]);
+  }
+
+  function clearLinkPreview() {
+    linkPreview = null;
+    renderLinkPreviewBar();
+  }
+
+  function watchLinkPreview() {
+    if (linkTimer !== null) clearTimeout(linkTimer);
+    linkTimer = window.setTimeout(() => {
+      const url = linkPreviewsOn() && !editing ? firstUrl(($("message-input-field") as HTMLTextAreaElement).value) : null;
+      if (!url || isOwnLink(url)) return clearLinkPreview();
+      if (linkPreview?.url === url) return;
+      linkPreview = { url, data: null, dismissed: false };
+      renderLinkPreviewBar();
+      fetchPreview(url).then((data) => {
+        if (linkPreview?.url !== url) return;
+        linkPreview.data = data;
+        renderLinkPreviewBar();
+      });
+    }, 500);
+  }
+
+  function renderLinkPreviewBar() {
+    const bar = $("link-preview-bar");
+    const content = $("link-preview-bar-content");
+    content.textContent = "";
+    const show = !!linkPreview && !linkPreview.dismissed && !!linkPreview.data;
+    bar.classList.toggle("modal-hidden", !show);
+    if (show) {
+      const card = previewCard(linkPreview!.data!, false);
+      if (card) content.appendChild(card);
+    }
+  }
+
+  function previewCard(preview: LinkPreview, clickable = true) {
+    const url = safeUrl(preview?.url);
+    if (!url || !preview.title) return null;
+    const image = typeof preview.image === "string" && preview.image.startsWith("data:image/") ? preview.image : null;
+    let host = "";
+    try {
+      host = new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      // checked above
+    }
+    const card = h(clickable ? "a" : "div", { className: "link-preview" + (image ? "" : " no-image") }, [
+      image ? h("img", { className: "link-preview-image", attrs: { src: image, alt: "", loading: "lazy" } }) : null,
+      h("div", { className: "link-preview-text" }, [
+        h("span", { className: "link-preview-site", text: String(preview.site || host) }),
+        h("strong", { className: "link-preview-title", text: String(preview.title) }),
+        preview.description ? h("span", { className: "link-preview-desc", text: String(preview.description) }) : null,
+      ]),
+    ]);
+    if (clickable) {
+      card.setAttribute("href", url);
+      card.setAttribute("target", "_blank");
+      card.setAttribute("rel", "noopener noreferrer");
+    }
+    return card;
+  }
+
+  // ------------------------------------------------------------------ polls
+
+  function validPoll(poll: Content["poll"]) {
+    return !!poll && typeof poll.question === "string" && Array.isArray(poll.options) && poll.options.length >= 2;
+  }
+
+  function renderPoll(
+    opened: OpenChat,
+    message: Message,
+    poll: NonNullable<Content["poll"]>,
+    perSender?: Map<string, { choices: number[]; seq: number }>,
+  ) {
+    const box = h("div", { className: "poll" });
+    if (!validPoll(poll)) return box;
+    const options = poll.options.slice(0, 12).map(String);
+    const counts = options.map(() => [] as string[]);
+    let voters = 0;
+    perSender?.forEach((vote, senderId) => {
+      const valid = vote.choices.filter((n) => n < options.length);
+      if (!valid.length) return;
+      voters++;
+      for (const n of poll.multi ? valid : valid.slice(0, 1)) counts[n].push(senderId);
+    });
+    const mine = new Set((perSender?.get(me.id)?.choices || []).filter((n) => n < options.length));
+    box.appendChild(h("div", { className: "poll-question", text: String(poll.question) }));
+    box.appendChild(h("div", { className: "poll-kind", text: t(poll.multi ? "poll.multi" : "poll.single") }));
+    options.forEach((option, index) => {
+      const share = voters ? counts[index].length / voters : 0;
+      const names = counts[index].map((id) => (id === me.id ? t("msg.you") : memberName(opened, id) || "?")).join(", ");
+      const row = button("", "poll-option" + (mine.has(index) ? " chosen" : ""), () => {
+        const next = new Set(mine);
+        if (poll.multi) {
+          if (next.has(index)) next.delete(index);
+          else next.add(index);
+        } else if (next.has(index)) {
+          next.clear();
+        } else {
+          next.clear();
+          next.add(index);
+        }
+        sendVote(opened, message, [...next].sort((a, b) => a - b));
+      }, names);
+      row.append(
+        h("span", { className: "poll-check material-symbols-rounded", text: mine.has(index) ? (poll.multi ? "check_box" : "radio_button_checked") : poll.multi ? "check_box_outline_blank" : "radio_button_unchecked" }),
+        h("span", { className: "poll-label", text: option }),
+        h("span", { className: "poll-count", text: String(counts[index].length) }),
+        h("span", { className: "poll-bar", attrs: { style: `width:${Math.round(share * 100)}%` } }),
+      );
+      box.appendChild(row);
+    });
+    box.appendChild(h("div", { className: "poll-total", text: t(voters === 1 ? "poll.votesOne" : "poll.votes", { count: voters }) }));
+    return box;
+  }
+
+  async function sendVote(opened: OpenChat, message: Message, choices: number[]) {
+    try {
+      await sendContent(opened, { type: "vote", target: message.id, choices }, { silent: true });
+      await syncCurrent();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) await refreshCurrentDetails().catch(() => {});
+      showAlert(errorText(error));
+    }
+  }
+
+  function addPollOption(value = "") {
+    const list = $("poll-options");
+    if (list.children.length >= 12) return;
+    const input = h("input", { className: "poll-option-input", attrs: { type: "text", maxlength: "100", placeholder: t("poll.option", { n: list.children.length + 1 }) } }) as HTMLInputElement;
+    input.value = value;
+    input.addEventListener("input", () => {
+      // A new empty field appears as soon as the last one is used.
+      const inputs = [...list.querySelectorAll("input")] as HTMLInputElement[];
+      if (inputs[inputs.length - 1].value.trim()) addPollOption();
+    });
+    list.appendChild(input);
+  }
+
+  function openPollDialog() {
+    if (!current) return;
+    ($("poll-question") as HTMLInputElement).value = "";
+    ($("poll-multi") as HTMLInputElement).checked = false;
+    $("poll-warning").textContent = "";
+    $("poll-options").textContent = "";
+    addPollOption();
+    addPollOption();
+    openModal("poll-modal");
+    ($("poll-question") as HTMLInputElement).focus();
+  }
+
+  async function createPoll() {
+    if (!current) return;
+    const opened = current;
+    const question = ($("poll-question") as HTMLInputElement).value.trim();
+    const options = ([...$("poll-options").querySelectorAll("input")] as HTMLInputElement[]).map((i) => i.value.trim()).filter(Boolean);
+    if (!question || options.length < 2) {
+      $("poll-warning").textContent = t("poll.needMore");
+      return;
+    }
+    if (new Set(options.map((o) => o.toLowerCase())).size !== options.length) {
+      $("poll-warning").textContent = t("poll.duplicate");
+      return;
+    }
+    try {
+      await sendContent(opened, { poll: { question, options, multi: ($("poll-multi") as HTMLInputElement).checked } });
+      $("poll-modal").classList.add("modal-hidden");
+      await syncCurrent();
+      chatsSignature = "";
+      loadChats().catch(() => {});
+    } catch (error) {
+      $("poll-warning").textContent = errorText(error);
     }
   }
 
@@ -1946,7 +2454,7 @@
         : null,
       readable && message.kind === "e2e" ? item(t("msg.menuForward"), () => openForwardModal(opened, message, view)) : null,
       readable ? item(pinned ? t("msg.menuUnpin") : t("msg.menuPin"), () => togglePin(opened, message, !pinned)) : null,
-      own && view.type === "text" && !view.content?.file?.kind?.startsWith("voice")
+      own && view.type === "text" && !view.content?.file?.kind?.startsWith("voice") && !view.content?.poll
         ? item(t("msg.menuEdit"), () => startEdit(opened, message, view))
         : null,
       own ? item(t("msg.menuInfo"), () => openMessageInfo(opened, message, view)) : null,
@@ -2148,9 +2656,13 @@
           }
           clearPendingFiles();
         } else {
-          await sendContent(opened, reply ? { text, reply } : { text });
+          const content: Content = reply ? { text, reply } : { text };
+          const preview = await previewFor(text);
+          if (preview) content.preview = preview;
+          await sendContent(opened, content);
         }
         cancelReply();
+        clearLinkPreview();
       }
       input.value = "";
       drafts.delete(opened.id);
@@ -2270,9 +2782,153 @@
 
   /** Shows the microphone when there is nothing to send (like WhatsApp). */
   function updateSendButton() {
-    const empty = !($("message-input-field") as HTMLTextAreaElement).value.trim() && !pendingFiles.length && !editing;
+    const text = ($("message-input-field") as HTMLTextAreaElement).value.trim();
+    const empty = !text && !pendingFiles.length && !editing;
     $("send-btn").classList.toggle("modal-hidden", empty && voiceSupported());
     $("record-btn").classList.toggle("modal-hidden", !(empty && voiceSupported()));
+    // Only text can be scheduled (attachments are uploaded when they are sent).
+    $("schedule-btn").classList.toggle("modal-hidden", !text || !!editing || pendingFiles.length > 0);
+  }
+
+  // ------------------------------------------------------- send later
+  // The message is encrypted now, like any other; the server sends it at the
+  // chosen time (and drops it if the members or the keys changed meanwhile).
+
+  interface Scheduled {
+    id: string;
+    send_at: string;
+    payload: any;
+  }
+  let scheduled: { chatId: string; items: Scheduled[] } | null = null;
+
+  async function loadScheduled(opened: OpenChat) {
+    try {
+      const data = await api(`/api/chats/${encodeURIComponent(opened.id)}/scheduled`);
+      if (current !== opened) return;
+      scheduled = { chatId: opened.id, items: data.messages || [] };
+    } catch {
+      scheduled = null;
+    }
+    renderScheduledBar();
+  }
+
+  function renderScheduledBar() {
+    const count = scheduled && current && scheduled.chatId === current.id ? scheduled.items.length : 0;
+    $("scheduled-bar").classList.toggle("modal-hidden", !count);
+    $("scheduled-bar-text").textContent = t(count === 1 ? "schedule.barOne" : "schedule.bar", { count });
+  }
+
+  function localInputValue(date: Date) {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  function openScheduleDialog() {
+    const text = ($("message-input-field") as HTMLTextAreaElement).value.trim();
+    if (!current || !text || editing || pendingFiles.length) return;
+    $("schedule-preview").textContent = text.length > 160 ? text.slice(0, 160) + "…" : text;
+    $("schedule-warning").textContent = "";
+    const input = $("schedule-time") as HTMLInputElement;
+    const soon = new Date(Date.now() + 60 * 60 * 1000);
+    input.min = localInputValue(new Date(Date.now() + 2 * 60 * 1000));
+    input.value = localInputValue(soon);
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(8, 0, 0, 0);
+    const quick = $("schedule-quick");
+    quick.textContent = "";
+    for (const [label, date] of [
+      [t("schedule.inHour"), soon],
+      [t("schedule.tomorrow"), tomorrow],
+    ] as [string, Date][]) {
+      quick.appendChild(button(label, "pill-btn secondary", () => (input.value = localInputValue(date))));
+    }
+    openModal("schedule-modal");
+  }
+
+  async function scheduleMessage() {
+    const input = $("message-input-field") as HTMLTextAreaElement;
+    const text = input.value.trim();
+    const when = new Date(($("schedule-time") as HTMLInputElement).value);
+    if (!current || !text) return;
+    if (Number.isNaN(when.getTime()) || when.getTime() < Date.now() + 60 * 1000) {
+      $("schedule-warning").textContent = t("schedule.tooSoon");
+      return;
+    }
+    const opened = current;
+    const reply =
+      replyTo && replyTo.chatId === opened.id
+        ? { id: replyTo.message.id, sender_id: replyTo.message.sender_id, preview: replyTo.preview }
+        : undefined;
+    const linkPreview = await previewFor(text);
+    try {
+      for (let attempt = 0; ; attempt++) {
+        const details = await readyToSend(opened, attempt > 0);
+        const id = newMessageId();
+        const content: Content = reply ? { text, reply } : { text };
+        if (linkPreview) content.preview = linkPreview;
+        const payload = await SeresCrypto.encryptMessage(identity, opened.id, id, content, encryptionMembers(details));
+        try {
+          await post(`/api/chats/${encodeURIComponent(opened.id)}/scheduled`, { id, payload, send_at: when.toISOString() });
+          break;
+        } catch (error) {
+          // The members changed: encrypt again for the current ones.
+          if (error instanceof ApiError && error.status === 409 && attempt === 0) continue;
+          throw error;
+        }
+      }
+      $("schedule-modal").classList.add("modal-hidden");
+      input.value = "";
+      drafts.delete(opened.id);
+      autoGrow(input);
+      cancelReply();
+      clearLinkPreview();
+      updateSendButton();
+      showAlert(t("schedule.done", { time: formatDateTime(when.toISOString()) }));
+      await loadScheduled(opened);
+    } catch (error) {
+      $("schedule-warning").textContent = errorText(error);
+    }
+  }
+
+  async function openScheduledList() {
+    if (!current || !scheduled) return;
+    const opened = current;
+    const list = $("scheduled-list");
+    list.textContent = "";
+    for (const item of scheduled.items) {
+      let text = t("msg.decryptError");
+      try {
+        const content = await SeresCrypto.decryptMessage(
+          identity,
+          opened.id,
+          item.id,
+          { id: me.id, pub_ecdh: me.pub_ecdh, pub_sign: me.pub_sign },
+          item.payload,
+        );
+        text = String(content?.text ?? "");
+      } catch {
+        // Encrypted with keys from before a password reset.
+      }
+      const row = h("div", { className: "scheduled-item" }, [
+        h("div", { className: "scheduled-info" }, [
+          h("span", { className: "scheduled-time", text: formatDateTime(item.send_at) }),
+          h("span", { className: "scheduled-text", text }),
+        ]),
+        button(t("schedule.cancel"), "request-action-btn discard", async () => {
+          try {
+            await api(`/api/chats/${encodeURIComponent(opened.id)}/scheduled/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+            row.remove();
+            await loadScheduled(opened);
+            if (!scheduled?.items.length) $("scheduled-modal").classList.add("modal-hidden");
+          } catch (error) {
+            showAlert(errorText(error));
+          }
+        }),
+      ]);
+      list.appendChild(row);
+    }
+    openModal("scheduled-modal");
   }
 
   // ------------------------------------------------------- voice messages
@@ -2862,6 +3518,8 @@
             button(t("info.rename"), "pill-btn", action("rename", () => post(`/api/chats/${encodeURIComponent(details.id)}/rename`, { name: nameInput.value }))),
           ]),
         );
+        const invite = await groupInviteSection(details.id);
+        if (invite) body.appendChild(invite);
       }
       body.appendChild(h("p", { text: t("info.groupMembers", { count: members.length }) }));
       for (const member of members) {
@@ -3012,6 +3670,7 @@
       avatarEl(user.username, { className: "avatar profile-avatar", label: name }),
       h("h3", { className: "profile-name", text: name }),
       h("span", { className: "profile-username", text: "@" + user.username }),
+      h("p", { className: "profile-about" + (user.status ? "" : " modal-hidden"), text: user.status || "" }),
       h("span", { className: "profile-status" }, [data.muted ? h("span", { className: "material-symbols-rounded", text: "notifications_off" }) : null, document.createTextNode(status)]),
     );
     if (data.presence) {
@@ -3113,6 +3772,7 @@
   function openSubModal(id: string) {
     $(id).querySelectorAll(".settings-notice").forEach((notice) => (notice.textContent = ""));
     if (id === "display-name-modal") ($("display-name-input") as HTMLInputElement).value = nameOf(me);
+    if (id === "status-modal") ($("status-input") as HTMLInputElement).value = me.status || "";
     if (id === "avatar-modal") ($("avatar-upload-input") as HTMLInputElement).value = "";
     if (id === "password-modal") {
       ["old-password", "new-password", "new-password-repeat"].forEach((field) => (($(field) as HTMLInputElement).value = ""));
@@ -3335,6 +3995,110 @@
     }
   }
 
+  // ------------------------------------------------------- group invites
+
+  function groupInviteUrl(token: string) {
+    return new URL("/?join=" + encodeURIComponent(token), window.location.origin).href;
+  }
+
+  /** The owner's part of the group info: make, copy, renew or turn off the link. */
+  async function groupInviteSection(chatId: string) {
+    const box = h("div", { className: "settings-section group-invite" });
+    box.appendChild(h("p", { text: t("groupInvite.title") }));
+    let token: string | null = null;
+    try {
+      token = (await api(`/api/chats/${encodeURIComponent(chatId)}/invite`)).token;
+    } catch {
+      return null;
+    }
+    const render = () => {
+      box.querySelectorAll(":scope > :not(p:first-child)").forEach((node) => node.remove());
+      if (!token) {
+        box.appendChild(h("p", { className: "settings-hint", text: t("groupInvite.none") }));
+        box.appendChild(button(t("groupInvite.create"), "pill-btn", () => change("create")));
+        return;
+      }
+      const url = groupInviteUrl(token);
+      const input = h("input", { className: "group-invite-link", attrs: { type: "text", readonly: "true", value: url } }) as HTMLInputElement;
+      input.value = url;
+      box.appendChild(input);
+      const qr = h("div", { className: "group-invite-qr" });
+      qr.appendChild(SeresQR.toSvg(url));
+      box.appendChild(qr);
+      box.appendChild(
+        h("div", { className: "info-actions" }, [
+          button(t("groupInvite.copy"), "pill-btn", async () => {
+            try {
+              await navigator.clipboard.writeText(url);
+            } catch {
+              input.select();
+              document.execCommand("copy");
+            }
+            showAlert(t("invite.copied"));
+          }),
+          typeof navigator.share === "function"
+            ? button(t("invite.share"), "pill-btn", () => navigator.share({ title: "SereS", url }).catch(() => {}))
+            : null,
+          button(t("groupInvite.renew"), "pill-btn", () => {
+            if (window.confirm(t("groupInvite.renewConfirm"))) change("create");
+          }),
+          button(t("groupInvite.off"), "pill-btn danger", () => {
+            if (window.confirm(t("groupInvite.offConfirm"))) change("delete");
+          }),
+        ]),
+      );
+      box.appendChild(h("p", { className: "settings-hint", text: t("groupInvite.hint") }));
+    };
+    const change = async (what: "create" | "delete") => {
+      try {
+        const data = await api(`/api/chats/${encodeURIComponent(chatId)}/invite`, { method: what === "create" ? "POST" : "DELETE", body: what === "create" ? {} : undefined });
+        token = data.token;
+        render();
+      } catch (error) {
+        showAlert(errorText(error));
+      }
+    };
+    render();
+    return box;
+  }
+
+  /** Someone opened a group invite link: show the group and ask. */
+  async function showGroupInvite(token: string) {
+    try {
+      const data = await api("/api/invites/" + encodeURIComponent(token));
+      if (data.member && data.chat_id) {
+        switchView("chats");
+        await openChat(data.chat_id);
+        return;
+      }
+      joinToAccept = token;
+      const box = $("group-join-group");
+      box.textContent = "";
+      box.append(avatarEl(data.name, { group: true, label: data.name }), h("div", { className: "item-info" }, [
+        h("strong", { text: data.name }),
+        h("span", { className: "item-status", text: t("groupInvite.members", { count: data.member_count }) }),
+      ]));
+      $("warning-group-join").textContent = "";
+      openModal("group-join-modal");
+    } catch (error) {
+      showAlert(error instanceof ApiError && error.status === 404 ? t("groupInvite.invalid") : errorText(error));
+    }
+  }
+
+  async function joinGroup() {
+    if (!joinToAccept) return;
+    try {
+      const data = await post("/api/invites/" + encodeURIComponent(joinToAccept) + "/join");
+      joinToAccept = null;
+      closeAllModals();
+      await loadChats();
+      switchView("chats");
+      await openChat(data.chat_id);
+    } catch (error) {
+      $("warning-group-join").textContent = errorText(error);
+    }
+  }
+
   function showOwnName() {
     $("my-username-display").textContent = nameOf(me);
     ($("password-username") as HTMLInputElement).value = me.username;
@@ -3361,6 +4125,25 @@
     }
   }
 
+  function showOwnStatus() {
+    $("status-current").textContent = me.status || t("status.none");
+    $("status-current").classList.toggle("empty", !me.status);
+  }
+
+  async function saveStatus(status: string) {
+    const warning = $("status-warning");
+    warning.textContent = "";
+    try {
+      const data = await post("/api/profile/status", { status });
+      me.status = data.status;
+      showOwnStatus();
+      closeSubModal("status-modal");
+      showAlert(t(data.status ? "status.saved" : "status.removed"));
+    } catch (error) {
+      warning.textContent = errorText(error);
+    }
+  }
+
   function showCookieStatus() {
     const consent = SeresI18n.getConsent();
     $("cookie-status").textContent = t(
@@ -3374,6 +4157,7 @@
     $("privacy-toggle").textContent = t(me.show_last_seen === false ? "privacy.showOff" : "privacy.showOn");
     $("notify-toggle").textContent = t(settings.notify === "on" && notificationsEnabled() ? "notify.on" : "notify.off");
     $("notify-preview-toggle").textContent = t(settings.preview === "off" ? "notify.previewOff" : "notify.previewOn");
+    $("links-toggle").textContent = t(settings.links === "off" ? "links.off" : "links.on");
     $("notify-preview-toggle").classList.toggle("modal-hidden", settings.notify !== "on");
   }
 
@@ -3543,6 +4327,8 @@
   async function openSettings() {
     loadCodesStatus();
     loadTwofa();
+    $("devices-warning").textContent = "";
+    loadDevices().catch(() => {});
     $("twofa-totp-setup").classList.add("modal-hidden");
     renderSettingsToggles();
     $("user-dropdown-menu").classList.add("modal-hidden");
@@ -3550,7 +4336,8 @@
       $(id).textContent = "";
     });
     $("display-name-current").textContent = nameOf(me);
-    ["display-name-modal", "avatar-modal", "password-modal"].forEach(closeSubModal);
+    showOwnStatus();
+    ["display-name-modal", "status-modal", "avatar-modal", "password-modal"].forEach(closeSubModal);
     showCookieStatus();
     openModal("settings-modal");
     const fp = await SeresCrypto.fingerprint(identity.pubEcdh, identity.pubSign);
@@ -3580,6 +4367,26 @@
 
   async function logout() {
     try {
+      const state = await loadDevices();
+      const others = state.devices.filter((device) => device.approved && !device.current);
+      if (state.isMain && others.length) {
+        const id = await chooseDevice({
+          title: t("devices.handoverTitle"),
+          text: t("devices.handoverText"),
+          devices: others,
+          cancellable: true,
+        });
+        if (!id) return;
+        await post("/api/devices/main", { id });
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.status !== 401) {
+        showAlert(errorText(error));
+        return;
+      }
+    }
+    try {
+      await unsubscribePush();
       await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
     } finally {
       await SeresCrypto.clearIdentities();
@@ -3657,6 +4464,8 @@
       if (!(error instanceof ApiError && error.status === 401)) console.error(error);
     });
     if (current) await refreshCurrentDetails().catch(() => {});
+    // Scheduled messages that went out disappear from the bar.
+    if (current && scheduled?.items.length) loadScheduled(current);
   }
 
   function bindEvents() {
@@ -3711,6 +4520,12 @@
       toggleEmojiPicker();
     });
     $("attach-btn").addEventListener("click", () => ($("attach-input") as HTMLInputElement).click());
+    $("poll-btn").addEventListener("click", openPollDialog);
+    $("poll-cancel").addEventListener("click", () => $("poll-modal").classList.add("modal-hidden"));
+    $("poll-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      createPoll();
+    });
     $("attach-input").addEventListener("change", () => {
       const picker = $("attach-input") as HTMLInputElement;
       if (picker.files) addPendingFiles(picker.files);
@@ -3738,6 +4553,19 @@
     $("messages").addEventListener("scroll", updateJumpButton, { passive: true });
     $("lightbox").addEventListener("click", () => $("lightbox").classList.add("modal-hidden"));
     $("privacy-toggle").addEventListener("click", togglePrivacy);
+    $("links-toggle").addEventListener("click", () => {
+      const settings = readStore("settings");
+      settings.links = settings.links === "off" ? "on" : "off";
+      writeStore("settings", settings);
+      renderSettingsToggles();
+      clearLinkPreview();
+      if (current) renderMessages({ keepPosition: true });
+    });
+    $("message-input-field").addEventListener("input", watchLinkPreview);
+    $("link-preview-cancel").addEventListener("click", () => {
+      if (linkPreview) linkPreview.dismissed = true;
+      renderLinkPreviewBar();
+    });
     $("notify-toggle").addEventListener("click", () => toggleNotifications().catch(() => {}));
     $("notify-preview-toggle").addEventListener("click", () => {
       const settings = readStore("settings");
@@ -3768,11 +4596,40 @@
       event.preventDefault();
       logout();
     });
+    $("link-code-btn").addEventListener("click", openLinkCodeDialog);
+    $("link-code-cancel").addEventListener("click", () => $("link-code-modal").classList.add("modal-hidden"));
+    $("link-code-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const code = ($("link-code-input") as HTMLInputElement).value.trim();
+      if (!code) return;
+      $("link-code-modal").classList.add("modal-hidden");
+      linkDevice({ code });
+    });
+    $("menu-install").addEventListener("click", (event) => {
+      event.preventDefault();
+      $("user-dropdown-menu").classList.add("modal-hidden");
+      installApp();
+    });
     $("menu-invite").addEventListener("click", (event) => {
       event.preventDefault();
       openInviteModal();
     });
     $("add-friend-invite").addEventListener("click", () => openInviteModal());
+    document.addEventListener("click", (event) => {
+      const link = (event.target as Element).closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!link || event.ctrlKey || event.metaKey) return;
+      try {
+        const url = new URL(link.href);
+        const token = url.origin === window.location.origin ? url.searchParams.get("join") : null;
+        if (!token) return;
+        event.preventDefault();
+        event.stopPropagation();
+        showGroupInvite(token);
+      } catch {
+        // not a URL
+      }
+    }, true);
+    $("confirm-group-join").addEventListener("click", () => joinGroup());
     $("confirm-invite").addEventListener("click", acceptInvite);
     $("invite-copy").addEventListener("click", copyInvite);
     $("invite-share").addEventListener("click", shareInvite);
@@ -3781,6 +4638,23 @@
     });
     $("invite-link").addEventListener("focus", () => ($("invite-link") as HTMLInputElement).select());
     $("profile-close").addEventListener("click", () => $("profile-modal").classList.add("modal-hidden"));
+    $("status-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveStatus(($("status-input") as HTMLInputElement).value);
+    });
+    $("status-clear").addEventListener("click", () => saveStatus(""));
+    $("schedule-btn").addEventListener("click", openScheduleDialog);
+    // Right-click (or long press) on "Send" also schedules.
+    $("send-btn").addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      openScheduleDialog();
+    });
+    $("schedule-cancel").addEventListener("click", () => $("schedule-modal").classList.add("modal-hidden"));
+    $("schedule-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      scheduleMessage();
+    });
+    $("scheduled-bar").addEventListener("click", () => openScheduledList());
     $("display-name-form").addEventListener("submit", (event) => {
       event.preventDefault();
       saveDisplayName();
@@ -3821,6 +4695,7 @@
       btn.addEventListener("click", () => switchView(btn.dataset.view as "chats" | "friends" | "requests" | "matrix"));
     });
     $("list-search").addEventListener("input", () => {
+      startGlobalSearch();
       chatsSignature = "";
       loadChats().catch(() => {});
       renderFriends();
@@ -3922,6 +4797,328 @@
     });
   }
 
+  // ------------------------------------------------------------- devices
+  // Every login is a device. The main device allows new logins and links new
+  // devices (QR code, link or code); see src/backend-rs/src/api/devices.rs.
+
+  interface DeviceInfo {
+    id: string;
+    user_agent: string | null;
+    created_at: string;
+    last_seen: string | null;
+    approved: boolean;
+    current: boolean;
+    main: boolean;
+  }
+
+  let devicesState: { isMain: boolean; hasMain: boolean; devices: DeviceInfo[] } | null = null;
+  // Logins already answered here, so they don't ask again.
+  const answeredLogins = new Set<string>();
+  let deviceDialogOpen = false;
+
+  function deviceName(userAgent: string | null) {
+    const device = SeresDevices.describe(userAgent);
+    return `${t("devices.type." + device.type)} · ${device.os} · ${device.browser}`;
+  }
+
+  async function loadDevices() {
+    const data = await api("/api/devices");
+    devicesState = { isMain: !!data.is_main, hasMain: !!data.has_main, devices: data.devices || [] };
+    renderDevices();
+    return devicesState;
+  }
+
+  function renderDevices() {
+    const list = $("devices-list");
+    if (!devicesState) return;
+    list.textContent = "";
+    const state = devicesState;
+    for (const device of state.devices) {
+      const info = SeresDevices.describe(device.user_agent);
+      const badges: string[] = [];
+      if (device.current) badges.push(t("devices.thisDevice"));
+      if (device.main) badges.push(t("devices.main"));
+      if (!device.approved) badges.push(t("devices.waiting"));
+      const actions = h("div", { className: "device-actions" });
+      if (state.isMain && !device.current) {
+        if (!device.approved) {
+          actions.append(
+            button(t("devices.allow"), "request-action-btn", () => answerLogin(device.id, true)),
+            button(t("devices.deny"), "request-action-btn discard", () => answerLogin(device.id, false)),
+          );
+        } else {
+          actions.append(
+            button(t("devices.makeMain"), "request-action-btn", () => makeMainDevice(device)),
+            button(t("devices.logOut"), "request-action-btn discard", () => logOutDevice(device)),
+          );
+        }
+      }
+      list.appendChild(
+        h("div", { className: "device-item" + (device.main ? " main" : "") }, [
+          h("span", { className: "material-symbols-rounded device-icon", text: info.icon }),
+          h("div", { className: "device-info" }, [
+            h("strong", { text: `${t("devices.type." + info.type)} · ${info.os}` }),
+            h("span", {
+              className: "device-meta",
+              text: `${info.browser} · ${t("devices.lastActive", { time: formatDateTime(device.last_seen || device.created_at) })}`,
+            }),
+            badges.length ? h("span", { className: "device-badges", text: badges.join(" · ") }) : null,
+          ]),
+          actions,
+        ]),
+      );
+    }
+    $("link-code-btn").classList.toggle("modal-hidden", !state.isMain);
+  }
+
+  async function deviceAction(work: () => Promise<void>) {
+    $("devices-warning").textContent = "";
+    try {
+      await work();
+    } catch (error) {
+      $("devices-warning").textContent = errorText(error);
+    }
+    await loadDevices().catch(() => {});
+  }
+
+  function answerLogin(id: string, allow: boolean) {
+    answeredLogins.add(id);
+    return deviceAction(() => post("/api/devices/approve", { id, allow }));
+  }
+
+  function makeMainDevice(device: DeviceInfo) {
+    if (!window.confirm(t("devices.makeMainConfirm", { device: deviceName(device.user_agent) }))) return;
+    return deviceAction(async () => {
+      await post("/api/devices/main", { id: device.id });
+      showAlert(t("devices.mainChanged"));
+    });
+  }
+
+  function logOutDevice(device: DeviceInfo) {
+    if (!window.confirm(t("devices.logOutConfirm", { device: deviceName(device.user_agent) }))) return;
+    return deviceAction(() => post("/api/devices/logout", { id: device.id }));
+  }
+
+  /** Lets the user pick one of `devices`; null when cancelled. */
+  function chooseDevice(options: { title: string; text: string; devices: DeviceInfo[]; cancellable: boolean }): Promise<string | null> {
+    const modal = $("device-choice-modal");
+    const list = $("device-choice-list");
+    $("device-choice-title").textContent = options.title;
+    $("device-choice-text").textContent = options.text;
+    $("device-choice-warning").textContent = "";
+    $("device-choice-cancel").classList.toggle("modal-hidden", !options.cancellable);
+    list.textContent = "";
+    options.devices.forEach((device, index) => {
+      const radio = h("input", { attrs: { type: "radio", name: "device-choice", value: device.id } }) as HTMLInputElement;
+      radio.checked = device.current || (index === 0 && !options.devices.some((d) => d.current));
+      const info = SeresDevices.describe(device.user_agent);
+      list.appendChild(
+        h("label", { className: "picker-item" }, [
+          radio,
+          h("span", { className: "material-symbols-rounded device-icon", text: info.icon }),
+          h("span", { className: "device-info" }, [
+            h("strong", { text: deviceName(device.user_agent) + (device.current ? ` (${t("devices.thisDevice")})` : "") }),
+            h("span", { className: "device-meta", text: t("devices.lastActive", { time: formatDateTime(device.last_seen || device.created_at) }) }),
+          ]),
+        ]),
+      );
+    });
+    modal.classList.remove("modal-hidden");
+    deviceDialogOpen = true;
+    return new Promise((resolve) => {
+      const finish = (result: string | null) => {
+        deviceDialogOpen = false;
+        modal.classList.add("modal-hidden");
+        $("device-choice-confirm").removeEventListener("click", onConfirm);
+        $("device-choice-cancel").removeEventListener("click", onCancel);
+        resolve(result);
+      };
+      const onConfirm = () => {
+        const picked = list.querySelector<HTMLInputElement>("input[name=device-choice]:checked");
+        if (picked) finish(picked.value);
+      };
+      const onCancel = () => finish(null);
+      $("device-choice-confirm").addEventListener("click", onConfirm);
+      $("device-choice-cancel").addEventListener("click", onCancel);
+    });
+  }
+
+  /** Asks the main device about a new login or a device to link: true = allow, false = refuse, null = closed. */
+  function askAboutDevice(options: { icon: string; title: string; text: string; check?: string }): Promise<boolean | null> {
+    const modal = $("device-request-modal");
+    $("device-request-icon").textContent = options.icon;
+    $("device-request-title").textContent = options.title;
+    $("device-request-text").textContent = options.text;
+    $("device-request-check").textContent = options.check || "";
+    $("device-request-warning").textContent = "";
+    modal.classList.remove("modal-hidden");
+    deviceDialogOpen = true;
+    return new Promise((resolve) => {
+      const finish = (result: boolean | null) => {
+        deviceDialogOpen = false;
+        modal.classList.add("modal-hidden");
+        $("device-request-allow").removeEventListener("click", onAllow);
+        $("device-request-deny").removeEventListener("click", onDeny);
+        modal.removeEventListener("click", onOutside);
+        resolve(result);
+      };
+      const onAllow = () => finish(true);
+      const onDeny = () => finish(false);
+      const onOutside = (event: Event) => {
+        if (event.target === modal) finish(null);
+      };
+      $("device-request-allow").addEventListener("click", onAllow);
+      $("device-request-deny").addEventListener("click", onDeny);
+      modal.addEventListener("click", onOutside);
+    });
+  }
+
+  /** First start with several devices and no main device: pick one, the others are logged out. */
+  async function chooseFirstMainDevice(state: { devices: DeviceInfo[] }) {
+    const devices = state.devices.filter((device) => device.approved);
+    const id = await chooseDevice({
+      title: t("devices.chooseTitle"),
+      text: t("devices.chooseText"),
+      devices,
+      cancellable: false,
+    });
+    if (!id) return;
+    try {
+      const result = await post("/api/devices/main", { id });
+      if (result.logged_out) {
+        // Another device is the main device now; this one was logged out.
+        await SeresCrypto.clearIdentities();
+        window.location.href = "login.html";
+        return;
+      }
+      showAlert(t("devices.chosen"));
+    } catch (error) {
+      showAlert(errorText(error));
+    }
+    await loadDevices().catch(() => {});
+  }
+
+  /** Checked regularly: picking a main device, and new logins waiting for the main device. */
+  async function checkDevices() {
+    if (deviceDialogOpen) return;
+    const state = await loadDevices().catch(() => null);
+    if (!state) return;
+    if (!state.hasMain) {
+      await chooseFirstMainDevice(state);
+      return;
+    }
+    if (!state.isMain) return;
+    const waiting = state.devices.find((device) => !device.approved && !answeredLogins.has(device.id));
+    if (!waiting) return;
+    answeredLogins.add(waiting.id);
+    const allow = await askAboutDevice({
+      icon: SeresDevices.describe(waiting.user_agent).icon,
+      title: t("devices.requestTitle"),
+      text: t("devices.requestText", { device: deviceName(waiting.user_agent), time: formatDateTime(waiting.created_at) }),
+    });
+    if (allow !== null) await deviceAction(() => post("/api/devices/approve", { id: waiting.id, allow }));
+  }
+
+  /**
+   * The main device links a new device: from the QR code / link (token) or
+   * the typed code. The account keys go sealed for the new device.
+   */
+  async function linkDevice(query: { token?: string; code?: string }) {
+    try {
+      const state = devicesState || (await loadDevices());
+      if (!state.isMain) {
+        showAlert(t("link.mainOnly"));
+        return;
+      }
+      const found = await post("/api/link/find", query);
+      const check = await SeresCrypto.linkCheckCode(found.pub);
+      const allow = await askAboutDevice({
+        icon: "qr_code_2",
+        title: t("link.confirmTitle"),
+        text: t("link.confirmText", { device: deviceName(found.user_agent) }),
+        check: t("link.checkCompare", { code: check }),
+      });
+      if (allow === null) return;
+      if (!allow) {
+        await post("/api/link/deny", { id: found.id });
+        return;
+      }
+      if (!identity.transfer) {
+        // Logged in before linking existed: the password unlocks the keys once more.
+        const password = await askPassword(t("link.needPassword"));
+        if (password === null) return;
+        const pre = await post("/api/prelogin", { nameomail: me.username });
+        const keys = await SeresCrypto.deriveAccountKeys(password, pre.kdf_salt, pre.kdf_iterations);
+        const fresh = (await api("/api/me")).user;
+        try {
+          identity = await SeresCrypto.addTransfer(identity, fresh.enc_private, keys.wrapKey);
+        } catch {
+          showAlert(t("settings.wrongPassword"));
+          return;
+        }
+        await SeresCrypto.saveIdentity(identity);
+      }
+      const sealed = await SeresCrypto.sealIdentity(identity, found.pub);
+      await post("/api/link/approve", { id: found.id, sealed });
+      showAlert(t("link.done"));
+    } catch (error) {
+      showAlert(errorText(error));
+    }
+    loadDevices().catch(() => {});
+  }
+
+  function openLinkCodeDialog() {
+    const modal = $("link-code-modal");
+    const input = $("link-code-input") as HTMLInputElement;
+    input.value = "";
+    $("link-code-warning").textContent = "";
+    modal.classList.remove("modal-hidden");
+    setTimeout(() => input.focus(), 30);
+  }
+
+  // ------------------------------------------------------------- app
+
+  // The browser's own install dialog (Chrome, Edge), kept until the menu entry is used.
+  let installPrompt: any = null;
+
+  function isInstalled() {
+    return window.matchMedia("(display-mode: standalone)").matches || (navigator as any).standalone === true;
+  }
+
+  function isIos() {
+    return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
+
+  /** SereS as an installable app: the service worker and the "Install app" menu entry. */
+  function setupApp() {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch((error) => console.warn("Service worker not registered", error));
+    }
+    window.addEventListener("beforeinstallprompt", (event) => {
+      event.preventDefault();
+      installPrompt = event;
+      $("menu-install").classList.remove("modal-hidden");
+    });
+    window.addEventListener("appinstalled", () => {
+      installPrompt = null;
+      $("menu-install").classList.add("modal-hidden");
+    });
+    // Safari on iPhone and iPad has no install dialog, only "Add to Home Screen".
+    if (isIos() && !isInstalled()) $("menu-install").classList.remove("modal-hidden");
+  }
+
+  async function installApp() {
+    if (installPrompt) {
+      const prompt = installPrompt;
+      installPrompt = null;
+      prompt.prompt();
+      await prompt.userChoice.catch(() => null);
+      $("menu-install").classList.add("modal-hidden");
+    } else if (isIos()) {
+      showAlert(t("app.installIos"));
+    }
+  }
+
   async function boot() {
     SeresI18n.apply();
     $("my-username-display").textContent = t("common.loading");
@@ -3929,6 +5126,7 @@
     $("current-chat-name").textContent = t("app.welcome");
     cleanLoginRedirect();
     applyTheme();
+    setupApp();
     try {
       me = (await api("/api/me")).user;
     } catch {
@@ -3959,10 +5157,35 @@
       $("codes-warning").textContent = t("recover.doneCode");
       $("codes-form").scrollIntoView({ block: "center" });
     }
-    if (pendingInvite) {
+    if (notificationsEnabled()) subscribePush().catch((error) => console.warn("Push not available", error));
+    // Opened from the QR code / link of a new device: link it.
+    const linkToken = new URLSearchParams(window.location.search).get("link");
+    if (linkToken) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      await loadDevices().catch(() => {});
+      await linkDevice({ token: linkToken });
+    }
+    checkDevices().catch(() => {});
+    window.setInterval(() => {
+      if (document.visibilityState === "visible") checkDevices().catch(() => {});
+    }, 8000);
+    // Opened from a notification: show that chat.
+    const chatFromNotification = new URLSearchParams(window.location.search).get("chat");
+    if (chatFromNotification) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      if (chats.some((chat) => chat.id === chatFromNotification)) openChat(chatFromNotification);
+    }
+    navigator.serviceWorker?.addEventListener("message", (event) => {
+      if (event.data?.type === "open-chat" && chats.some((chat) => chat.id === event.data.chat)) {
+        switchView("chats");
+        openChat(event.data.chat);
+      }
+    });
+    if (pendingInvite || pendingJoin) {
       // Remove the token from the address bar so a reload doesn't ask again.
       window.history.replaceState({}, document.title, window.location.pathname);
-      showInvite(pendingInvite);
+      if (pendingInvite) showInvite(pendingInvite);
+      else if (pendingJoin) showGroupInvite(pendingJoin);
     }
 
     // A cached page from before calls existed doesn't load calls.js.

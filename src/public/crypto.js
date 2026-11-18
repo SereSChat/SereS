@@ -103,15 +103,76 @@ const SeresCrypto = (() => {
     /** Decrypts the private keys and imports them as non-extractable keys. */
     async function unlockIdentity(userId, encPrivate, wrapKey, pubEcdh, pubSign) {
         const raw = await decryptPrivateKeys(encPrivate, wrapKey);
-        const ecdhPriv = await subtle.importKey("pkcs8", raw.ecdh, ECDH, false, [
-            "deriveBits",
-        ]);
-        const signPriv = await subtle.importKey("pkcs8", raw.sign, ECDSA, false, [
-            "sign",
-        ]);
-        raw.ecdh.fill(0);
-        raw.sign.fill(0);
-        return { userId, ecdhPriv, signPriv, pubEcdh, pubSign };
+        return identityFromRaw(userId, raw, pubEcdh, pubSign);
+    }
+    /** Imports the private keys (non-extractable) and keeps a device-bound copy for linking. */
+    async function identityFromRaw(userId, raw, pubEcdh, pubSign) {
+        try {
+            const ecdhPriv = await subtle.importKey("pkcs8", raw.ecdh, ECDH, false, ["deriveBits"]);
+            const signPriv = await subtle.importKey("pkcs8", raw.sign, ECDSA, false, ["sign"]);
+            const deviceKey = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+            const box = await encryptPrivateKeys(raw.ecdh, raw.sign, deviceKey);
+            return { userId, ecdhPriv, signPriv, pubEcdh, pubSign, transfer: { key: deviceKey, box } };
+        }
+        finally {
+            raw.ecdh.fill(0);
+            raw.sign.fill(0);
+        }
+    }
+    /** For devices that were logged in before linking existed: adds the copy with the password's key. */
+    async function addTransfer(identity, encPrivate, wrapKey) {
+        const raw = await decryptPrivateKeys(encPrivate, wrapKey);
+        const fresh = await identityFromRaw(identity.userId, raw, identity.pubEcdh, identity.pubSign);
+        return { ...identity, transfer: fresh.transfer };
+    }
+    // ---------------------------------------------------------- linking
+    // The new device makes a key pair and shows the public key in the QR code.
+    // The main device derives a shared key from it (ECDH + HKDF) and encrypts
+    // the account's private keys with it. Both devices show the same short
+    // check code, made from that public key, so a swapped key is noticed.
+    const LINK_INFO = encoder.encode("seres-link-v1");
+    async function linkKey(privateKey, publicB64) {
+        const shared = await subtle.deriveBits({ name: "ECDH", public: await importEcdhPublic(publicB64) }, privateKey, 256);
+        const hkdf = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+        return subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: LINK_INFO }, hkdf, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    }
+    async function newLinkKeyPair() {
+        const pair = await subtle.generateKey(ECDH, false, ["deriveBits"]);
+        return { privateKey: pair.privateKey, pub: toB64(await subtle.exportKey("spki", pair.publicKey)) };
+    }
+    /** Six digits both devices show, made from the new device's public key. */
+    async function linkCheckCode(publicB64) {
+        const digest = new Uint8Array(await subtle.digest("SHA-256", encoder.encode("seres-link-check-v1|" + publicB64)));
+        const value = ((digest[0] << 16) | (digest[1] << 8) | digest[2]) % 1000000;
+        const digits = String(value).padStart(6, "0");
+        return digits.slice(0, 3) + " " + digits.slice(3);
+    }
+    /** Main device: the account keys, encrypted for the new device. */
+    async function sealIdentity(identity, devicePub) {
+        if (!identity.transfer)
+            throw new Error("No transfer copy on this device");
+        const raw = await decryptPrivateKeys(identity.transfer.box, identity.transfer.key);
+        try {
+            const ephemeral = await subtle.generateKey(ECDH, false, ["deriveBits"]);
+            const key = await linkKey(ephemeral.privateKey, devicePub);
+            const iv = randomBytes(12);
+            const plain = encoder.encode(JSON.stringify({ ecdh: toB64(raw.ecdh), sign: toB64(raw.sign) }));
+            const ct = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: LINK_INFO }, key, plain);
+            plain.fill(0);
+            return { epub: toB64(await subtle.exportKey("spki", ephemeral.publicKey)), iv: toB64(iv), ct: toB64(ct) };
+        }
+        finally {
+            raw.ecdh.fill(0);
+            raw.sign.fill(0);
+        }
+    }
+    /** New device: opens what the main device sealed for it. */
+    async function openSealedIdentity(userId, privateKey, sealed, pubEcdh, pubSign) {
+        const key = await linkKey(privateKey, sealed.epub);
+        const plain = new Uint8Array(await subtle.decrypt({ name: "AES-GCM", iv: fromB64(sealed.iv), additionalData: LINK_INFO }, key, fromB64(sealed.ct)));
+        const keys = JSON.parse(decoder.decode(plain));
+        plain.fill(0);
+        return identityFromRaw(userId, { ecdh: fromB64(keys.ecdh), sign: fromB64(keys.sign) }, pubEcdh, pubSign);
     }
     async function rewrapPrivateKeys(encPrivate, oldWrapKey, newWrapKey) {
         const raw = await decryptPrivateKeys(encPrivate, oldWrapKey);
@@ -407,6 +468,11 @@ const SeresCrypto = (() => {
         deriveAccountKeys,
         createKeyBundle,
         unlockIdentity,
+        addTransfer,
+        newLinkKeyPair,
+        linkCheckCode,
+        sealIdentity,
+        openSealedIdentity,
         rewrapPrivateKeys,
         saveIdentity,
         loadIdentity,

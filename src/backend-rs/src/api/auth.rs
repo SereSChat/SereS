@@ -45,14 +45,28 @@ fn api_bad_request(message: impl Into<String>) -> Response {
 
 pub(crate) async fn current_user(state: &AppState, headers: &HeaderMap) -> Option<SqliteRow> {
     let token = cookie_value(headers, SESSION_COOKIE)?;
+    let token_hash = hash_token(&token);
     let row = sqlx::query(
-        "SELECT u.* FROM user_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
+        "SELECT u.*, s.last_seen AS session_seen FROM user_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND s.approved=1",
     )
-    .bind(hash_token(&token))
+    .bind(&token_hash)
     .bind(now_iso())
     .fetch_optional(&state.db)
     .await
     .ok()??;
+    // The device was used just now (for the device list and to skip push
+    // notifications while SereS is open on it).
+    let session_seen: Option<String> = row.try_get("session_seen").ok().flatten();
+    if session_seen
+        .as_deref()
+        .is_none_or(|old| seconds_between(old, &now_iso()) >= 20.0)
+    {
+        let _ = sqlx::query("UPDATE user_sessions SET last_seen=? WHERE token_hash=?")
+            .bind(now_iso())
+            .bind(&token_hash)
+            .execute(&state.db)
+            .await;
+    }
     let last_seen: Option<String> = row.try_get("last_seen").ok().flatten();
     let user_id: String = row.try_get("id").ok()?;
     let now = now_iso();
@@ -73,6 +87,11 @@ pub(crate) async fn require_user(state: &AppState, headers: &HeaderMap) -> ApiRe
     current_user(state, headers)
         .await
         .ok_or_else(|| ApiError::new("Not logged in", StatusCode::UNAUTHORIZED))
+}
+
+/// Hash of the session cookie of this request: identifies the device.
+pub(crate) fn session_hash(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, SESSION_COOKIE).map(|token| hash_token(&token))
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -234,6 +253,14 @@ fn own_user(row: &SqliteRow) -> Value {
                 .unwrap_or(Value::Null),
         );
     }
+    user.insert(
+        "status".into(),
+        row.try_get::<Option<String>, _>("status_text")
+            .ok()
+            .flatten()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
     user.insert(
         "show_last_seen".into(),
         Value::Bool(row.try_get::<i64, _>("show_last_seen").unwrap_or(1) != 0),
@@ -600,11 +627,25 @@ pub(crate) async fn login_response(
 }
 
 /// Starts a session for `user_id`; `extra` fields are merged into the reply.
+/// While the account has a main device, the new device waits until the main
+/// device allows it (see devices.rs).
 async fn session_response(
     state: &AppState,
     user_id: &str,
     headers: &HeaderMap,
     extra: Value,
+) -> Response {
+    create_session(state, user_id, headers, extra, false).await
+}
+
+/// Like `session_response`; `trusted` skips the approval (a device the main
+/// device linked itself).
+pub(crate) async fn create_session(
+    state: &AppState,
+    user_id: &str,
+    headers: &HeaderMap,
+    extra: Value,
+    trusted: bool,
 ) -> Response {
     let user = match sqlx::query("SELECT * FROM users WHERE id=?")
         .bind(user_id)
@@ -617,20 +658,37 @@ async fn session_response(
     let token = format!("{}.{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let created = now_iso();
     let expires = iso_after(SESSION_DAYS * 24 * 60 * 60);
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.chars().take(300).collect::<String>());
+    let approved = trusted
+        || super::devices::main_session(&state.db, user_id)
+            .await
+            .is_none();
     if sqlx::query(
-        "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+        "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,last_seen,user_agent,approved) VALUES(?,?,?,?,?,?,?)",
     )
     .bind(hash_token(&token))
     .bind(user_id)
     .bind(expires)
-    .bind(created)
+    .bind(&created)
+    .bind(&created)
+    .bind(user_agent)
+    .bind(i64::from(approved))
     .execute(&state.db)
     .await
     .is_err()
     {
         return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
     }
+    if approved {
+        super::devices::adopt_main_if_alone(&state.db, user_id).await;
+    }
     let mut reply = json!({"success":true,"user":own_user(&user),"enc_private":user.try_get::<Option<String>,_>("enc_private").ok().flatten()});
+    if !approved {
+        reply["approval_required"] = json!(true);
+    }
     if let (Some(reply), Value::Object(extra)) = (reply.as_object_mut(), extra) {
         reply.extend(extra);
     }

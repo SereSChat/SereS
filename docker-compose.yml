@@ -15,3 +15,21 @@ services:
     volumes:
       # The database, including profile pictures and attachments.
       - ./data:/data
+
+  # Backs up the database every BACKUP_DAYS days into ./backups and keeps the
+  # newest BACKUP_KEEP backups. Back up right away:
+  #   docker compose run --rm backup now
+  backup:
+    build: deploy/backup
+    image: seres-backup:latest
+    container_name: seres-backup
+    restart: unless-stopped
+    # Same user as SereS, so the database files keep their owner.
+    user: "1000:1000"
+    network_mode: none
+    environment:
+      BACKUP_DAYS: ${BACKUP_DAYS:-7}
+      BACKUP_KEEP: ${BACKUP_KEEP:-4}
+    volumes:
+      - ./data:/data
+      - ./backups:/backups
