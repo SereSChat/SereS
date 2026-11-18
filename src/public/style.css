@@ -4485,3 +4485,99 @@ body.bright-body .settings-notice:not(:empty) {
 .sub-modal .modal-box {
   width: min(420px, calc(100vw - 32px));
 }
+
+/* Devices in the settings and when picking the main device */
+.devices-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.device-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.device-item.main {
+  box-shadow: inset 3px 0 0 #00a884;
+}
+
+.device-icon {
+  font-size: 1.6rem;
+  color: #8696a0;
+}
+
+.device-info {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+}
+
+.device-meta {
+  color: #8696a0;
+  font-size: 0.8rem;
+}
+
+.device-badges {
+  color: #00a884;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* The device list uses the whole width of the settings. */
+#settings-modal .settings-section.settings-wide {
+  grid-column: 1 / -1;
+}
+
+body.bright-body .device-item {
+  background-color: #f0f2f5;
+}
+
+/* Linking a new device: the code to type in and the check code */
+.link-code {
+  margin: 10px 0 4px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 1.7rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-align: center;
+}
+
+.link-check {
+  font-weight: 600;
+}
+
+#link-qr svg {
+  width: 200px;
+  height: 200px;
+  margin: 0 auto;
+  display: block;
+  background: #ffffff;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+@media (max-width: 600px) {
+  .device-item {
+    flex-wrap: wrap;
+  }
+
+  .device-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
