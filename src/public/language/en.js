@@ -457,4 +457,6 @@ window.SeresLang.en = {
   "pwPrompt.password": "Enter your current password to change it.",
   "pwPrompt.twofa": "Enter your password to change two-factor authentication.",
   "pwPrompt.codes": "Enter your password to create new backup codes. The old ones stop working.",
+  "app.install": "Install app",
+  "app.installIos": "To install SereS: tap the share button in Safari, then \"Add to Home Screen\".",
 };

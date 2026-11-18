@@ -457,4 +457,6 @@ window.SeresLang.fr = {
   "pwPrompt.password": "Saisis ton mot de passe actuel pour le changer.",
   "pwPrompt.twofa": "Saisis ton mot de passe pour modifier la double authentification.",
   "pwPrompt.codes": "Saisis ton mot de passe pour créer de nouveaux codes de secours. Les anciens ne marcheront plus.",
+  "app.install": "Installer l'app",
+  "app.installIos": "Pour installer SereS : touche Partager dans Safari, puis \"Sur l'écran d'accueil\".",
 };
