@@ -5,6 +5,8 @@
     id: string;
     username: string;
     display_name?: string | null;
+    // The short text under the profile (only friends and chat partners see it).
+    status?: string | null;
   }
 
   interface Me extends UserRef {
@@ -860,7 +862,7 @@
     list.appendChild(sectionTitle(t("friends.title", { count: friends.friends.length })));
     friends.friends.filter(match).forEach((friend) => {
       list.appendChild(
-        userRow(friend, t("friends.status"), [
+        userRow(friend, friend.status || t("friends.status"), [
           button(t("friends.message"), "request-action-btn accept", () => startDm(friend.username)),
           button("⋯", "request-action-btn more", (event) => openUserMenu(friend, event)),
         ]),
@@ -3057,6 +3059,7 @@
       avatarEl(user.username, { className: "avatar profile-avatar", label: name }),
       h("h3", { className: "profile-name", text: name }),
       h("span", { className: "profile-username", text: "@" + user.username }),
+      h("p", { className: "profile-about" + (user.status ? "" : " modal-hidden"), text: user.status || "" }),
       h("span", { className: "profile-status" }, [data.muted ? h("span", { className: "material-symbols-rounded", text: "notifications_off" }) : null, document.createTextNode(status)]),
     );
     if (data.presence) {
@@ -3158,6 +3161,7 @@
   function openSubModal(id: string) {
     $(id).querySelectorAll(".settings-notice").forEach((notice) => (notice.textContent = ""));
     if (id === "display-name-modal") ($("display-name-input") as HTMLInputElement).value = nameOf(me);
+    if (id === "status-modal") ($("status-input") as HTMLInputElement).value = me.status || "";
     if (id === "avatar-modal") ($("avatar-upload-input") as HTMLInputElement).value = "";
     if (id === "password-modal") {
       ["old-password", "new-password", "new-password-repeat"].forEach((field) => (($(field) as HTMLInputElement).value = ""));
@@ -3406,6 +3410,25 @@
     }
   }
 
+  function showOwnStatus() {
+    $("status-current").textContent = me.status || t("status.none");
+    $("status-current").classList.toggle("empty", !me.status);
+  }
+
+  async function saveStatus(status: string) {
+    const warning = $("status-warning");
+    warning.textContent = "";
+    try {
+      const data = await post("/api/profile/status", { status });
+      me.status = data.status;
+      showOwnStatus();
+      closeSubModal("status-modal");
+      showAlert(t(data.status ? "status.saved" : "status.removed"));
+    } catch (error) {
+      warning.textContent = errorText(error);
+    }
+  }
+
   function showCookieStatus() {
     const consent = SeresI18n.getConsent();
     $("cookie-status").textContent = t(
@@ -3597,7 +3620,8 @@
       $(id).textContent = "";
     });
     $("display-name-current").textContent = nameOf(me);
-    ["display-name-modal", "avatar-modal", "password-modal"].forEach(closeSubModal);
+    showOwnStatus();
+    ["display-name-modal", "status-modal", "avatar-modal", "password-modal"].forEach(closeSubModal);
     showCookieStatus();
     openModal("settings-modal");
     const fp = await SeresCrypto.fingerprint(identity.pubEcdh, identity.pubSign);
@@ -3862,6 +3886,11 @@
     });
     $("invite-link").addEventListener("focus", () => ($("invite-link") as HTMLInputElement).select());
     $("profile-close").addEventListener("click", () => $("profile-modal").classList.add("modal-hidden"));
+    $("status-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveStatus(($("status-input") as HTMLInputElement).value);
+    });
+    $("status-clear").addEventListener("click", () => saveStatus(""));
     $("display-name-form").addEventListener("submit", (event) => {
       event.preventDefault();
       saveDisplayName();

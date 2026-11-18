@@ -332,6 +332,14 @@
         </div>
 
         <div class="settings-section">
+          <p data-i18n="status.text">Status (shown under your profile):</p>
+          <div class="settings-row">
+            <span id="status-current" class="status-current"></span>
+            <button class="modal-btn secondary-btn" type="button" data-open-sub="status-modal"><span class="material-symbols-rounded">edit</span><span data-i18n="settings.edit">Change</span></button>
+          </div>
+        </div>
+
+        <div class="settings-section">
           <p data-i18n="settings.avatarText">Profile picture (PNG, JPG, GIF or WebP, max 2MB):</p>
           <button class="modal-btn secondary-btn" type="button" data-open-sub="avatar-modal"><span class="material-symbols-rounded">account_circle</span><span data-i18n="settings.avatarChange">Change profile picture</span></button>
         </div>
@@ -418,6 +426,19 @@
         <div class="modal-buttons">
           <button class="modal-btn cancel-btn" type="button" data-close-sub data-i18n="common.cancel">Cancel</button>
           <button class="modal-btn confirm-btn" type="submit" id="save-display-name" data-i18n="settings.displayNameSave">Save name</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="modal-overlay modal-hidden sub-modal" id="status-modal">
+      <form class="modal-box" id="status-form" autocomplete="off">
+        <h3 data-i18n="status.title">Status</h3>
+        <p class="settings-hint" data-i18n="status.hint">Friends and people you chat with see it under your name.</p>
+        <input type="text" id="status-input" maxlength="140" placeholder="Hey there, I'm using SereS" data-i18n-placeholder="status.placeholder" data-autofocus />
+        <p class="settings-hint settings-notice" id="status-warning" role="status" aria-live="polite"></p>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" id="status-clear" data-i18n="status.clear">Remove</button>
+          <button class="modal-btn confirm-btn" type="submit" data-i18n="status.save">Save</button>
         </div>
       </form>
     </div>
