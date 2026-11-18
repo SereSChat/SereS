@@ -9,6 +9,11 @@
 //
 // The browser asks the server every few seconds for calls and connection
 // offers, every second while a call rings or runs.
+//
+// Video: every connection has a video slot from the start. Turning the
+// camera or screen sharing on or off only swaps the picture in that slot
+// (no new negotiation), and a small data channel tells the other side what
+// it shows. Both aim for 60 frames per second.
 
 interface CallParticipant {
   id: string;
@@ -73,7 +78,14 @@ const SeresCalls = (() => {
     route?: "direct" | "relay" | "relay-tcp";
     // When the connection dropped, to restart it if it doesn't come back.
     lostAt?: number;
+    videoSender?: RTCRtpSender;
+    video: HTMLVideoElement;
+    // What the other side shows in its video slot.
+    remoteVideo: VideoKind | null;
+    channel?: RTCDataChannel;
   }
+
+  type VideoKind = "camera" | "screen";
 
   interface Active {
     call: CallInfo;
@@ -84,6 +96,8 @@ const SeresCalls = (() => {
     failures: Map<string, number>;
     muted: boolean;
     timer: number;
+    // My camera or shared screen, with a preview.
+    video: { kind: VideoKind; track: MediaStreamTrack; preview: HTMLVideoElement } | null;
   }
   let active: Active | null = null;
 
@@ -168,17 +182,35 @@ const SeresCalls = (() => {
     });
     const audio = document.createElement("audio");
     audio.autoplay = true;
+    const video = document.createElement("video");
+    video.autoplay = true;
+    video.playsInline = true;
+    video.muted = true;
+    video.className = "call-video";
+    video.addEventListener("click", () => fullscreen(video));
     pc.ontrack = (event) => {
+      if (event.track.kind === "video") {
+        video.srcObject = new MediaStream([event.track]);
+        video.play().catch(() => {});
+        return;
+      }
       audio.srcObject = event.streams[0];
       audio.play().catch(() => {});
       peer.stream = event.streams[0];
       watchLevel(userId, event.streams[0]);
     };
-    const peer: Peer = { pc, audio, offerer };
+    const peer: Peer = { pc, audio, offerer, video, remoteVideo: null };
+    // The side that offers creates the video slot; the other side gets it with the offer.
+    if (offerer) {
+      peer.videoSender = pc.addTransceiver(current.video?.track || "video", { direction: "sendrecv" }).sender;
+      if (current.video) tuneVideo(peer.videoSender, current.video.kind);
+    }
+    openChannel(peer, pc.createDataChannel("control", { negotiated: true, id: 0 }));
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "connected") {
         peer.lostAt = undefined;
         updateRoute(peer);
+        if (peer.videoSender && active?.video) tuneVideo(peer.videoSender, active.video.kind);
       } else if (pc.connectionState === "disconnected") {
         peer.lostAt ??= Date.now();
       }
@@ -198,6 +230,7 @@ const SeresCalls = (() => {
     unwatchLevel(userId);
     peer.pc.close();
     peer.audio.srcObject = null;
+    peer.video.srcObject = null;
     if (active && active.peers.get(userId) === peer) active.peers.delete(userId);
   }
 
@@ -324,6 +357,7 @@ const SeresCalls = (() => {
       if (old) closePeer(signal.from, old);
       const peer = newPeer(signal.from, false);
       await peer.pc.setRemoteDescription({ type: "offer", sdp: signal.data.sdp });
+      takeVideoSlot(peer);
       await peer.pc.setLocalDescription(await peer.pc.createAnswer());
       await sendSignal(current.call.id, signal.from, "answer", peer.pc);
     } else {
@@ -334,6 +368,133 @@ const SeresCalls = (() => {
       }
     }
     renderPanel();
+  }
+
+  // ---------------------------------------------------------------- video
+
+  /** The answering side sends its picture in the video slot that came with the offer. */
+  function takeVideoSlot(peer: Peer) {
+    const slot = peer.pc.getTransceivers().find((tx) => tx.receiver.track.kind === "video");
+    if (!slot) return;
+    slot.direction = "sendrecv";
+    peer.videoSender = slot.sender;
+    if (active?.video) {
+      slot.sender.replaceTrack(active.video.track).catch(() => {});
+      tuneVideo(slot.sender, active.video.kind);
+    }
+  }
+
+  /**
+   * 60 frames per second: with less bandwidth the browser lowers the
+   * resolution rather than the frame rate, so motion stays smooth.
+   */
+  function tuneVideo(sender: RTCRtpSender, kind: VideoKind) {
+    try {
+      const parameters: any = sender.getParameters();
+      if (!parameters.encodings?.length) return;
+      for (const encoding of parameters.encodings) {
+        encoding.maxFramerate = 60;
+        encoding.maxBitrate = kind === "screen" ? 6_000_000 : 2_500_000;
+        encoding.priority = "medium";
+      }
+      parameters.degradationPreference = "maintain-framerate";
+      sender.setParameters(parameters).catch(() => {});
+    } catch {
+      // Older browsers: defaults.
+    }
+  }
+
+  function openChannel(peer: Peer, channel: RTCDataChannel) {
+    peer.channel = channel;
+    channel.onopen = () => sendVideoState(peer);
+    channel.onmessage = (event) => {
+      try {
+        const message = JSON.parse(String(event.data));
+        if (message.type !== "video") return;
+        peer.remoteVideo = message.video === "camera" || message.video === "screen" ? message.video : null;
+        tilesSignature = "";
+        renderPanel();
+      } catch {
+        // Not for us.
+      }
+    };
+  }
+
+  function sendVideoState(peer: Peer) {
+    if (peer.channel?.readyState !== "open") return;
+    peer.channel.send(JSON.stringify({ type: "video", video: active?.video?.kind ?? null }));
+  }
+
+  /** Shows my camera or screen to everyone in the call (null turns it off). */
+  async function setVideo(kind: VideoKind | null, track: MediaStreamTrack | null) {
+    if (!active) {
+      track?.stop();
+      return;
+    }
+    const old = active.video;
+    if (old && old.track !== track) old.track.stop();
+    if (kind && track) {
+      const preview = old?.preview || document.createElement("video");
+      preview.autoplay = true;
+      preview.playsInline = true;
+      preview.muted = true;
+      preview.className = "call-video own" + (kind === "camera" ? " mirrored" : "");
+      preview.srcObject = new MediaStream([track]);
+      preview.play().catch(() => {});
+      active.video = { kind, track, preview };
+      // Stopped from the browser's own "Stop sharing" button.
+      track.addEventListener("ended", () => {
+        if (active?.video?.track === track) setVideo(null, null);
+      });
+    } else {
+      if (old) old.preview.srcObject = null;
+      active.video = null;
+    }
+    for (const peer of active.peers.values()) {
+      if (!peer.videoSender) continue;
+      await peer.videoSender.replaceTrack(track).catch(() => {});
+      if (kind) tuneVideo(peer.videoSender, kind);
+      sendVideoState(peer);
+    }
+    tilesSignature = "";
+    renderPanel();
+  }
+
+  async function toggleCamera() {
+    if (!active) return;
+    if (active.video?.kind === "camera") return setVideo(null, null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60, max: 60 } },
+      });
+      const track = stream.getVideoTracks()[0];
+      track.contentHint = "motion";
+      await setVideo("camera", track);
+    } catch {
+      deps.showAlert(t("call.noCamera"));
+    }
+  }
+
+  async function toggleScreen() {
+    if (!active) return;
+    if (active.video?.kind === "screen") return setVideo(null, null);
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60, max: 60 } },
+        audio: false,
+      });
+      const track = stream.getVideoTracks()[0];
+      // Smooth motion (games, videos) rather than sharp still text.
+      track.contentHint = "motion";
+      await setVideo("screen", track);
+    } catch (error) {
+      if ((error as DOMException)?.name !== "NotAllowedError") deps.showAlert(t("call.noScreen"));
+    }
+  }
+
+  function fullscreen(video: HTMLVideoElement) {
+    if (video.ownerDocument.fullscreenElement) video.ownerDocument.exitFullscreen().catch(() => {});
+    else video.requestFullscreen?.().catch(() => {});
   }
 
   // ------------------------------------------------------------- actions
@@ -358,6 +519,7 @@ const SeresCalls = (() => {
       peers: new Map(),
       failures: new Map(),
       muted: false,
+      video: null,
       timer: window.setInterval(() => {
         restartLostConnections();
         renderPanel();
@@ -410,6 +572,10 @@ const SeresCalls = (() => {
 
   function stopActive(stopMicrophone = true) {
     if (!active) return;
+    if (active.video) {
+      active.video.track.stop();
+      active.video.preview.srcObject = null;
+    }
     for (const [id, peer] of active.peers) closePeer(id, peer);
     unwatchLevel(deps.me().id);
     if (stopMicrophone) active.stream.getTracks().forEach((track) => track.stop());
@@ -773,22 +939,42 @@ const SeresCalls = (() => {
     return peer.route === "relay-tcp" ? t("call.routeTcp") : peer.route === "relay" ? t("call.routeRelay") : "";
   }
 
+  /** The video someone shows in the call, if any: mine is the preview. */
+  function videoOf(p: CallParticipant): { element: HTMLVideoElement; kind: VideoKind } | null {
+    if (!active) return null;
+    if (p.id === deps.me().id) return active.video ? { element: active.video.preview, kind: active.video.kind } : null;
+    const peer = active.peers.get(p.id);
+    return peer && peer.remoteVideo && peer.pc.connectionState === "connected" ? { element: peer.video, kind: peer.remoteVideo } : null;
+  }
+
   function renderTiles(people: CallParticipant[]) {
     if (!parts || !active) return;
-    const signature = JSON.stringify(people.map((p) => [p.id, p.state, stateText(p)])) + active.muted;
+    const signature =
+      JSON.stringify(people.map((p) => [p.id, p.state, stateText(p), videoOf(p)?.kind ?? null])) + active.muted;
     if (signature === tilesSignature) return;
     tilesSignature = signature;
     parts.tiles.textContent = "";
     parts.tiles.classList.toggle("many", people.length > 4);
+    const anyVideo = people.some((p) => videoOf(p));
+    windowEl?.classList.toggle("has-video", anyVideo);
     const meId = deps.me().id;
     for (const p of people) {
-      const tile = el("div", "call-tile" + (p.state === "joined" ? "" : " waiting"));
+      const video = videoOf(p);
+      const tile = el(
+        "div",
+        "call-tile" + (p.state === "joined" ? "" : " waiting") + (video ? " with-video " + video.kind : ""),
+      );
       tile.dataset.user = p.id;
       const picture = el("div", "call-tile-avatar");
-      const avatar = deps.avatar(p.username, nameOf(p));
-      // Absolute addresses, so the pictures also load in the separate window.
-      avatar.querySelectorAll("img").forEach((img) => (img.src = img.src));
-      picture.appendChild(avatar);
+      if (video) {
+        picture.appendChild(video.element);
+        video.element.play().catch(() => {});
+      } else {
+        const avatar = deps.avatar(p.username, nameOf(p));
+        // Absolute addresses, so the pictures also load in the separate window.
+        avatar.querySelectorAll("img").forEach((img) => (img.src = img.src));
+        picture.appendChild(avatar);
+      }
       if (p.id === meId && active.muted) picture.appendChild(el("span", "call-tile-muted", "🔇"));
       const name = el("div", "call-tile-name", p.id === meId ? t("call.you") : nameOf(p));
       tile.append(picture, name);
@@ -833,8 +1019,19 @@ const SeresCalls = (() => {
     renderTiles(me ? [me, ...others] : others);
 
     p.buttons.textContent = "";
+    const camera = active.video?.kind === "camera";
+    const screen = active.video?.kind === "screen";
     p.buttons.append(
       actionButton(active.muted ? "🔇" : "🎤", "call-mute" + (active.muted ? " on" : ""), t(active.muted ? "call.unmute" : "call.mute"), toggleMute),
+      actionButton("📷", "call-camera" + (camera ? " on" : ""), t(camera ? "call.cameraOff" : "call.camera"), () => void toggleCamera()),
+    );
+    // Phones can't share their screen from the browser.
+    if (navigator.mediaDevices && "getDisplayMedia" in navigator.mediaDevices) {
+      p.buttons.append(
+        actionButton("🖥️", "call-screen" + (screen ? " on" : ""), t(screen ? "call.screenOff" : "call.screen"), () => void toggleScreen()),
+      );
+    }
+    p.buttons.append(
       actionButton("👤+", "call-add", t("call.addPeople"), () => {
         // Picking people happens in the page.
         if (popup) window.focus();
