@@ -424,10 +424,12 @@
         const settings = readStore("settings");
         if (settings.notify === "on") {
             settings.notify = "off";
+            unsubscribePush();
         }
         else {
             if (!("Notification" in window)) {
-                showAlert(t("notify.unsupported"));
+                // Safari on iPhone and iPad only allows notifications for installed apps.
+                showAlert(t(isIos() && !isInstalled() ? "notify.installFirst" : "notify.unsupported"));
                 return;
             }
             const permission = await Notification.requestPermission();
@@ -436,9 +438,52 @@
                 return;
             }
             settings.notify = "on";
+            subscribePush().catch((error) => console.warn("Push not available", error));
         }
         writeStore("settings", settings);
         renderSettingsToggles();
+    }
+    function pushSupported() {
+        return "serviceWorker" in navigator && "PushManager" in window;
+    }
+    function base64UrlBytes(value) {
+        const base64 = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
+        return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+    }
+    /**
+     * Push notifications while SereS is closed: this device subscribes with its
+     * browser's push service and tells the server. Also run at every start, so
+     * the subscription belongs to the current login of this device.
+     */
+    async function subscribePush() {
+        if (!pushSupported())
+            return;
+        const registration = await navigator.serviceWorker.ready;
+        const key = base64UrlBytes((await api("/api/push/key")).public_key);
+        let subscription = await registration.pushManager.getSubscription();
+        const usedKey = subscription?.options.applicationServerKey;
+        if (subscription && usedKey && !new Uint8Array(usedKey).every((byte, i) => byte === key[i])) {
+            // Made for another server key: start over.
+            await subscription.unsubscribe();
+            subscription = null;
+        }
+        subscription ?? (subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+        await post("/api/push/subscribe", subscription.toJSON());
+    }
+    async function unsubscribePush() {
+        if (!pushSupported())
+            return;
+        try {
+            const registration = await navigator.serviceWorker.getRegistration();
+            const subscription = await registration?.pushManager.getSubscription();
+            if (!subscription)
+                return;
+            await post("/api/push/unsubscribe", { endpoint: subscription.endpoint }).catch(() => { });
+            await subscription.unsubscribe();
+        }
+        catch (error) {
+            console.warn("Could not unsubscribe from push", error);
+        }
     }
     function previewText(chat, shown) {
         if (!chat.last_message || !shown)
@@ -3228,6 +3273,7 @@
     }
     async function logout() {
         try {
+            await unsubscribePush();
             await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
         }
         finally {
@@ -3660,6 +3706,21 @@
             $("codes-warning").textContent = t("recover.doneCode");
             $("codes-form").scrollIntoView({ block: "center" });
         }
+        if (notificationsEnabled())
+            subscribePush().catch((error) => console.warn("Push not available", error));
+        // Opened from a notification: show that chat.
+        const chatFromNotification = new URLSearchParams(window.location.search).get("chat");
+        if (chatFromNotification) {
+            window.history.replaceState({}, document.title, window.location.pathname);
+            if (chats.some((chat) => chat.id === chatFromNotification))
+                openChat(chatFromNotification);
+        }
+        navigator.serviceWorker?.addEventListener("message", (event) => {
+            if (event.data?.type === "open-chat" && chats.some((chat) => chat.id === event.data.chat)) {
+                switchView("chats");
+                openChat(event.data.chat);
+            }
+        });
         if (pendingInvite) {
             // Remove the token from the address bar so a reload doesn't ask again.
             window.history.replaceState({}, document.title, window.location.pathname);
