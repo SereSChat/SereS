@@ -54,7 +54,7 @@ interface CallDeps {
 
 const SeresCalls = (() => {
   const t = SeresI18n.t;
-  const ICE_WAIT_MS = 4000;
+  const ICE_WAIT_MS = 3000;
   let deps: CallDeps;
   let lastSignal = 0;
   let pollTimer: number | null = null;
@@ -69,6 +69,10 @@ const SeresCalls = (() => {
     audio: HTMLAudioElement;
     offerer: boolean;
     stream?: MediaStream;
+    // How the audio travels: straight between the browsers or through TURN.
+    route?: "direct" | "relay" | "relay-tcp";
+    // When the connection dropped, to restart it if it doesn't come back.
+    lostAt?: number;
   }
 
   interface Active {
@@ -88,7 +92,10 @@ const SeresCalls = (() => {
   function schedule() {
     if (pollTimer !== null) clearTimeout(pollTimer);
     const busy = active || calls.some((call) => myState(call) === "ringing");
-    pollTimer = window.setTimeout(poll, busy ? 1000 : 3000);
+    // While a connection is being set up, offers and answers are picked up faster.
+    const connecting =
+      active && [...active.peers.values()].some((peer) => peer.pc.connectionState !== "connected");
+    pollTimer = window.setTimeout(poll, connecting ? 400 : busy ? 1000 : 3000);
   }
 
   async function poll() {
@@ -148,8 +155,17 @@ const SeresCalls = (() => {
 
   function newPeer(userId: string, offerer: boolean): Peer {
     const current = active!;
-    const pc = new RTCPeerConnection({ iceServers: current.ice });
-    current.stream.getTracks().forEach((track) => pc.addTrack(track, current.stream));
+    const pc = new RTCPeerConnection({
+      iceServers: current.ice,
+      // Audio and the rest share one connection, so only one route has to work.
+      bundlePolicy: "max-bundle",
+      rtcpMuxPolicy: "require",
+      iceCandidatePoolSize: 2,
+    });
+    current.stream.getTracks().forEach((track) => {
+      const sender = pc.addTrack(track, current.stream);
+      if (track.kind === "audio") preferAudio(sender);
+    });
     const audio = document.createElement("audio");
     audio.autoplay = true;
     pc.ontrack = (event) => {
@@ -160,6 +176,12 @@ const SeresCalls = (() => {
     };
     const peer: Peer = { pc, audio, offerer };
     pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "connected") {
+        peer.lostAt = undefined;
+        updateRoute(peer);
+      } else if (pc.connectionState === "disconnected") {
+        peer.lostAt ??= Date.now();
+      }
       renderPanel();
       // A broken connection is closed; the side that offers starts a new one
       // with the next check (see syncPeers).
@@ -179,18 +201,78 @@ const SeresCalls = (() => {
     if (active && active.peers.get(userId) === peer) active.peers.delete(userId);
   }
 
-  /** Waits until all connection candidates are in the description (no trickling). */
+  /** The audio goes first on the network and gets enough bits for clear speech. */
+  function preferAudio(sender: RTCRtpSender) {
+    try {
+      const parameters = sender.getParameters();
+      parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+      for (const encoding of parameters.encodings as any[]) {
+        encoding.priority = "high";
+        encoding.networkPriority = "high";
+        encoding.maxBitrate = 64000;
+      }
+      sender.setParameters(parameters).catch(() => {});
+    } catch {
+      // Older browsers: defaults.
+    }
+  }
+
+  /**
+   * Waits for the connection candidates that go into the description (no
+   * trickling): until gathering is complete, or shortly after the first
+   * candidate that works outside the local network (STUN/TURN) turned up.
+   */
   function gathered(pc: RTCPeerConnection) {
     return new Promise<void>((resolve) => {
       if (pc.iceGatheringState === "complete") return resolve();
       const timer = window.setTimeout(resolve, ICE_WAIT_MS);
+      let early: number | null = null;
+      const done = () => {
+        clearTimeout(timer);
+        if (early !== null) clearTimeout(early);
+        resolve();
+      };
       pc.addEventListener("icegatheringstatechange", () => {
-        if (pc.iceGatheringState === "complete") {
-          clearTimeout(timer);
-          resolve();
-        }
+        if (pc.iceGatheringState === "complete") done();
+      });
+      pc.addEventListener("icecandidate", (event) => {
+        const type = event.candidate?.type;
+        if ((type === "srflx" || type === "relay") && early === null) early = window.setTimeout(done, 700);
       });
     });
+  }
+
+  /** Looks up the route the connection uses, shown in the call window. */
+  async function updateRoute(peer: Peer) {
+    try {
+      const stats = await peer.pc.getStats();
+      let pairId: string | undefined;
+      stats.forEach((report: any) => {
+        if (report.type === "transport" && report.selectedCandidatePairId) pairId = report.selectedCandidatePairId;
+      });
+      const pair: any = pairId ? stats.get(pairId) : [...stats.values()].find((r: any) => r.type === "candidate-pair" && r.nominated && r.state === "succeeded");
+      const local: any = pair ? stats.get(pair.localCandidateId) : null;
+      if (!local) return;
+      peer.route = local.candidateType !== "relay" ? "direct" : local.relayProtocol === "udp" ? "relay" : "relay-tcp";
+      tilesSignature = "";
+      renderPanel();
+    } catch {
+      // No statistics in this browser.
+    }
+  }
+
+  /** A connection that dropped for a few seconds is negotiated again (ICE restart). */
+  function restartLostConnections() {
+    if (!active) return;
+    const current = active;
+    for (const [userId, peer] of current.peers) {
+      if (!peer.offerer || peer.lostAt === undefined || Date.now() - peer.lostAt < 3000) continue;
+      peer.lostAt = Date.now() + 10000;
+      (async () => {
+        await peer.pc.setLocalDescription(await peer.pc.createOffer({ iceRestart: true }));
+        if (active === current) await sendSignal(current.call.id, userId, "offer", peer.pc);
+      })().catch((error) => console.warn("Could not restart the connection", error));
+    }
   }
 
   async function sendSignal(callId: string, to: string, kind: "offer" | "answer", pc: RTCPeerConnection) {
@@ -232,6 +314,13 @@ const SeresCalls = (() => {
     if (active !== current) return;
     if (signal.kind === "offer") {
       const old = current.peers.get(signal.from);
+      // An ICE restart of a connection that exists: answer it on the same connection.
+      if (old && !old.offerer && old.pc.signalingState === "stable" && old.pc.connectionState !== "closed") {
+        await old.pc.setRemoteDescription({ type: "offer", sdp: signal.data.sdp });
+        await old.pc.setLocalDescription(await old.pc.createAnswer());
+        await sendSignal(current.call.id, signal.from, "answer", old.pc);
+        return;
+      }
       if (old) closePeer(signal.from, old);
       const peer = newPeer(signal.from, false);
       await peer.pc.setRemoteDescription({ type: "offer", sdp: signal.data.sdp });
@@ -241,6 +330,7 @@ const SeresCalls = (() => {
       const peer = current.peers.get(signal.from);
       if (peer && peer.offerer && peer.pc.signalingState === "have-local-offer") {
         await peer.pc.setRemoteDescription({ type: "answer", sdp: signal.data.sdp });
+        updateRoute(peer);
       }
     }
     renderPanel();
@@ -268,7 +358,10 @@ const SeresCalls = (() => {
       peers: new Map(),
       failures: new Map(),
       muted: false,
-      timer: window.setInterval(renderPanel, 1000),
+      timer: window.setInterval(() => {
+        restartLostConnections();
+        renderPanel();
+      }, 1000),
     };
     calls = calls.filter((c) => c.id !== call.id).concat(call);
     watchLevel(deps.me().id, active.stream);
@@ -674,7 +767,10 @@ const SeresCalls = (() => {
     if (p.state === "ringing") return t("call.ringingShort");
     if (p.state !== "joined") return t("call.notThere");
     const peer = active?.peers.get(p.id);
-    return peer?.pc.connectionState === "connected" ? "" : t("call.connectingShort");
+    if (peer?.pc.connectionState === "disconnected") return t("call.reconnecting");
+    if (peer?.pc.connectionState !== "connected") return t("call.connectingShort");
+    // Through TURN over TCP the audio can lag: the UDP ports of the TURN server are closed.
+    return peer.route === "relay-tcp" ? t("call.routeTcp") : peer.route === "relay" ? t("call.routeRelay") : "";
   }
 
   function renderTiles(people: CallParticipant[]) {
