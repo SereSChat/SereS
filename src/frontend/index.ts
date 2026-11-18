@@ -3588,6 +3588,8 @@
   async function openSettings() {
     loadCodesStatus();
     loadTwofa();
+    $("devices-warning").textContent = "";
+    loadDevices().catch(() => {});
     $("twofa-totp-setup").classList.add("modal-hidden");
     renderSettingsToggles();
     $("user-dropdown-menu").classList.add("modal-hidden");
@@ -3624,6 +3626,25 @@
   }
 
   async function logout() {
+    try {
+      const state = await loadDevices();
+      const others = state.devices.filter((device) => device.approved && !device.current);
+      if (state.isMain && others.length) {
+        const id = await chooseDevice({
+          title: t("devices.handoverTitle"),
+          text: t("devices.handoverText"),
+          devices: others,
+          cancellable: true,
+        });
+        if (!id) return;
+        await post("/api/devices/main", { id });
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.status !== 401) {
+        showAlert(errorText(error));
+        return;
+      }
+    }
     try {
       await unsubscribePush();
       await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
@@ -3814,6 +3835,15 @@
       event.preventDefault();
       logout();
     });
+    $("link-code-btn").addEventListener("click", openLinkCodeDialog);
+    $("link-code-cancel").addEventListener("click", () => $("link-code-modal").classList.add("modal-hidden"));
+    $("link-code-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const code = ($("link-code-input") as HTMLInputElement).value.trim();
+      if (!code) return;
+      $("link-code-modal").classList.add("modal-hidden");
+      linkDevice({ code });
+    });
     $("menu-install").addEventListener("click", (event) => {
       event.preventDefault();
       $("user-dropdown-menu").classList.add("modal-hidden");
@@ -3973,6 +4003,285 @@
     });
   }
 
+  // ------------------------------------------------------------- devices
+  // Every login is a device. The main device allows new logins and links new
+  // devices (QR code, link or code); see src/backend-rs/src/api/devices.rs.
+
+  interface DeviceInfo {
+    id: string;
+    user_agent: string | null;
+    created_at: string;
+    last_seen: string | null;
+    approved: boolean;
+    current: boolean;
+    main: boolean;
+  }
+
+  let devicesState: { isMain: boolean; hasMain: boolean; devices: DeviceInfo[] } | null = null;
+  // Logins already answered here, so they don't ask again.
+  const answeredLogins = new Set<string>();
+  let deviceDialogOpen = false;
+
+  function deviceName(userAgent: string | null) {
+    const device = SeresDevices.describe(userAgent);
+    return `${t("devices.type." + device.type)} · ${device.os} · ${device.browser}`;
+  }
+
+  async function loadDevices() {
+    const data = await api("/api/devices");
+    devicesState = { isMain: !!data.is_main, hasMain: !!data.has_main, devices: data.devices || [] };
+    renderDevices();
+    return devicesState;
+  }
+
+  function renderDevices() {
+    const list = $("devices-list");
+    if (!devicesState) return;
+    list.textContent = "";
+    const state = devicesState;
+    for (const device of state.devices) {
+      const info = SeresDevices.describe(device.user_agent);
+      const badges: string[] = [];
+      if (device.current) badges.push(t("devices.thisDevice"));
+      if (device.main) badges.push(t("devices.main"));
+      if (!device.approved) badges.push(t("devices.waiting"));
+      const actions = h("div", { className: "device-actions" });
+      if (state.isMain && !device.current) {
+        if (!device.approved) {
+          actions.append(
+            button(t("devices.allow"), "request-action-btn", () => answerLogin(device.id, true)),
+            button(t("devices.deny"), "request-action-btn discard", () => answerLogin(device.id, false)),
+          );
+        } else {
+          actions.append(
+            button(t("devices.makeMain"), "request-action-btn", () => makeMainDevice(device)),
+            button(t("devices.logOut"), "request-action-btn discard", () => logOutDevice(device)),
+          );
+        }
+      }
+      list.appendChild(
+        h("div", { className: "device-item" + (device.main ? " main" : "") }, [
+          h("span", { className: "material-symbols-rounded device-icon", text: info.icon }),
+          h("div", { className: "device-info" }, [
+            h("strong", { text: `${t("devices.type." + info.type)} · ${info.os}` }),
+            h("span", {
+              className: "device-meta",
+              text: `${info.browser} · ${t("devices.lastActive", { time: formatDateTime(device.last_seen || device.created_at) })}`,
+            }),
+            badges.length ? h("span", { className: "device-badges", text: badges.join(" · ") }) : null,
+          ]),
+          actions,
+        ]),
+      );
+    }
+    $("link-code-btn").classList.toggle("modal-hidden", !state.isMain);
+  }
+
+  async function deviceAction(work: () => Promise<void>) {
+    $("devices-warning").textContent = "";
+    try {
+      await work();
+    } catch (error) {
+      $("devices-warning").textContent = errorText(error);
+    }
+    await loadDevices().catch(() => {});
+  }
+
+  function answerLogin(id: string, allow: boolean) {
+    answeredLogins.add(id);
+    return deviceAction(() => post("/api/devices/approve", { id, allow }));
+  }
+
+  function makeMainDevice(device: DeviceInfo) {
+    if (!window.confirm(t("devices.makeMainConfirm", { device: deviceName(device.user_agent) }))) return;
+    return deviceAction(async () => {
+      await post("/api/devices/main", { id: device.id });
+      showAlert(t("devices.mainChanged"));
+    });
+  }
+
+  function logOutDevice(device: DeviceInfo) {
+    if (!window.confirm(t("devices.logOutConfirm", { device: deviceName(device.user_agent) }))) return;
+    return deviceAction(() => post("/api/devices/logout", { id: device.id }));
+  }
+
+  /** Lets the user pick one of `devices`; null when cancelled. */
+  function chooseDevice(options: { title: string; text: string; devices: DeviceInfo[]; cancellable: boolean }): Promise<string | null> {
+    const modal = $("device-choice-modal");
+    const list = $("device-choice-list");
+    $("device-choice-title").textContent = options.title;
+    $("device-choice-text").textContent = options.text;
+    $("device-choice-warning").textContent = "";
+    $("device-choice-cancel").classList.toggle("modal-hidden", !options.cancellable);
+    list.textContent = "";
+    options.devices.forEach((device, index) => {
+      const radio = h("input", { attrs: { type: "radio", name: "device-choice", value: device.id } }) as HTMLInputElement;
+      radio.checked = device.current || (index === 0 && !options.devices.some((d) => d.current));
+      const info = SeresDevices.describe(device.user_agent);
+      list.appendChild(
+        h("label", { className: "picker-item" }, [
+          radio,
+          h("span", { className: "material-symbols-rounded device-icon", text: info.icon }),
+          h("span", { className: "device-info" }, [
+            h("strong", { text: deviceName(device.user_agent) + (device.current ? ` (${t("devices.thisDevice")})` : "") }),
+            h("span", { className: "device-meta", text: t("devices.lastActive", { time: formatDateTime(device.last_seen || device.created_at) }) }),
+          ]),
+        ]),
+      );
+    });
+    modal.classList.remove("modal-hidden");
+    deviceDialogOpen = true;
+    return new Promise((resolve) => {
+      const finish = (result: string | null) => {
+        deviceDialogOpen = false;
+        modal.classList.add("modal-hidden");
+        $("device-choice-confirm").removeEventListener("click", onConfirm);
+        $("device-choice-cancel").removeEventListener("click", onCancel);
+        resolve(result);
+      };
+      const onConfirm = () => {
+        const picked = list.querySelector<HTMLInputElement>("input[name=device-choice]:checked");
+        if (picked) finish(picked.value);
+      };
+      const onCancel = () => finish(null);
+      $("device-choice-confirm").addEventListener("click", onConfirm);
+      $("device-choice-cancel").addEventListener("click", onCancel);
+    });
+  }
+
+  /** Asks the main device about a new login or a device to link: true = allow, false = refuse, null = closed. */
+  function askAboutDevice(options: { icon: string; title: string; text: string; check?: string }): Promise<boolean | null> {
+    const modal = $("device-request-modal");
+    $("device-request-icon").textContent = options.icon;
+    $("device-request-title").textContent = options.title;
+    $("device-request-text").textContent = options.text;
+    $("device-request-check").textContent = options.check || "";
+    $("device-request-warning").textContent = "";
+    modal.classList.remove("modal-hidden");
+    deviceDialogOpen = true;
+    return new Promise((resolve) => {
+      const finish = (result: boolean | null) => {
+        deviceDialogOpen = false;
+        modal.classList.add("modal-hidden");
+        $("device-request-allow").removeEventListener("click", onAllow);
+        $("device-request-deny").removeEventListener("click", onDeny);
+        modal.removeEventListener("click", onOutside);
+        resolve(result);
+      };
+      const onAllow = () => finish(true);
+      const onDeny = () => finish(false);
+      const onOutside = (event: Event) => {
+        if (event.target === modal) finish(null);
+      };
+      $("device-request-allow").addEventListener("click", onAllow);
+      $("device-request-deny").addEventListener("click", onDeny);
+      modal.addEventListener("click", onOutside);
+    });
+  }
+
+  /** First start with several devices and no main device: pick one, the others are logged out. */
+  async function chooseFirstMainDevice(state: { devices: DeviceInfo[] }) {
+    const devices = state.devices.filter((device) => device.approved);
+    const id = await chooseDevice({
+      title: t("devices.chooseTitle"),
+      text: t("devices.chooseText"),
+      devices,
+      cancellable: false,
+    });
+    if (!id) return;
+    try {
+      const result = await post("/api/devices/main", { id });
+      if (result.logged_out) {
+        // Another device is the main device now; this one was logged out.
+        await SeresCrypto.clearIdentities();
+        window.location.href = "login.html";
+        return;
+      }
+      showAlert(t("devices.chosen"));
+    } catch (error) {
+      showAlert(errorText(error));
+    }
+    await loadDevices().catch(() => {});
+  }
+
+  /** Checked regularly: picking a main device, and new logins waiting for the main device. */
+  async function checkDevices() {
+    if (deviceDialogOpen) return;
+    const state = await loadDevices().catch(() => null);
+    if (!state) return;
+    if (!state.hasMain) {
+      await chooseFirstMainDevice(state);
+      return;
+    }
+    if (!state.isMain) return;
+    const waiting = state.devices.find((device) => !device.approved && !answeredLogins.has(device.id));
+    if (!waiting) return;
+    answeredLogins.add(waiting.id);
+    const allow = await askAboutDevice({
+      icon: SeresDevices.describe(waiting.user_agent).icon,
+      title: t("devices.requestTitle"),
+      text: t("devices.requestText", { device: deviceName(waiting.user_agent), time: formatDateTime(waiting.created_at) }),
+    });
+    if (allow !== null) await deviceAction(() => post("/api/devices/approve", { id: waiting.id, allow }));
+  }
+
+  /**
+   * The main device links a new device: from the QR code / link (token) or
+   * the typed code. The account keys go sealed for the new device.
+   */
+  async function linkDevice(query: { token?: string; code?: string }) {
+    try {
+      const state = devicesState || (await loadDevices());
+      if (!state.isMain) {
+        showAlert(t("link.mainOnly"));
+        return;
+      }
+      const found = await post("/api/link/find", query);
+      const check = await SeresCrypto.linkCheckCode(found.pub);
+      const allow = await askAboutDevice({
+        icon: "qr_code_2",
+        title: t("link.confirmTitle"),
+        text: t("link.confirmText", { device: deviceName(found.user_agent) }),
+        check: t("link.checkCompare", { code: check }),
+      });
+      if (allow === null) return;
+      if (!allow) {
+        await post("/api/link/deny", { id: found.id });
+        return;
+      }
+      if (!identity.transfer) {
+        // Logged in before linking existed: the password unlocks the keys once more.
+        const password = await askPassword(t("link.needPassword"));
+        if (password === null) return;
+        const pre = await post("/api/prelogin", { nameomail: me.username });
+        const keys = await SeresCrypto.deriveAccountKeys(password, pre.kdf_salt, pre.kdf_iterations);
+        const fresh = (await api("/api/me")).user;
+        try {
+          identity = await SeresCrypto.addTransfer(identity, fresh.enc_private, keys.wrapKey);
+        } catch {
+          showAlert(t("settings.wrongPassword"));
+          return;
+        }
+        await SeresCrypto.saveIdentity(identity);
+      }
+      const sealed = await SeresCrypto.sealIdentity(identity, found.pub);
+      await post("/api/link/approve", { id: found.id, sealed });
+      showAlert(t("link.done"));
+    } catch (error) {
+      showAlert(errorText(error));
+    }
+    loadDevices().catch(() => {});
+  }
+
+  function openLinkCodeDialog() {
+    const modal = $("link-code-modal");
+    const input = $("link-code-input") as HTMLInputElement;
+    input.value = "";
+    $("link-code-warning").textContent = "";
+    modal.classList.remove("modal-hidden");
+    setTimeout(() => input.focus(), 30);
+  }
+
   // ------------------------------------------------------------- app
 
   // The browser's own install dialog (Chrome, Edge), kept until the menu entry is used.
@@ -4055,6 +4364,17 @@
       $("codes-form").scrollIntoView({ block: "center" });
     }
     if (notificationsEnabled()) subscribePush().catch((error) => console.warn("Push not available", error));
+    // Opened from the QR code / link of a new device: link it.
+    const linkToken = new URLSearchParams(window.location.search).get("link");
+    if (linkToken) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      await loadDevices().catch(() => {});
+      await linkDevice({ token: linkToken });
+    }
+    checkDevices().catch(() => {});
+    window.setInterval(() => {
+      if (document.visibilityState === "visible") checkDevices().catch(() => {});
+    }, 8000);
     // Opened from a notification: show that chat.
     const chatFromNotification = new URLSearchParams(window.location.search).get("chat");
     if (chatFromNotification) {

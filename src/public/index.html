@@ -360,6 +360,14 @@
           <p class="settings-hint" id="cookie-status"></p>
         </div>
 
+        <div class="settings-section settings-wide" id="devices-section">
+          <p><span class="material-symbols-rounded">devices</span> <span data-i18n="devices.title">Your devices:</span></p>
+          <p class="settings-hint" data-i18n="devices.hint">New logins have to be allowed on your main device.</p>
+          <div class="devices-list" id="devices-list"></div>
+          <button class="modal-btn secondary-btn" type="button" id="link-code-btn"><span class="material-symbols-rounded">qr_code_2</span><span data-i18n="link.enterCode">Link a device with a code</span></button>
+          <p class="settings-hint settings-notice" id="devices-warning" role="status" aria-live="polite"></p>
+        </div>
+
         <div class="settings-section">
           <p data-i18n="settings.fingerprintText">Your security key fingerprint. Friends can compare it to verify your identity:</p>
           <code class="fingerprint" id="my-fingerprint">...</code>
@@ -459,6 +467,48 @@
       </form>
     </div>
 
+    <!-- Pick the main device (first time, or before leaving the main device) -->
+    <div class="modal-overlay modal-hidden" id="device-choice-modal">
+      <div class="modal-box">
+        <h3><span class="material-symbols-rounded">phonelink_lock</span> <span id="device-choice-title"></span></h3>
+        <p id="device-choice-text"></p>
+        <div class="picker-list" id="device-choice-list"></div>
+        <h4 class="modal-warning" id="device-choice-warning"></h4>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" id="device-choice-cancel" data-i18n="common.cancel">Cancel</button>
+          <button class="modal-btn confirm-btn" type="button" id="device-choice-confirm" data-i18n="devices.choose">Choose</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- A new login or a device to link asks the main device -->
+    <div class="modal-overlay modal-hidden" id="device-request-modal">
+      <div class="modal-box">
+        <h3><span class="material-symbols-rounded" id="device-request-icon">devices</span> <span id="device-request-title"></span></h3>
+        <p id="device-request-text"></p>
+        <p class="link-check" id="device-request-check"></p>
+        <h4 class="modal-warning" id="device-request-warning"></h4>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" id="device-request-deny" data-i18n="devices.deny">Refuse</button>
+          <button class="modal-btn confirm-btn" type="button" id="device-request-allow" data-i18n="devices.allow">Allow</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- The code a new device shows, typed in on the main device -->
+    <div class="modal-overlay modal-hidden" id="link-code-modal">
+      <form class="modal-box" id="link-code-form">
+        <h3 data-i18n="link.enterCode">Link a device with a code</h3>
+        <p data-i18n="link.enterCodeText">On the new device choose "Link with your main device" on the login page and type in the code it shows.</p>
+        <input type="text" id="link-code-input" maxlength="12" placeholder="ABCD-EFGH" autocomplete="off" spellcheck="false" />
+        <h4 class="modal-warning" id="link-code-warning"></h4>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" id="link-code-cancel" data-i18n="common.cancel">Cancel</button>
+          <button class="modal-btn confirm-btn" type="submit" data-i18n="link.continue">Continue</button>
+        </div>
+      </form>
+    </div>
+
     <script src="language/en.js"></script>
     <script src="language/de.js"></script>
     <script src="language/fr.js"></script>
@@ -470,6 +520,7 @@
     <script src="crypto.js"></script>
     <script src="codes.js"></script>
     <script src="passkeys.js"></script>
+    <script src="devices.js"></script>
     <script src="calls.js"></script>
     <script type="module" src="matrix.js"></script>
     <script src="index.js"></script>
