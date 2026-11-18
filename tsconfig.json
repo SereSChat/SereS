@@ -21,6 +21,7 @@
     "src/frontend/emoji.ts",
     "src/frontend/codes.ts",
     "src/frontend/passkeys.ts",
+    "src/frontend/devices.ts",
     "src/frontend/crypto.ts",
     "src/frontend/calls.ts",
     "src/frontend/login.ts",
