@@ -510,4 +510,10 @@ window.SeresLang.fr = {
   "call.reconnecting": "reconnexion…",
   "call.routeRelay": "via relais",
   "call.routeTcp": "via relais (TCP), peut saccader",
+  "call.camera": "Activer la caméra",
+  "call.cameraOff": "Couper la caméra",
+  "call.screen": "Partager l'écran",
+  "call.screenOff": "Arrêter le partage",
+  "call.noCamera": "Pas d'accès à la caméra. Autorise-la dans ton navigateur.",
+  "call.noScreen": "Le partage d'écran n'est pas possible dans ce navigateur.",
 };

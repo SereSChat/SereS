@@ -510,4 +510,10 @@ window.SeresLang.de = {
   "call.reconnecting": "verbindet neu…",
   "call.routeRelay": "über Relay",
   "call.routeTcp": "über Relay (TCP), kann ruckeln",
+  "call.camera": "Kamera einschalten",
+  "call.cameraOff": "Kamera ausschalten",
+  "call.screen": "Bildschirm teilen",
+  "call.screenOff": "Teilen beenden",
+  "call.noCamera": "Kein Zugriff auf die Kamera. Erlaube sie im Browser.",
+  "call.noScreen": "Bildschirm teilen ist in diesem Browser nicht möglich.",
 };

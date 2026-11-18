@@ -510,4 +510,10 @@ window.SeresLang.en = {
   "call.reconnecting": "reconnecting…",
   "call.routeRelay": "via relay",
   "call.routeTcp": "via relay (TCP), may lag",
+  "call.camera": "Turn camera on",
+  "call.cameraOff": "Turn camera off",
+  "call.screen": "Share screen",
+  "call.screenOff": "Stop sharing",
+  "call.noCamera": "No access to the camera. Allow it in your browser.",
+  "call.noScreen": "Screen sharing is not possible in this browser.",
 };
