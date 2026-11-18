@@ -154,6 +154,7 @@
         <button class="input-icon-button" type="button" id="emoji-btn" title="Emoji" data-i18n-title="emoji.title"><span class="material-symbols-rounded">mood</span></button>
         <button class="input-icon-button" type="button" id="attach-btn" title="Attach file" data-i18n-title="file.attach"><span class="material-symbols-rounded">attach_file</span></button>
         <input type="file" id="attach-input" multiple hidden />
+        <button class="input-icon-button" type="button" id="poll-btn" title="Poll" data-i18n-title="poll.button"><span class="material-symbols-rounded">ballot</span></button>
         <div class="input-box">
           <textarea id="message-input-field" rows="1" maxlength="4000" placeholder="Type a message..." data-i18n-placeholder="chat.placeholder"></textarea>
         </div>
@@ -528,6 +529,21 @@
         <div class="modal-buttons">
           <button class="modal-btn cancel-btn" type="button" id="link-code-cancel" data-i18n="common.cancel">Cancel</button>
           <button class="modal-btn confirm-btn" type="submit" data-i18n="link.continue">Continue</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- New poll -->
+    <div class="modal-overlay modal-hidden" id="poll-modal">
+      <form class="modal-box" id="poll-form">
+        <h3><span class="material-symbols-rounded">ballot</span> <span data-i18n="poll.title">New poll</span></h3>
+        <input type="text" id="poll-question" maxlength="200" placeholder="Question" data-i18n-placeholder="poll.question" />
+        <div class="poll-options-edit" id="poll-options"></div>
+        <label class="toggle-row"><input type="checkbox" id="poll-multi" /> <span data-i18n="poll.allowMulti">Allow several answers</span></label>
+        <h4 class="modal-warning" id="poll-warning"></h4>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" id="poll-cancel" data-i18n="common.cancel">Cancel</button>
+          <button class="modal-btn confirm-btn" type="submit" data-i18n="poll.send">Send poll</button>
         </div>
       </form>
     </div>

@@ -500,6 +500,9 @@
     function contentPreview(shown) {
         const file = shown.content?.file;
         const text = SeresFormat.plain(shown.text);
+        const poll = shown.content?.poll;
+        if (poll && validPoll(poll))
+            return "📊 " + String(poll.question);
         if (!file)
             return text;
         const label = file.kind === "image"
@@ -1357,6 +1360,7 @@
             return;
         // Reactions are silent messages; collect them instead of showing them as rows.
         const reactions = new Map();
+        const votes = new Map();
         const ordered = [];
         const shown = [];
         all.forEach((message, index) => {
@@ -1369,6 +1373,14 @@
                     if (!previous || previous.seq < message.seq)
                         perSender.set(message.sender_id, { emoji: content.emoji || "", seq: message.seq });
                     reactions.set(content.target, perSender);
+                }
+                if (content && content.type === "vote" && content.target && message.sender_id && Array.isArray(content.choices)) {
+                    const perSender = votes.get(content.target) || new Map();
+                    const previous = perSender.get(message.sender_id);
+                    const choices = content.choices.filter((n) => Number.isInteger(n) && n >= 0);
+                    if (!previous || previous.seq < message.seq)
+                        perSender.set(message.sender_id, { choices, seq: message.seq });
+                    votes.set(content.target, perSender);
                 }
                 return;
             }
@@ -1407,7 +1419,7 @@
             const compact = previous !== null &&
                 previous.sender_id === message.sender_id &&
                 date.getTime() - parseTime(previous.created_at).getTime() < 5 * 60 * 1000;
-            fragment.appendChild(messageRow(opened, message, view, compact, reactions.get(message.id)));
+            fragment.appendChild(messageRow(opened, message, view, compact, reactions.get(message.id), votes.get(message.id)));
             previous = message;
         });
         container.textContent = "";
@@ -1422,7 +1434,7 @@
         }
         updateJumpButton();
     }
-    function messageRow(opened, message, view, compact, reactions) {
+    function messageRow(opened, message, view, compact, reactions, votes) {
         const own = message.sender_id === me.id;
         const sender = message.sender_display || message.sender || t("msg.unknown");
         const content = view.content || {};
@@ -1458,6 +1470,8 @@
             bubble.appendChild(replyQuote(opened, content.reply));
         if (content.file)
             bubble.appendChild(renderFile(opened, content.file));
+        if (content.poll && view.type === "text")
+            bubble.appendChild(renderPoll(opened, message, content.poll, votes));
         if (view.type === "deleted" || view.type === "error") {
             bubble.classList.add("message-muted");
             bubble.appendChild(document.createTextNode(view.text));
@@ -1568,6 +1582,116 @@
             if (error instanceof ApiError && error.status === 409)
                 await refreshCurrentDetails().catch(() => { });
             showAlert(errorText(error));
+        }
+    }
+    // ------------------------------------------------------------------ polls
+    function validPoll(poll) {
+        return !!poll && typeof poll.question === "string" && Array.isArray(poll.options) && poll.options.length >= 2;
+    }
+    function renderPoll(opened, message, poll, perSender) {
+        const box = h("div", { className: "poll" });
+        if (!validPoll(poll))
+            return box;
+        const options = poll.options.slice(0, 12).map(String);
+        const counts = options.map(() => []);
+        let voters = 0;
+        perSender?.forEach((vote, senderId) => {
+            const valid = vote.choices.filter((n) => n < options.length);
+            if (!valid.length)
+                return;
+            voters++;
+            for (const n of poll.multi ? valid : valid.slice(0, 1))
+                counts[n].push(senderId);
+        });
+        const mine = new Set((perSender?.get(me.id)?.choices || []).filter((n) => n < options.length));
+        box.appendChild(h("div", { className: "poll-question", text: String(poll.question) }));
+        box.appendChild(h("div", { className: "poll-kind", text: t(poll.multi ? "poll.multi" : "poll.single") }));
+        options.forEach((option, index) => {
+            const share = voters ? counts[index].length / voters : 0;
+            const names = counts[index].map((id) => (id === me.id ? t("msg.you") : memberName(opened, id) || "?")).join(", ");
+            const row = button("", "poll-option" + (mine.has(index) ? " chosen" : ""), () => {
+                const next = new Set(mine);
+                if (poll.multi) {
+                    if (next.has(index))
+                        next.delete(index);
+                    else
+                        next.add(index);
+                }
+                else if (next.has(index)) {
+                    next.clear();
+                }
+                else {
+                    next.clear();
+                    next.add(index);
+                }
+                sendVote(opened, message, [...next].sort((a, b) => a - b));
+            }, names);
+            row.append(h("span", { className: "poll-check material-symbols-rounded", text: mine.has(index) ? (poll.multi ? "check_box" : "radio_button_checked") : poll.multi ? "check_box_outline_blank" : "radio_button_unchecked" }), h("span", { className: "poll-label", text: option }), h("span", { className: "poll-count", text: String(counts[index].length) }), h("span", { className: "poll-bar", attrs: { style: `width:${Math.round(share * 100)}%` } }));
+            box.appendChild(row);
+        });
+        box.appendChild(h("div", { className: "poll-total", text: t(voters === 1 ? "poll.votesOne" : "poll.votes", { count: voters }) }));
+        return box;
+    }
+    async function sendVote(opened, message, choices) {
+        try {
+            await sendContent(opened, { type: "vote", target: message.id, choices }, { silent: true });
+            await syncCurrent();
+        }
+        catch (error) {
+            if (error instanceof ApiError && error.status === 409)
+                await refreshCurrentDetails().catch(() => { });
+            showAlert(errorText(error));
+        }
+    }
+    function addPollOption(value = "") {
+        const list = $("poll-options");
+        if (list.children.length >= 12)
+            return;
+        const input = h("input", { className: "poll-option-input", attrs: { type: "text", maxlength: "100", placeholder: t("poll.option", { n: list.children.length + 1 }) } });
+        input.value = value;
+        input.addEventListener("input", () => {
+            // A new empty field appears as soon as the last one is used.
+            const inputs = [...list.querySelectorAll("input")];
+            if (inputs[inputs.length - 1].value.trim())
+                addPollOption();
+        });
+        list.appendChild(input);
+    }
+    function openPollDialog() {
+        if (!current)
+            return;
+        $("poll-question").value = "";
+        $("poll-multi").checked = false;
+        $("poll-warning").textContent = "";
+        $("poll-options").textContent = "";
+        addPollOption();
+        addPollOption();
+        openModal("poll-modal");
+        $("poll-question").focus();
+    }
+    async function createPoll() {
+        if (!current)
+            return;
+        const opened = current;
+        const question = $("poll-question").value.trim();
+        const options = [...$("poll-options").querySelectorAll("input")].map((i) => i.value.trim()).filter(Boolean);
+        if (!question || options.length < 2) {
+            $("poll-warning").textContent = t("poll.needMore");
+            return;
+        }
+        if (new Set(options.map((o) => o.toLowerCase())).size !== options.length) {
+            $("poll-warning").textContent = t("poll.duplicate");
+            return;
+        }
+        try {
+            await sendContent(opened, { poll: { question, options, multi: $("poll-multi").checked } });
+            $("poll-modal").classList.add("modal-hidden");
+            await syncCurrent();
+            chatsSignature = "";
+            loadChats().catch(() => { });
+        }
+        catch (error) {
+            $("poll-warning").textContent = errorText(error);
         }
     }
     // ------------------------------------------------------------ attachments
@@ -1763,7 +1887,7 @@
                 : null,
             readable && message.kind === "e2e" ? item(t("msg.menuForward"), () => openForwardModal(opened, message, view)) : null,
             readable ? item(pinned ? t("msg.menuUnpin") : t("msg.menuPin"), () => togglePin(opened, message, !pinned)) : null,
-            own && view.type === "text" && !view.content?.file?.kind?.startsWith("voice")
+            own && view.type === "text" && !view.content?.file?.kind?.startsWith("voice") && !view.content?.poll
                 ? item(t("msg.menuEdit"), () => startEdit(opened, message, view))
                 : null,
             own ? item(t("msg.menuInfo"), () => openMessageInfo(opened, message, view)) : null,
@@ -3579,6 +3703,12 @@
             toggleEmojiPicker();
         });
         $("attach-btn").addEventListener("click", () => $("attach-input").click());
+        $("poll-btn").addEventListener("click", openPollDialog);
+        $("poll-cancel").addEventListener("click", () => $("poll-modal").classList.add("modal-hidden"));
+        $("poll-form").addEventListener("submit", (event) => {
+            event.preventDefault();
+            createPoll();
+        });
         $("attach-input").addEventListener("change", () => {
             const picker = $("attach-input");
             if (picker.files)
