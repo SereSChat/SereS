@@ -3,6 +3,7 @@ mod auth_extra;
 mod avatars;
 mod calls;
 pub(crate) mod chats;
+pub(crate) mod devices;
 mod password_reset;
 mod profile;
 pub(crate) mod push;
@@ -31,6 +32,7 @@ pub fn router() -> Router<AppState> {
         .merge(avatars::router())
         .merge(chats::router())
         .merge(calls::router())
+        .merge(devices::router())
         .merge(profile::router())
         .merge(push::router())
         .merge(social::router())

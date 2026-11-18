@@ -44,6 +44,8 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
             ("totp_secret", "TEXT"),
             ("totp_pending", "TEXT"),
             ("totp_last_step", "INTEGER NOT NULL DEFAULT 0"),
+            // Session (token hash) of the device that allows new devices.
+            ("main_session", "TEXT"),
         ],
     )
     .await?;
@@ -51,7 +53,12 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     ensure_columns(
         &pool,
         "user_sessions",
-        &[("last_seen", "TEXT"), ("user_agent", "TEXT")],
+        &[
+            ("last_seen", "TEXT"),
+            ("user_agent", "TEXT"),
+            // 0 while a new device waits for the main device to allow it.
+            ("approved", "INTEGER NOT NULL DEFAULT 1"),
+        ],
     )
     .await?;
     ensure_columns(
@@ -111,6 +118,9 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     sqlx::query("CREATE TABLE IF NOT EXISTS file_blobs (id TEXT PRIMARY KEY, data BLOB NOT NULL)")
         .execute(&pool)
         .await?;
+    // Linking a new device by QR code, link or code (see api/devices.rs).
+    sqlx::query("CREATE TABLE IF NOT EXISTS device_links (token_hash TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, pub TEXT NOT NULL, user_agent TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, user_id TEXT, sealed TEXT, state TEXT NOT NULL DEFAULT 'waiting')")
+        .execute(&pool).await?;
     // Web push: one subscription per device, tied to the device's session.
     sqlx::query("CREATE TABLE IF NOT EXISTS push_subscriptions (endpoint TEXT PRIMARY KEY, user_id TEXT NOT NULL, session_hash TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at TEXT NOT NULL)")
         .execute(&pool).await?;
