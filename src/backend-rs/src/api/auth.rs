@@ -254,6 +254,14 @@ fn own_user(row: &SqliteRow) -> Value {
         );
     }
     user.insert(
+        "status".into(),
+        row.try_get::<Option<String>, _>("status_text")
+            .ok()
+            .flatten()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    user.insert(
         "show_last_seen".into(),
         Value::Bool(row.try_get::<i64, _>("show_last_seen").unwrap_or(1) != 0),
     );

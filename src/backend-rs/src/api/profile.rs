@@ -15,6 +15,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/users/keys", get(user_keys))
         .route("/api/profile/display_name", post(set_display_name))
         .route("/api/profile/privacy", post(set_privacy))
+        .route("/api/profile/status", post(set_status))
 }
 
 async fn user_keys(
@@ -110,6 +111,47 @@ async fn set_display_name(
         Err(_) => db_error(),
     }
 }
+const MAX_STATUS_CHARS: usize = 140;
+
+/// The short text under the profile; empty removes it.
+async fn set_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(v) => v,
+        Err(e) => return axum::response::IntoResponse::into_response(e),
+    };
+    let value = body.get("status");
+    if value.is_some_and(|v| !v.is_null() && !v.is_string()) {
+        return error("Invalid status", StatusCode::BAD_REQUEST);
+    }
+    // One line: line breaks and runs of spaces become single spaces.
+    let normalized = value
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized.chars().count() > MAX_STATUS_CHARS {
+        return error(
+            format!("The status can be at most {MAX_STATUS_CHARS} characters"),
+            StatusCode::BAD_REQUEST,
+        );
+    }
+    let stored = (!normalized.is_empty()).then_some(normalized.as_str());
+    match sqlx::query("UPDATE users SET status_text=? WHERE id=?")
+        .bind(stored)
+        .bind(user.try_get::<String, _>("id").unwrap_or_default())
+        .execute(&state.db)
+        .await
+    {
+        Ok(_) => json_ok(json!({"status": stored})).into_response(),
+        Err(_) => db_error(),
+    }
+}
+
 async fn set_privacy(
     State(state): State<AppState>,
     headers: HeaderMap,

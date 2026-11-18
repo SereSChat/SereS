@@ -51,7 +51,7 @@ async fn list_friends(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    let friends = sqlx::query("SELECT u.id,u.username,u.display_name FROM friendships f JOIN users u ON u.id=CASE WHEN f.user_a=? THEN f.user_b ELSE f.user_a END WHERE f.user_a=? OR f.user_b=? ORDER BY COALESCE(u.display_name,u.username) COLLATE NOCASE")
+    let friends = sqlx::query("SELECT u.id,u.username,u.display_name,u.status_text FROM friendships f JOIN users u ON u.id=CASE WHEN f.user_a=? THEN f.user_b ELSE f.user_a END WHERE f.user_a=? OR f.user_b=? ORDER BY COALESCE(u.display_name,u.username) COLLATE NOCASE")
         .bind(&me).bind(&me).bind(&me).fetch_all(&state.db).await;
     let incoming = sqlx::query("SELECT u.id,u.username,u.display_name FROM friend_requests r JOIN users u ON u.id=r.from_id WHERE r.to_id=? ORDER BY r.created_at")
         .bind(&me).fetch_all(&state.db).await;
@@ -515,7 +515,16 @@ async fn user_profile(
     } else {
         None
     };
-    json_ok(json!({"user":{"id":oid,"username":other.try_get::<String,_>("username").unwrap_or_default(),"display_name":display_name(&other),"pub_ecdh":other.try_get::<Option<String>,_>("pub_ecdh").ok().flatten(),"pub_sign":other.try_get::<Option<String>,_>("pub_sign").ok().flatten()},"is_me":is_me,"friend":friend,"blocked":blocked,"muted":muted,"request":request,"presence":presence})).into_response()
+    // Like "last seen": only friends and people who share a chat see the status.
+    let status = if is_me || can_see {
+        other
+            .try_get::<Option<String>, _>("status_text")
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    json_ok(json!({"user":{"id":oid,"username":other.try_get::<String,_>("username").unwrap_or_default(),"display_name":display_name(&other),"status":status,"pub_ecdh":other.try_get::<Option<String>,_>("pub_ecdh").ok().flatten(),"pub_sign":other.try_get::<Option<String>,_>("pub_sign").ok().flatten()},"is_me":is_me,"friend":friend,"blocked":blocked,"muted":muted,"request":request,"presence":presence})).into_response()
 }
 
 async fn user_id(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
@@ -540,7 +549,12 @@ fn users(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<Value> {
     rows.iter().map(public_user).collect()
 }
 fn public_user(row: &sqlx::sqlite::SqliteRow) -> Value {
-    json!({"id":row.try_get::<String,_>("id").unwrap_or_default(),"username":row.try_get::<String,_>("username").unwrap_or_default(),"display_name":display_name(row)})
+    let mut user = json!({"id":row.try_get::<String,_>("id").unwrap_or_default(),"username":row.try_get::<String,_>("username").unwrap_or_default(),"display_name":display_name(row)});
+    // Friends see each other's status (the query selects it only for them).
+    if let Ok(Some(status)) = row.try_get::<Option<String>, _>("status_text") {
+        user["status"] = json!(status);
+    }
+    user
 }
 fn display_name(row: &sqlx::sqlite::SqliteRow) -> String {
     row.try_get::<Option<String>, _>("display_name")

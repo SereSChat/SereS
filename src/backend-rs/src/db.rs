@@ -46,6 +46,8 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
             ("totp_last_step", "INTEGER NOT NULL DEFAULT 0"),
             // Session (token hash) of the device that allows new devices.
             ("main_session", "TEXT"),
+            // Short text shown under the profile, like WhatsApp's "About".
+            ("status_text", "TEXT"),
         ],
     )
     .await?;
