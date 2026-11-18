@@ -625,6 +625,9 @@ async fn post_message(
     {
         return db_error();
     }
+    if !silent {
+        crate::api::push::message_sent(state.db.clone(), chat_id.clone(), me.id.clone());
+    }
     state.set_typing(chat_id, me.id, false);
     json_ok(json!({"message":"Message sent successfully!","seq":seq,"rev":rev})).into_response()
 }
@@ -1797,6 +1800,7 @@ async fn deliver_due_messages(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         return Ok(());
     }
     let mut tx = pool.begin().await?;
+    let mut delivered = Vec::new();
     for item in due {
         let id: String = item.try_get("id")?;
         let chat_id: String = item.try_get("chat_id")?;
@@ -1867,6 +1871,7 @@ async fn deliver_due_messages(pool: &SqlitePool) -> Result<(), sqlx::Error> {
                     .execute(&mut *tx)
                     .await?;
                 sqlx::query("UPDATE chat_members SET last_read_seq=?,delivered_seq=? WHERE chat_id=? AND user_id=?").bind(seq).bind(seq).bind(&chat_id).bind(&sender).execute(&mut *tx).await?;
+                delivered.push((chat_id.clone(), sender.clone()));
             }
         }
         sqlx::query("DELETE FROM scheduled_messages WHERE id=?")
@@ -1874,7 +1879,11 @@ async fn deliver_due_messages(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             .execute(&mut *tx)
             .await?;
     }
-    tx.commit().await
+    tx.commit().await?;
+    for (chat_id, sender) in delivered {
+        crate::api::push::message_sent(pool.clone(), chat_id, sender);
+    }
+    Ok(())
 }
 
 struct User {
