@@ -75,6 +75,11 @@ pub(crate) async fn require_user(state: &AppState, headers: &HeaderMap) -> ApiRe
         .ok_or_else(|| ApiError::new("Not logged in", StatusCode::UNAUTHORIZED))
 }
 
+/// Hash of the session cookie of this request: identifies the device.
+pub(crate) fn session_hash(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, SESSION_COOKIE).map(|token| hash_token(&token))
+}
+
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(header::COOKIE)?

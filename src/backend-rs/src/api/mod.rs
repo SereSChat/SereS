@@ -5,6 +5,7 @@ mod calls;
 pub(crate) mod chats;
 mod password_reset;
 mod profile;
+pub(crate) mod push;
 mod social;
 
 use axum::{
@@ -31,6 +32,7 @@ pub fn router() -> Router<AppState> {
         .merge(chats::router())
         .merge(calls::router())
         .merge(profile::router())
+        .merge(push::router())
         .merge(social::router())
 }
 

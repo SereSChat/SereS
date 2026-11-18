@@ -104,6 +104,14 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     sqlx::query("CREATE TABLE IF NOT EXISTS file_blobs (id TEXT PRIMARY KEY, data BLOB NOT NULL)")
         .execute(&pool)
         .await?;
+    // Web push: one subscription per device, tied to the device's session.
+    sqlx::query("CREATE TABLE IF NOT EXISTS push_subscriptions (endpoint TEXT PRIMARY KEY, user_id TEXT NOT NULL, session_hash TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at TEXT NOT NULL)")
+        .execute(&pool).await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id)",
+    )
+    .execute(&pool)
+    .await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, show_last_seen INTEGER NOT NULL DEFAULT 1)")
         .execute(&pool).await?;
     sqlx::query("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')")
