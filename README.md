@@ -95,7 +95,7 @@ new and restarts SereS. All options and the ports for calls: [deploy/README.md](
 ```bash
 git clone https://github.com/SereSChat/SereS.git && cd SereS
 cp .env.example .env        # fill in mail, TURN and so on; .env is never committed
-mkdir -p data
+mkdir -p data backups
 docker compose up -d --build
 ```
 
@@ -104,6 +104,11 @@ The image builds the Rust backend (the first build takes a few minutes). SereS t
 including profile pictures and attachments, is kept in `./data`, the settings and passwords in
 `.env` – neither ends up in git or in the image.
 
+- **Backups:** the `backup` service copies the database into `./backups` every 7 days and keeps
+  the newest 4 (`BACKUP_DAYS` / `BACKUP_KEEP` in `.env`). Back up right away with
+  `docker compose run --rm backup now`. To restore one: `docker compose stop seres`, then
+  `gunzip -c backups/users-….db.gz > data/users.db`, remove `data/users.db-wal` and
+  `data/users.db-shm`, and `docker compose start seres`.
 - **Update:** `git pull && docker compose up -d --build`
 - **Log:** `docker compose logs -f`
 - **Move an existing installation:** build first (`docker compose build`, the old one keeps
