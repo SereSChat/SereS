@@ -55,6 +55,12 @@ fn ago(seconds: i64) -> String {
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
 }
+/// Tells iOS devices of calls that stopped ringing (see apns.rs), except the
+/// device that made this request.
+fn stopped_ringing(state: &AppState, headers: &HeaderMap, me: &Caller) {
+    let actor = crate::api::auth::session_hash(headers).map(|session| (me.id.clone(), session));
+    super::apns::calls_stopped_ringing(state.db.clone(), actor);
+}
 fn err_db() -> axum::response::Response {
     error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -128,6 +134,7 @@ async fn call_chat(
     if tx.commit().await.is_err() {
         return err_db();
     };
+    stopped_ringing(&state, &headers, &me);
     if started {
         crate::api::push::call_started(state.db.clone(), call_id.clone());
     }
@@ -172,6 +179,7 @@ async fn answer_call(
     {
         return err_db();
     }
+    stopped_ringing(&state, &headers, &me);
     match serialize_call(&state.db, &call_id, &me.id).await {
         Ok(v) => json_ok(json!({"call":v})).into_response(),
         Err(_) => err_db(),
@@ -204,6 +212,7 @@ async fn decline_call(
     {
         return err_db();
     }
+    stopped_ringing(&state, &headers, &me);
     json_ok(json!({})).into_response()
 }
 async fn leave_call(
@@ -231,6 +240,7 @@ async fn leave_call(
     {
         return err_db();
     }
+    stopped_ringing(&state, &headers, &me);
     json_ok(json!({})).into_response()
 }
 
@@ -252,6 +262,7 @@ async fn my_calls(
         Err(_) => return err_db(),
     };
     if expire_calls(&mut tx).await.is_err()||sqlx::query("UPDATE call_participants SET seen_at=? WHERE user_id=? AND state='joined' AND call_id IN (SELECT id FROM calls WHERE ended_at IS NULL)").bind(now()).bind(&me.id).execute(&mut *tx).await.is_err()||tx.commit().await.is_err(){return err_db()};
+    stopped_ringing(&state, &headers, &me);
     let rows=sqlx::query("SELECT c.id FROM calls c JOIN call_participants p ON p.call_id=c.id WHERE p.user_id=? AND p.state IN ('ringing','joined') AND c.ended_at IS NULL ORDER BY c.started_at").bind(&me.id).fetch_all(&state.db).await;
     let rows = match rows {
         Ok(v) => v,
@@ -483,6 +494,7 @@ async fn add_to_call(
     if tx.commit().await.is_err() {
         return err_db();
     }
+    stopped_ringing(&state, &headers, &me);
     crate::api::push::call_started(state.db.clone(), new_call.clone());
     match serialize_call(&state.db, &new_call, &me.id).await {
         Ok(v) => json_ok(json!({"chat_id":chat_id,"call":v})).into_response(),

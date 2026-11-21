@@ -5,7 +5,8 @@
 //! web push subscription, a token belongs to the device's session, so logging
 //! out (or a password reset that ends all sessions) stops its notifications.
 //! The server only sends who wrote or calls; message texts stay end-to-end
-//! encrypted and never leave the app.
+//! encrypted and never leave the app. A call rings through a VoIP push; when
+//! it stops ringing before the device answered, a silent push tells the app.
 //!
 //! Settings: APNS_KEY_P8 (path to the .p8 key from Apple, or its contents),
 //! APNS_KEY_ID, APNS_TEAM_ID and APNS_TOPIC (the app's bundle id). Without
@@ -116,7 +117,7 @@ struct Subscription {
 
 /// Device tokens are hex (32 bytes today; Apple may make them longer).
 fn device_token(value: &str) -> Option<String> {
-    (value.len() >= 64 && value.len() <= 200 && value.len() % 2 == 0)
+    (value.len() >= 64 && value.len() <= 200 && value.len().is_multiple_of(2))
         .then_some(())
         .filter(|_| value.bytes().all(|b| b.is_ascii_hexdigit()))
         .map(|_| value.to_ascii_lowercase())
@@ -312,6 +313,7 @@ struct Push {
 
 struct Target {
     token: String,
+    session: String,
     environment: String,
     topic: String,
 }
@@ -335,7 +337,7 @@ async fn targets(
         "9999".into()
     };
     let rows = sqlx::query(
-        "SELECT a.token,a.environment,a.topic FROM apns_tokens a
+        "SELECT a.token,a.session_hash,a.environment,a.topic FROM apns_tokens a
          JOIN user_sessions s ON s.token_hash=a.session_hash AND s.expires_at>? AND s.approved=1
          WHERE a.user_id=? AND a.kind=? AND a.session_hash!=? AND (s.last_seen IS NULL OR s.last_seen<?)",
     )
@@ -353,6 +355,7 @@ async fn targets(
     rows.iter()
         .map(|row| Target {
             token: row.try_get("token").unwrap_or_default(),
+            session: row.try_get("session_hash").unwrap_or_default(),
             environment: row.try_get("environment").unwrap_or_default(),
             topic: row
                 .try_get::<Option<String>, _>("topic")
@@ -503,6 +506,127 @@ pub async fn message_sent(
     }
 }
 
+// -------------------------------------------------------------------- calls
+
+/// An incoming call, as the VoIP push tells it to the app.
+pub struct Call<'a> {
+    pub call_id: &'a str,
+    pub chat_id: &'a str,
+    pub caller_id: &'a str,
+    pub caller_name: &'a str,
+    pub video: bool,
+    pub group: bool,
+}
+
+fn call_payload(call: &Call) -> Value {
+    json!({
+        "type": "call",
+        "call_id": call.call_id,
+        "chat_id": call.chat_id,
+        "caller_id": call.caller_id,
+        "caller_name": call.caller_name,
+        "video": call.video,
+        "group": call.group,
+    })
+}
+
+fn call_end_payload(call_id: &str) -> Value {
+    json!({"aps": {"content-available": 1}, "type": "call_end", "call_id": call_id})
+}
+
+/// After a call started: a VoIP push to every logged-in iOS device of the
+/// people it rings for. iOS shows it with CallKit, also when SereS is open
+/// (the app knows the call by its id), so open devices aren't left out.
+pub async fn call_started(pool: &SqlitePool, ringing: &[String], call: &Call<'_>) {
+    if config().is_none() {
+        return;
+    }
+    let push = Push {
+        push_type: "voip",
+        priority: 10,
+        // A call that can't ring right now is over for this device.
+        expiration: 0,
+        collapse_id: None,
+        payload: call_payload(call),
+    };
+    for user_id in ringing {
+        let targets = targets(pool, user_id, "voip", false, None).await;
+        if !targets.is_empty() {
+            deliver(pool, &targets, &push).await;
+        }
+    }
+}
+
+/// Stops the ringing on iOS devices: a call stopped ringing for someone
+/// (answered or declined on another device, cancelled by the caller, ended
+/// or rung out). The database notes this in apns_call_ends (see db.rs);
+/// after each change to a call the server sends what was noted as a silent
+/// push to the alert tokens of the devices that got the VoIP push. Never a
+/// second VoIP push: iOS would ring again. `actor` is the user and device
+/// that made the change; that device already knows.
+pub fn calls_stopped_ringing(pool: SqlitePool, actor: Option<(String, String)>) {
+    tokio::spawn(async move {
+        // Most calls ring no iOS device: then there is nothing to write.
+        let pending = sqlx::query_scalar::<_, i64>("SELECT 1 FROM apns_call_ends LIMIT 1")
+            .fetch_optional(&pool)
+            .await;
+        if !matches!(pending, Ok(Some(_))) {
+            return;
+        }
+        let rows = sqlx::query(
+            "DELETE FROM apns_call_ends WHERE rowid IN (SELECT rowid FROM apns_call_ends LIMIT 200)
+             RETURNING call_id,user_id,created_at",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+        if rows.is_empty() || config().is_none() {
+            return;
+        }
+        // Older notes belong to calls that rang out long ago.
+        let fresh_since = (chrono::Utc::now() - chrono::Duration::seconds(120))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let mut sent = Vec::new();
+        for row in rows {
+            let call_id: String = row.try_get("call_id").unwrap_or_default();
+            let user_id: String = row.try_get("user_id").unwrap_or_default();
+            let created_at: String = row.try_get("created_at").unwrap_or_default();
+            if created_at < fresh_since || sent.contains(&(call_id.clone(), user_id.clone())) {
+                continue;
+            }
+            let except = actor
+                .as_ref()
+                .filter(|(actor_id, _)| *actor_id == user_id)
+                .map(|(_, session)| session.as_str());
+            let voip_sessions: Vec<String> = sqlx::query_scalar(
+                "SELECT session_hash FROM apns_tokens WHERE user_id=? AND kind='voip'",
+            )
+            .bind(&user_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+            let targets: Vec<Target> = targets(&pool, &user_id, "alert", false, except)
+                .await
+                .into_iter()
+                .filter(|target| voip_sessions.contains(&target.session))
+                .collect();
+            if !targets.is_empty() {
+                let push = Push {
+                    push_type: "background",
+                    // Apple requires priority 5 for background pushes.
+                    priority: 5,
+                    expiration: chrono::Utc::now().timestamp() + 60,
+                    collapse_id: None,
+                    payload: call_end_payload(&call_id),
+                };
+                deliver(&pool, &targets, &push).await;
+            }
+            sent.push((call_id, user_id));
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,6 +756,75 @@ mod tests {
                 .get("badge")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn call_pushes_ring_and_stop_ringing() {
+        let call = Call {
+            call_id: "call-1",
+            chat_id: "chat-1",
+            caller_id: "alice",
+            caller_name: "Alice",
+            video: false,
+            group: true,
+        };
+        assert_eq!(
+            call_payload(&call),
+            json!({
+                "type": "call",
+                "call_id": "call-1",
+                "chat_id": "chat-1",
+                "caller_id": "alice",
+                "caller_name": "Alice",
+                "video": false,
+                "group": true,
+            })
+        );
+        assert_eq!(
+            call_end_payload("call-1"),
+            json!({"aps": {"content-available": 1}, "type": "call_end", "call_id": "call-1"})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_that_stops_ringing_is_noted_for_ios_devices() {
+        let (pool, dir) = database().await;
+        for user in ["alice", "bob", "carol"] {
+            sqlx::query("INSERT INTO users(id,username) VALUES(?,?)")
+                .bind(user)
+                .bind(user)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at) VALUES('session-b','bob','2999-01-01T00:00:00Z','now')")
+            .execute(&pool).await.unwrap();
+        store(
+            &pool,
+            "bob",
+            "session-b",
+            &subscription(&"ab".repeat(32), "voip"),
+        )
+        .await
+        .unwrap();
+        for user in ["bob", "carol"] {
+            sqlx::query("INSERT INTO call_participants(call_id,user_id,state,updated_at,seen_at) VALUES('call-1',?,'ringing','now','now')")
+                .bind(user).execute(&pool).await.unwrap();
+        }
+        // Like set_state in calls.rs.
+        for (user, state) in [("bob", "joined"), ("carol", "declined"), ("bob", "left")] {
+            sqlx::query("INSERT INTO call_participants(call_id,user_id,state,updated_at,seen_at) VALUES('call-1',?,?,'now','now') ON CONFLICT(call_id,user_id) DO UPDATE SET state=excluded.state")
+                .bind(user).bind(state).execute(&pool).await.unwrap();
+        }
+        // Only bob has an iOS device, and only his answer stopped a ringing.
+        let noted: Vec<(String, String)> =
+            sqlx::query_as("SELECT call_id,user_id FROM apns_call_ends")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(noted, vec![("call-1".into(), "bob".into())]);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

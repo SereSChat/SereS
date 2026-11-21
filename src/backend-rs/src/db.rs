@@ -145,6 +145,12 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
         .await?;
     sqlx::query("CREATE TRIGGER IF NOT EXISTS apns_tokens_logout AFTER DELETE ON user_sessions BEGIN DELETE FROM apns_tokens WHERE session_hash=OLD.token_hash; END")
         .execute(&pool).await?;
+    // A call stopped ringing for someone with an iOS device: noted in the same
+    // transaction, sent afterwards as a silent push so CallKit stops ringing.
+    sqlx::query("CREATE TABLE IF NOT EXISTS apns_call_ends (call_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at TEXT NOT NULL)")
+        .execute(&pool).await?;
+    sqlx::query("CREATE TRIGGER IF NOT EXISTS apns_call_stopped_ringing AFTER UPDATE OF state ON call_participants WHEN OLD.state='ringing' AND NEW.state!='ringing' AND EXISTS (SELECT 1 FROM apns_tokens WHERE user_id=NEW.user_id AND kind='voip') BEGIN INSERT INTO apns_call_ends(call_id,user_id,created_at) VALUES(NEW.call_id,NEW.user_id,strftime('%Y-%m-%dT%H:%M:%SZ','now')); END")
+        .execute(&pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, show_last_seen INTEGER NOT NULL DEFAULT 1)")
         .execute(&pool).await?;
     sqlx::query("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')")
