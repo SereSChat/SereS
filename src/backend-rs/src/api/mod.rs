@@ -29,6 +29,10 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/online", get(online).post(online))
+        .route(
+            "/.well-known/apple-app-site-association",
+            get(apple_app_site_association),
+        )
         .merge(auth::router())
         .merge(auth_extra::router())
         .merge(avatars::router())
@@ -40,6 +44,35 @@ pub fn router() -> Router<AppState> {
         .merge(push::router())
         .merge(apns::router())
         .merge(social::router())
+}
+
+/// Lets iOS open links to this server in the SereS app when it is installed
+/// (universal links): device linking, group and friend invites. Needs the
+/// Apple team id (APPLE_TEAM_ID, or APNS_TEAM_ID from the push settings) and
+/// the app's bundle id (APNS_TOPIC, default net.fyralsmp.seres).
+async fn apple_app_site_association() -> Response {
+    let setting = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    let Some(team) = setting("APPLE_TEAM_ID").or_else(|| setting("APNS_TEAM_ID")) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let bundle = setting("APNS_TOPIC").unwrap_or_else(|| "net.fyralsmp.seres".into());
+    let components: Vec<Value> = ["link", "join", "invite"]
+        .iter()
+        .map(|name| json!({"/": "/", "?": {*name: "?*"}, "comment": format!("?{name}=…")}))
+        .collect();
+    let body = json!({
+        "applinks": {"details": [{"appIDs": [format!("{team}.{bundle}")], "components": components}]}
+    });
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 async fn online() -> Response {
