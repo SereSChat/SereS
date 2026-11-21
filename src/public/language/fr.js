@@ -491,7 +491,7 @@ window.SeresLang.fr = {
   "approval.lost": "Appareil principal perdu ou ses données de navigateur effacées ? Réinitialiser",
   "link.start": "Associer avec ton appareil principal (QR code)",
   "link.title": "Associer cet appareil",
-  "link.hint": "Scanne le QR code avec SereS sur ton appareil principal (app : Réglages → Associer un nouvel appareil ; navigateur : Paramètres → Tes appareils) ou saisis-y le code.",
+  "link.hint": "Scanne le QR code avec ton appareil principal : avec l'appareil photo de l'iPhone (ouvre l'app SereS) ou dans SereS sous Réglages → Associer un nouvel appareil. Sans l'app : copie le lien ci-dessous ou saisis le code sur l'appareil principal (navigateur : Paramètres → Tes appareils).",
   "link.copy": "Copier le lien",
   "link.copied": "Lien copié.",
   "link.check": "Code de contrôle : {code} – ton appareil principal affiche le même code.",

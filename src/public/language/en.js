@@ -491,7 +491,7 @@ window.SeresLang.en = {
   "approval.lost": "Lost your main device or deleted its browser data? Reset it",
   "link.start": "Link with your main device (QR code)",
   "link.title": "Link this device",
-  "link.hint": "Scan the QR code with SereS on your main device (app: Settings → Link a new device; browser: Settings → Your devices), or enter the code there.",
+  "link.hint": "Scan the QR code with your main device: with the iPhone camera (opens the SereS app) or in SereS under Settings → Link a new device. Without the app: copy the link below or enter the code on the main device (browser: Settings → Your devices).",
   "link.copy": "Copy link",
   "link.copied": "Link copied.",
   "link.check": "Check code: {code} – your main device shows the same code.",
