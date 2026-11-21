@@ -61,8 +61,16 @@ pub(crate) async fn current_user(state: &AppState, headers: &HeaderMap) -> Optio
         .as_deref()
         .is_none_or(|old| seconds_between(old, &now_iso()) >= 20.0)
     {
-        let _ = sqlx::query("UPDATE user_sessions SET last_seen=? WHERE token_hash=?")
+        // Sessions from before the device list have no user agent yet ("Computer · ?").
+        let user_agent = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.chars().take(300).collect::<String>());
+        let _ = sqlx::query(
+            "UPDATE user_sessions SET last_seen=?, user_agent=COALESCE(NULLIF(user_agent,''),?) WHERE token_hash=?",
+        )
             .bind(now_iso())
+            .bind(user_agent)
             .bind(&token_hash)
             .execute(&state.db)
             .await;
