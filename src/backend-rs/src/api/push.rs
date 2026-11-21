@@ -29,7 +29,7 @@ use web_push::{
 
 const MAX_SUBSCRIPTIONS_PER_USER: i64 = 10;
 /// A device that asked the server within this time has SereS open.
-const OPEN_SECONDS: i64 = 30;
+pub(crate) const OPEN_SECONDS: i64 = 30;
 /// Hosts of the push services of Chrome/Edge (Google), Firefox, Safari and Windows.
 /// The server sends requests to these only, never to a URL a client made up.
 const PUSH_HOSTS: [&str; 5] = [
@@ -329,6 +329,16 @@ async fn group_name(pool: &SqlitePool, chat_id: &str) -> Option<String> {
         .and_then(|row| row.try_get("name").ok())
 }
 
+async fn is_group(pool: &SqlitePool, chat_id: &str) -> bool {
+    sqlx::query_scalar::<_, String>("SELECT type FROM chats WHERE id=?")
+        .bind(chat_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|kind| kind == "group")
+}
+
 /// After a new message: everyone else in the chat who hasn't muted the sender.
 pub fn message_sent(pool: SqlitePool, chat_id: String, sender_id: String) {
     tokio::spawn(async move {
@@ -342,25 +352,26 @@ pub fn message_sent(pool: SqlitePool, chat_id: String, sender_id: String) {
         .fetch_all(&pool)
         .await
         .unwrap_or_default();
+        let from = display_name(&pool, &sender_id).await;
+        let group = group_name(&pool, &chat_id).await;
         let payload = json!({
             "type": "message",
             "chat": chat_id,
-            "from": display_name(&pool, &sender_id).await,
-            "group": group_name(&pool, &chat_id).await,
+            "from": from,
+            "group": group,
         });
         // One notification per chat replaces the older one at the push service.
         let topic = URL_SAFE_NO_PAD.encode(&chat_id.as_bytes()[..chat_id.len().min(24)]);
-        send(
-            &pool,
-            &recipients,
-            &payload,
-            &Delivery {
-                topic: Some(topic),
-                urgency: Urgency::Normal,
-                ttl: 24 * 3600,
-            },
-        )
-        .await;
+        let delivery = Delivery {
+            topic: Some(topic),
+            urgency: Urgency::Normal,
+            ttl: 24 * 3600,
+        };
+        // The iOS app gets the same notification through APNs.
+        tokio::join!(
+            send(&pool, &recipients, &payload, &delivery),
+            super::apns::message_sent(&pool, &recipients, &chat_id, &from, group.as_deref()),
+        );
     });
 }
 
@@ -383,25 +394,34 @@ pub fn call_started(pool: SqlitePool, call_id: String) {
         .fetch_all(&pool)
         .await
         .unwrap_or_default();
+        let from = display_name(&pool, &caller).await;
+        let group = group_name(&pool, &chat_id).await;
         let payload = json!({
             "type": "call",
             "chat": chat_id,
             "call": call_id,
-            "from": display_name(&pool, &caller).await,
-            "group": group_name(&pool, &chat_id).await,
+            "from": from,
+            "group": group,
         });
         // A call is only worth ringing while it rings (45 seconds).
-        send(
-            &pool,
-            &ringing,
-            &payload,
-            &Delivery {
-                topic: None,
-                urgency: Urgency::High,
-                ttl: 45,
-            },
-        )
-        .await;
+        let delivery = Delivery {
+            topic: None,
+            urgency: Urgency::High,
+            ttl: 45,
+        };
+        // The iOS app rings through a VoIP push (CallKit).
+        let call = super::apns::Call {
+            call_id: &call_id,
+            chat_id: &chat_id,
+            caller_id: &caller,
+            caller_name: &from,
+            video: false,
+            group: is_group(&pool, &chat_id).await,
+        };
+        tokio::join!(
+            send(&pool, &ringing, &payload, &delivery),
+            super::apns::call_started(&pool, &ringing, &call),
+        );
     });
 }
 

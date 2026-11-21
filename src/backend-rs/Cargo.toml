@@ -15,10 +15,11 @@ hmac = "0.12"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
 password-hash = { version = "0.5", features = ["rand_core"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 rand = "0.8"
 regex = "1"
 web-push = { version = "0.11", default-features = false }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_cbor_2 = "0.13"
