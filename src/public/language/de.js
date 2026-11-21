@@ -491,7 +491,7 @@ window.SeresLang.de = {
   "approval.lost": "Hauptgerät verloren oder seine Browserdaten gelöscht? Zurücksetzen",
   "link.start": "Mit deinem Hauptgerät koppeln (QR-Code)",
   "link.title": "Dieses Gerät koppeln",
-  "link.hint": "Scanne den QR-Code in SereS auf deinem Hauptgerät (App: Einstellungen → Neues Gerät koppeln; Browser: Einstellungen → Deine Geräte) oder gib dort den Code ein. Die normale Handykamera öffnet nur den Browser, nicht SereS.",
+  "link.hint": "Scanne den QR-Code in SereS auf deinem Hauptgerät (App: Einstellungen → Neues Gerät koppeln; Browser: Einstellungen → Deine Geräte) oder gib dort den Code ein.",
   "link.copy": "Link kopieren",
   "link.copied": "Link kopiert.",
   "link.check": "Prüfcode: {code} – dein Hauptgerät zeigt denselben Code.",
@@ -575,4 +575,7 @@ window.SeresLang.de = {
   "search.depth": "Durchsucht die letzten {count} Nachrichten jedes Chats, nur auf diesem Gerät.",
   "link.openOnMain": "Das ist der QR-Code eines Geräts, das gekoppelt werden will. Scanne ihn in SereS auf deinem Hauptgerät: in der App unter Einstellungen → Neues Gerät koppeln, im Browser unter Einstellungen → Deine Geräte → Gerät mit Code koppeln.",
   "approval.useQr": "Oder stattdessen einen QR-Code mit dem Hauptgerät scannen",
+  "link.codeLabel": "Code zum Eintippen auf dem Hauptgerät (falls du nicht scannst):",
+  "link.checkLabel": "Prüfnummer – nach dem Scannen zeigt dein Hauptgerät dieselbe Nummer:",
+  "link.checkHint": "Erlaube es dort nur, wenn beide Nummern gleich sind.",
 };

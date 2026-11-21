@@ -491,7 +491,7 @@ window.SeresLang.fr = {
   "approval.lost": "Appareil principal perdu ou ses données de navigateur effacées ? Réinitialiser",
   "link.start": "Associer avec ton appareil principal (QR code)",
   "link.title": "Associer cet appareil",
-  "link.hint": "Scanne le QR code avec SereS sur ton appareil principal (app : Réglages → Associer un nouvel appareil ; navigateur : Paramètres → Tes appareils) ou saisis-y le code. L'appareil photo seul ouvre le navigateur, pas SereS.",
+  "link.hint": "Scanne le QR code avec SereS sur ton appareil principal (app : Réglages → Associer un nouvel appareil ; navigateur : Paramètres → Tes appareils) ou saisis-y le code.",
   "link.copy": "Copier le lien",
   "link.copied": "Lien copié.",
   "link.check": "Code de contrôle : {code} – ton appareil principal affiche le même code.",
@@ -575,4 +575,7 @@ window.SeresLang.fr = {
   "search.depth": "Recherche dans les {count} derniers messages de chaque discussion, uniquement sur cet appareil.",
   "link.openOnMain": "C'est le QR code d'un appareil qui veut être associé. Scanne-le dans SereS sur ton appareil principal : dans l’app sous Réglages → Associer un nouvel appareil, dans le navigateur sous Paramètres → Tes appareils.",
   "approval.useQr": "Ou scanne plutôt un QR code avec ton appareil principal",
+  "link.codeLabel": "Code à saisir sur l'appareil principal (si tu ne scannes pas) :",
+  "link.checkLabel": "Numéro de contrôle – après le scan, ton appareil principal affiche le même numéro :",
+  "link.checkHint": "Autorise-le seulement si les deux numéros sont identiques.",
 };

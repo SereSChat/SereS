@@ -321,7 +321,8 @@
         el("link-url").value = url;
         const code = String(res.data.code);
         el("link-code").textContent = code.slice(0, 4) + "-" + code.slice(4);
-        el("link-check").textContent = t("link.check", { code: await SeresCrypto.linkCheckCode(keys.pub) });
+        // Six digits, made from this device's key: the main device shows the same ones.
+        el("link-check").textContent = await SeresCrypto.linkCheckCode(keys.pub);
         const until = Date.now() + Number(res.data.expires_in || 600) * 1000;
         while (!session.stop) {
             await sleep(2000);

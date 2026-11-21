@@ -57,14 +57,19 @@
 
       <!-- A new device linked by the main device: QR code, link or code -->
       <div class="login-f modal-hidden" id="link-panel">
-        <p class="recover-hint" data-i18n="link.hint">Scan the QR code with SereS on your main device (app: Settings → Link a new device; browser: Settings → Your devices), or enter the code there. The phone camera alone opens the browser, not SereS.</p>
+        <p class="recover-hint" data-i18n="link.hint">Scan the QR code with SereS on your main device (app: Settings → Link a new device; browser: Settings → Your devices), or enter the code there.</p>
         <div class="qr-wrap" id="link-qr"></div>
+        <p class="link-label" data-i18n="link.codeLabel">Code to type in on the main device:</p>
         <div class="link-code" id="link-code"></div>
         <div class="input">
           <input type="text" id="link-url" readonly />
         </div>
         <button type="button" class="action-button" id="link-copy" data-i18n="link.copy">Copy link</button>
-        <p class="recover-hint" id="link-check"></p>
+        <div class="link-check-box">
+          <p class="link-label" data-i18n="link.checkLabel">Check number – after scanning, your main device shows the same number:</p>
+          <div class="link-check-digits" id="link-check"></div>
+          <p class="link-label" data-i18n="link.checkHint">Allow it there only if both numbers match.</p>
+        </div>
         <p class="login-warning" id="link-warning" role="status"></p>
         <a href="#" class="forgot-link" id="link-back" data-i18n="recover.back">← Back to login</a>
       </div>
