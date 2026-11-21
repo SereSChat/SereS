@@ -485,10 +485,10 @@ window.SeresLang.en = {
   "devices.requestTitle": "New login",
   "devices.requestText": "Someone logged in to your account on {device} ({time}). Only allow it if it was you.",
   "approval.title": "Waiting for your main device",
-  "approval.hint": "Allow this login on your main device. SereS opens as soon as it is allowed.",
+  "approval.hint": "Confirm this login with your main device: open SereS there (it also gets a notification) and allow the login. SereS opens here as soon as it is allowed.",
   "approval.mainIs": "Your main device: {device}",
   "approval.refused": "This login was refused or has expired.",
-  "approval.lost": "Lost your main device? Reset with a backup code",
+  "approval.lost": "Lost your main device or deleted its browser data? Reset it",
   "link.start": "Link with your main device (QR code)",
   "link.title": "Link this device",
   "link.hint": "Scan the QR code with SereS on your main device (app: Settings → Link a new device; browser: Settings → Your devices), or enter the code there. The phone camera alone opens the browser, not SereS.",
@@ -574,4 +574,5 @@ window.SeresLang.en = {
   "search.more": "and {count} more – type more to narrow it down",
   "search.depth": "Searches the latest {count} messages of each chat, on this device only.",
   "link.openOnMain": "This is the QR code of a device that wants to be linked. Scan it in SereS on your main device: in the app under Settings → Link a new device, in the browser under Settings → Your devices → Link a device with a code.",
+  "approval.useQr": "Or scan a QR code with your main device instead",
 };

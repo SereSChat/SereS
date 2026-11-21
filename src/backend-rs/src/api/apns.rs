@@ -921,3 +921,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+// --------------------------------------------------------------- new logins
+
+/// A password login waits for the main device, which is this app.
+pub async fn login_waiting(pool: &SqlitePool, user_id: &str, main_session: &str, device: &str) {
+    if config().is_none() {
+        return;
+    }
+    let targets: Vec<Target> = targets(pool, user_id, "alert", true, None)
+        .await
+        .into_iter()
+        .filter(|target| target.session == main_session)
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let push = Push {
+        push_type: "alert",
+        priority: 10,
+        // The request expires after 15 minutes.
+        expiration: chrono::Utc::now().timestamp() + 15 * 60,
+        collapse_id: Some("login".into()),
+        payload: json!({
+            "aps": {
+                "alert": {
+                    "title": "New login",
+                    "body": format!("{device} wants to log in. Open SereS to allow or refuse it."),
+                },
+                "sound": "default",
+            },
+            "type": "login",
+        }),
+    };
+    deliver(pool, &targets, &push).await;
+}

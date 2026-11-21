@@ -47,10 +47,11 @@
 
       <!-- A new login waits until the main device allows it -->
       <div class="login-f modal-hidden" id="approval-panel">
-        <p class="recover-hint" data-i18n="approval.hint">Allow this login on your main device. SereS opens as soon as it is allowed.</p>
+        <p class="recover-hint" data-i18n="approval.hint">Confirm this login with your main device: open SereS there (it also gets a notification) and allow the login. SereS opens here as soon as it is allowed.</p>
         <p class="recover-hint" id="approval-main"></p>
         <p class="login-warning" id="approval-warning" role="status"></p>
-        <a href="#" class="forgot-link" id="approval-lost" data-i18n="approval.lost">Lost your main device? Reset with a backup code</a>
+        <a href="#" class="forgot-link" id="approval-link" data-i18n="approval.useQr">Or scan a QR code with your main device instead</a>
+        <a href="#" class="forgot-link" id="approval-lost" data-i18n="approval.lost">Lost your main device or deleted its browser data? Reset it</a>
         <a href="#" class="forgot-link" id="approval-cancel" data-i18n="recover.back">← Back to login</a>
       </div>
 

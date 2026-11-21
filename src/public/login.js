@@ -280,6 +280,13 @@
         }
         return false;
     }
+    /** Instead of waiting for the main device to allow the login: link this device by QR code. */
+    async function waitingToLinking() {
+        waitingForMain = false;
+        await fetch("/api/logout", { method: "POST", credentials: "include" }).catch(() => { });
+        await SeresCrypto.clearIdentities();
+        startLinking();
+    }
     async function cancelWaiting() {
         waitingForMain = false;
         await fetch("/api/logout", { method: "POST", credentials: "include" }).catch(() => { });
@@ -602,6 +609,10 @@
                 ?.writeText(el("link-url").value)
                 .then(() => (el("link-warning").textContent = t("link.copied")))
                 .catch(() => el("link-url").select());
+        });
+        el("approval-link").addEventListener("click", (event) => {
+            event.preventDefault();
+            waitingToLinking();
         });
         el("approval-cancel").addEventListener("click", (event) => {
             event.preventDefault();

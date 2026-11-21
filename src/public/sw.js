@@ -6,9 +6,9 @@
 // encrypted and are shown once SereS is open.
 
 const TEXT = {
-  en: { message: "New message", call: "is calling you", callIn: "is calling in" },
-  de: { message: "Neue Nachricht", call: "ruft dich an", callIn: "ruft an in" },
-  fr: { message: "Nouveau message", call: "t'appelle", callIn: "appelle dans" },
+  en: { message: "New message", call: "is calling you", callIn: "is calling in", login: "New login", loginBody: "wants to log in. Open SereS to allow or refuse it." },
+  de: { message: "Neue Nachricht", call: "ruft dich an", callIn: "ruft an in", login: "Neue Anmeldung", loginBody: "möchte sich anmelden. Öffne SereS, um es zu erlauben oder abzulehnen." },
+  fr: { message: "Nouveau message", call: "t'appelle", callIn: "appelle dans", login: "Nouvelle connexion", loginBody: "veut se connecter. Ouvre SereS pour l'autoriser ou la refuser." },
 };
 
 function text() {
@@ -30,7 +30,11 @@ self.addEventListener("push", (event) => {
   const from = data.from || "SereS";
   let title;
   let options;
-  if (data.type === "call") {
+  if (data.type === "login") {
+    // A password login waits for this device (the main device) to allow it.
+    title = t.login;
+    options = { body: `${data.device || "?"} ${t.loginBody}`, tag: "login", renotify: true, requireInteraction: true };
+  } else if (data.type === "call") {
     title = data.group || from;
     options = {
       body: data.group ? `${from} ${t.callIn} ${data.group}` : `${from} ${t.call}`,

@@ -485,10 +485,10 @@ window.SeresLang.de = {
   "devices.requestTitle": "Neue Anmeldung",
   "devices.requestText": "Jemand hat sich auf {device} in dein Konto eingeloggt ({time}). Erlaube es nur, wenn du das warst.",
   "approval.title": "Warte auf dein Hauptgerät",
-  "approval.hint": "Erlaube diese Anmeldung auf deinem Hauptgerät. SereS öffnet sich, sobald sie erlaubt ist.",
+  "approval.hint": "Bestätige diese Anmeldung mit deinem Hauptgerät: Öffne dort SereS (es bekommt auch eine Mitteilung) und erlaube die Anmeldung. SereS öffnet sich hier, sobald sie erlaubt ist.",
   "approval.mainIs": "Dein Hauptgerät: {device}",
   "approval.refused": "Diese Anmeldung wurde abgelehnt oder ist abgelaufen.",
-  "approval.lost": "Hauptgerät verloren? Mit einem Backup-Code zurücksetzen",
+  "approval.lost": "Hauptgerät verloren oder seine Browserdaten gelöscht? Zurücksetzen",
   "link.start": "Mit deinem Hauptgerät koppeln (QR-Code)",
   "link.title": "Dieses Gerät koppeln",
   "link.hint": "Scanne den QR-Code in SereS auf deinem Hauptgerät (App: Einstellungen → Neues Gerät koppeln; Browser: Einstellungen → Deine Geräte) oder gib dort den Code ein. Die normale Handykamera öffnet nur den Browser, nicht SereS.",
@@ -574,4 +574,5 @@ window.SeresLang.de = {
   "search.more": "und {count} weitere – tippe mehr, um einzugrenzen",
   "search.depth": "Durchsucht die letzten {count} Nachrichten jedes Chats, nur auf diesem Gerät.",
   "link.openOnMain": "Das ist der QR-Code eines Geräts, das gekoppelt werden will. Scanne ihn in SereS auf deinem Hauptgerät: in der App unter Einstellungen → Neues Gerät koppeln, im Browser unter Einstellungen → Deine Geräte → Gerät mit Code koppeln.",
+  "approval.useQr": "Oder stattdessen einen QR-Code mit dem Hauptgerät scannen",
 };
