@@ -157,6 +157,12 @@ APNS_TOPIC=net.fyralsmp.seres            # bundle id of the app (default); VoIP 
 One key works for development (sandbox) and App Store/TestFlight (production) builds; the app
 tells the server which one each device token belongs to. Keep the `.p8` file secret and out of git.
 
+**Open links in the app.** With the Team ID set (`APNS_TEAM_ID`, or `APPLE_TEAM_ID` without push),
+SereS serves `/.well-known/apple-app-site-association`, so the iPhone opens device-linking QR codes
+(`/?link=…`) and invite links (`/?join=…`, `/?invite=…`) straight in the app when it is installed.
+The app needs the *Associated Domains* capability with `applinks:your.domain` (see the app's README).
+Check it with `curl https://your.domain/.well-known/apple-app-site-association`.
+
 ## 🔒 How the end-to-end encryption works
 
 - **Your password never reaches the server in usable form.** The browser derives a master key with
