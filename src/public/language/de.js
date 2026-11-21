@@ -491,7 +491,7 @@ window.SeresLang.de = {
   "approval.lost": "Hauptgerät verloren oder seine Browserdaten gelöscht? Zurücksetzen",
   "link.start": "Mit deinem Hauptgerät koppeln (QR-Code)",
   "link.title": "Dieses Gerät koppeln",
-  "link.hint": "Scanne den QR-Code in SereS auf deinem Hauptgerät (App: Einstellungen → Neues Gerät koppeln; Browser: Einstellungen → Deine Geräte) oder gib dort den Code ein.",
+  "link.hint": "Scanne den QR-Code mit deinem Hauptgerät: mit der iPhone-Kamera (öffnet die SereS-App) oder in SereS unter Einstellungen → Neues Gerät koppeln. Ohne App: den Link unten kopieren oder den Code auf dem Hauptgerät eingeben (Browser: Einstellungen → Deine Geräte).",
   "link.copy": "Link kopieren",
   "link.copied": "Link kopiert.",
   "link.check": "Prüfcode: {code} – dein Hauptgerät zeigt denselben Code.",
