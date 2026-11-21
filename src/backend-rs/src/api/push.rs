@@ -241,6 +241,17 @@ async fn send(pool: &SqlitePool, user_ids: &[String], payload: &Value, delivery:
     let Ok(rows) = query.fetch_all(pool).await else {
         return;
     };
+    deliver(pool, &key, rows, payload, delivery).await;
+}
+
+/// Sends `payload` to the subscriptions in `rows` (endpoint, p256dh, auth).
+async fn deliver(
+    pool: &SqlitePool,
+    key: &PartialVapidSignatureBuilder,
+    rows: Vec<sqlx::sqlite::SqliteRow>,
+    payload: &Value,
+    delivery: &Delivery,
+) {
     let content = payload.to_string();
     for row in rows {
         let endpoint: String = row.try_get("endpoint").unwrap_or_default();
@@ -447,4 +458,98 @@ mod tests {
         assert!(!endpoint_allowed("https://127.0.0.1/x"));
         assert!(!endpoint_allowed("not a url"));
     }
+}
+
+// ------------------------------------------------------------ new logins
+
+/// "Windows · Chrome" for a user agent, like the device list (devices.ts).
+pub(crate) fn device_label(user_agent: Option<&str>) -> String {
+    let ua = user_agent.unwrap_or("");
+    let has = |parts: &[&str]| parts.iter().any(|part| ua.contains(part));
+    if !ua.contains("Mozilla/") && has(&["CFNetwork", "Darwin"]) {
+        return if ua.contains("iPad") {
+            "iPad · SereS App"
+        } else {
+            "iPhone · SereS App"
+        }
+        .into();
+    }
+    let os = if has(&["iPhone"]) {
+        "iPhone"
+    } else if has(&["iPad"]) {
+        "iPad"
+    } else if has(&["Android", "okhttp"]) {
+        "Android"
+    } else if has(&["Windows"]) {
+        "Windows"
+    } else if has(&["CrOS"]) {
+        "ChromeOS"
+    } else if has(&["Mac OS X", "Macintosh"]) {
+        "macOS"
+    } else if has(&["Linux"]) {
+        "Linux"
+    } else {
+        "?"
+    };
+    let browser = if has(&["Edg/"]) {
+        "Edge"
+    } else if has(&["OPR/"]) {
+        "Opera"
+    } else if has(&["SamsungBrowser/"]) {
+        "Samsung Internet"
+    } else if has(&["Firefox/", "FxiOS/"]) {
+        "Firefox"
+    } else if has(&["Chrome/", "CriOS/"]) {
+        "Chrome"
+    } else if has(&["Safari/"]) {
+        "Safari"
+    } else if has(&["okhttp"]) {
+        "SereS App"
+    } else {
+        "?"
+    };
+    format!("{os} · {browser}")
+}
+
+/// A password login waits for the main device: tell that device (web push or
+/// the iOS app), so the request isn't missed while SereS is closed there.
+pub fn login_waiting(
+    pool: SqlitePool,
+    user_id: String,
+    main_session: String,
+    user_agent: Option<String>,
+) {
+    tokio::spawn(async move {
+        let device = device_label(user_agent.as_deref());
+        if let Some(key) = vapid(&pool).await {
+            let open_since = (chrono::Utc::now() - chrono::Duration::seconds(OPEN_SECONDS))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string();
+            let rows = sqlx::query(
+                "SELECT p.endpoint,p.p256dh,p.auth FROM push_subscriptions p
+                 JOIN user_sessions s ON s.token_hash=p.session_hash AND s.expires_at>?
+                 WHERE p.session_hash=? AND (s.last_seen IS NULL OR s.last_seen<?)",
+            )
+            .bind(super::auth::now_iso())
+            .bind(&main_session)
+            .bind(open_since)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+            let delivery = Delivery {
+                topic: Some("login".into()),
+                urgency: Urgency::High,
+                ttl: 15 * 60,
+            };
+            deliver(
+                &pool,
+                &key,
+                rows,
+                &json!({"type": "login", "device": device}),
+                &delivery,
+            )
+            .await;
+        }
+        super::apns::login_waiting(&pool, &user_id, &main_session, &device).await;
+    });
 }

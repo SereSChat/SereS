@@ -670,10 +670,12 @@ pub(crate) async fn create_session(
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(|v| v.chars().take(300).collect::<String>());
-    let approved = trusted
-        || super::devices::main_session(&state.db, user_id)
-            .await
-            .is_none();
+    let main = if trusted {
+        None
+    } else {
+        super::devices::main_session(&state.db, user_id).await
+    };
+    let approved = main.is_none();
     if sqlx::query(
         "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,last_seen,user_agent,approved) VALUES(?,?,?,?,?,?,?)",
     )
@@ -682,7 +684,7 @@ pub(crate) async fn create_session(
     .bind(expires)
     .bind(&created)
     .bind(&created)
-    .bind(user_agent)
+    .bind(&user_agent)
     .bind(i64::from(approved))
     .execute(&state.db)
     .await
@@ -692,6 +694,8 @@ pub(crate) async fn create_session(
     }
     if approved {
         super::devices::adopt_main_if_alone(&state.db, user_id).await;
+    } else if let Some(main) = main {
+        super::push::login_waiting(state.db.clone(), user_id.to_owned(), main, user_agent);
     }
     let mut reply = json!({"success":true,"user":own_user(&user),"enc_private":user.try_get::<Option<String>,_>("enc_private").ok().flatten()});
     if !approved {
