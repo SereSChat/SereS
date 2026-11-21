@@ -1,3 +1,4 @@
+mod apns;
 mod auth;
 mod auth_extra;
 mod avatars;
@@ -37,6 +38,7 @@ pub fn router() -> Router<AppState> {
         .merge(links::router())
         .merge(profile::router())
         .merge(push::router())
+        .merge(apns::router())
         .merge(social::router())
 }
 
