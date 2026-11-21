@@ -21,15 +21,27 @@ use axum::{
     response::Response,
     routing::post,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
-use p256::{ecdsa::SigningKey, pkcs8::DecodePrivateKey};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
+use p256::{
+    ecdsa::{Signature, SigningKey, signature::Signer},
+    pkcs8::DecodePrivateKey,
+};
 use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool};
-use std::sync::OnceLock;
+use std::{
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
 const DEFAULT_TOPIC: &str = "net.fyralsmp.seres";
 /// An alert and a VoIP token for each of the newest devices of an account.
 const MAX_TOKENS_PER_USER: i64 = 20;
+/// Apple accepts a provider token for an hour and refuses new ones more
+/// often than every 20 minutes.
+const PROVIDER_TOKEN_SECONDS: i64 = 50 * 60;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -232,6 +244,265 @@ async fn unsubscribe(
     Ok(json_ok(json!({})))
 }
 
+// ------------------------------------------------------------------ sending
+
+/// The provider token: a JWT signed with the .p8 key (ES256).
+fn provider_token(config: &Config, issued_at: i64) -> String {
+    let header = json!({"alg": "ES256", "kid": config.key_id});
+    let claims = json!({"iss": config.team_id, "iat": issued_at});
+    let input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header.to_string()),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    let signature: Signature = config.key.sign(input.as_bytes());
+    format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+}
+
+static PROVIDER_TOKEN: Mutex<Option<(String, i64)>> = Mutex::new(None);
+
+/// The cached provider token, renewed after 50 minutes.
+fn current_provider_token(config: &Config) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let mut cached = PROVIDER_TOKEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match cached.as_ref() {
+        Some((token, issued_at)) if now - issued_at < PROVIDER_TOKEN_SECONDS => token.clone(),
+        _ => {
+            let token = provider_token(config, now);
+            *cached = Some((token.clone(), now));
+            token
+        }
+    }
+}
+
+fn forget_provider_token() {
+    *PROVIDER_TOKEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+fn client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+fn host(environment: &str) -> &'static str {
+    if environment == "sandbox" {
+        "api.sandbox.push.apple.com"
+    } else {
+        "api.push.apple.com"
+    }
+}
+
+struct Push {
+    push_type: &'static str,
+    priority: u8,
+    /// Unix time after which Apple drops the push; 0: deliver now or never.
+    expiration: i64,
+    collapse_id: Option<String>,
+    payload: Value,
+}
+
+struct Target {
+    token: String,
+    environment: String,
+    topic: String,
+}
+
+/// The logged-in devices of `user_id` with a token of `kind`. With
+/// `skip_open`, devices that have SereS open right now are left out (they
+/// show notifications themselves); `except_session` leaves out one device.
+async fn targets(
+    pool: &SqlitePool,
+    user_id: &str,
+    kind: &str,
+    skip_open: bool,
+    except_session: Option<&str>,
+) -> Vec<Target> {
+    let open_since = if skip_open {
+        (chrono::Utc::now() - chrono::Duration::seconds(super::push::OPEN_SECONDS))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    } else {
+        // Later than any last_seen: no device counts as open.
+        "9999".into()
+    };
+    let rows = sqlx::query(
+        "SELECT a.token,a.environment,a.topic FROM apns_tokens a
+         JOIN user_sessions s ON s.token_hash=a.session_hash AND s.expires_at>? AND s.approved=1
+         WHERE a.user_id=? AND a.kind=? AND a.session_hash!=? AND (s.last_seen IS NULL OR s.last_seen<?)",
+    )
+    .bind(super::auth::now_iso())
+    .bind(user_id)
+    .bind(kind)
+    .bind(except_session.unwrap_or(""))
+    .bind(open_since)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let default_topic = config()
+        .map(|config| config.topic.as_str())
+        .unwrap_or(DEFAULT_TOPIC);
+    rows.iter()
+        .map(|row| Target {
+            token: row.try_get("token").unwrap_or_default(),
+            environment: row.try_get("environment").unwrap_or_default(),
+            topic: row
+                .try_get::<Option<String>, _>("topic")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| default_topic.to_owned()),
+        })
+        .collect()
+}
+
+/// Sends one push to each target. Tokens Apple no longer knows are removed.
+async fn deliver(pool: &SqlitePool, targets: &[Target], push: &Push) {
+    let Some(config) = config() else {
+        return;
+    };
+    let body = push.payload.to_string();
+    for target in targets {
+        // VoIP pushes go to the app's VoIP topic.
+        let topic = if push.push_type == "voip" {
+            format!("{}.voip", target.topic)
+        } else {
+            target.topic.clone()
+        };
+        let mut request = client()
+            .post(format!(
+                "https://{}/3/device/{}",
+                host(&target.environment),
+                target.token
+            ))
+            .header(
+                "authorization",
+                format!("bearer {}", current_provider_token(config)),
+            )
+            .header("apns-topic", topic)
+            .header("apns-push-type", push.push_type)
+            .header("apns-priority", push.priority.to_string())
+            .header("apns-expiration", push.expiration.to_string())
+            .header("content-type", "application/json")
+            .body(body.clone());
+        if let Some(collapse_id) = &push.collapse_id {
+            request = request.header("apns-collapse-id", collapse_id);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(error = %error.without_url(), "sending APNs push failed");
+                continue;
+            }
+        };
+        let status = response.status();
+        if status.is_success() {
+            let _ = sqlx::query("UPDATE apns_tokens SET last_used_at=? WHERE token=?")
+                .bind(super::auth::now_iso())
+                .bind(&target.token)
+                .execute(pool)
+                .await;
+            continue;
+        }
+        let reason = response
+            .bytes()
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|reply| reply.get("reason")?.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        match (status.as_u16(), reason.as_str()) {
+            // Gone: the app was removed or the token replaced.
+            (410, _) | (_, "BadDeviceToken" | "Unregistered") => {
+                let _ = sqlx::query("DELETE FROM apns_tokens WHERE token=?")
+                    .bind(&target.token)
+                    .execute(pool)
+                    .await;
+            }
+            (403, "ExpiredProviderToken" | "InvalidProviderToken") => {
+                forget_provider_token();
+                tracing::warn!(%reason, "APNs refused the provider token");
+            }
+            _ => tracing::warn!(%status, %reason, "APNs refused a notification"),
+        }
+    }
+}
+
+/// Title and body like the web push notification (sw.js): who wrote, never
+/// what (the text is end-to-end encrypted).
+fn message_alert(from: &str, group: Option<&str>) -> (String, String) {
+    let from = if from.is_empty() { "SereS" } else { from };
+    match group {
+        Some(group) => (group.to_owned(), format!("{from}: New message")),
+        None => (from.to_owned(), "New message".to_owned()),
+    }
+}
+
+fn message_payload(chat_id: &str, title: &str, body: &str, badge: Option<i64>) -> Value {
+    let mut aps = json!({
+        "alert": {"title": title, "body": body},
+        "sound": "default",
+        "thread-id": chat_id,
+        "mutable-content": 1,
+    });
+    if let Some(badge) = badge {
+        aps["badge"] = json!(badge);
+    }
+    json!({"aps": aps, "type": "message", "chat_id": chat_id})
+}
+
+/// Unread messages of all chats that aren't archived (like the chat list).
+async fn unread_count(pool: &SqlitePool, user_id: &str) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM chat_members c JOIN messages m ON m.chat_id=c.chat_id
+         AND m.seq>MAX(c.joined_seq,c.cleared_seq,c.last_read_seq)
+         WHERE c.user_id=? AND c.archived=0 AND m.deleted=0 AND m.silent=0 AND m.kind!='system'
+         AND (m.sender_id IS NULL OR m.sender_id!=?)",
+    )
+    .bind(user_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .ok()
+}
+
+/// After a new message: the same people and rules as web push.
+pub async fn message_sent(
+    pool: &SqlitePool,
+    recipients: &[String],
+    chat_id: &str,
+    from: &str,
+    group: Option<&str>,
+) {
+    if config().is_none() {
+        return;
+    }
+    let (title, body) = message_alert(from, group);
+    for user_id in recipients {
+        let targets = targets(pool, user_id, "alert", true, None).await;
+        if targets.is_empty() {
+            continue;
+        }
+        let badge = unread_count(pool, user_id).await;
+        let push = Push {
+            push_type: "alert",
+            priority: 10,
+            expiration: chrono::Utc::now().timestamp() + 24 * 3600,
+            // One notification per chat, replaced by the next one.
+            collapse_id: Some(chat_id.to_owned()),
+            payload: message_payload(chat_id, &title, &body, badge),
+        };
+        deliver(pool, &targets, &push).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +565,73 @@ mod tests {
             parse_key("-----BEGIN PRIVATE KEY-----\nbm9wZQ==\n-----END PRIVATE KEY-----").is_none()
         );
         assert!(parse_key("not a key").is_none());
+    }
+
+    fn test_config() -> Config {
+        Config {
+            key: SigningKey::from_slice(&[7u8; 32]).unwrap(),
+            key_id: "ABC123DEFG".into(),
+            team_id: "TEAM456789".into(),
+            topic: DEFAULT_TOPIC.into(),
+        }
+    }
+
+    #[test]
+    fn provider_token_is_an_es256_jwt() {
+        use p256::ecdsa::{VerifyingKey, signature::Verifier};
+        let config = test_config();
+        let token = provider_token(&config, 1_700_000_000);
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        let decode = |part: &str| -> Value {
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).unwrap()).unwrap()
+        };
+        assert_eq!(
+            decode(parts[0]),
+            json!({"alg": "ES256", "kid": "ABC123DEFG"})
+        );
+        assert_eq!(
+            decode(parts[1]),
+            json!({"iss": "TEAM456789", "iat": 1_700_000_000})
+        );
+        let signature = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        assert_eq!(signature.len(), 64);
+        let signature = Signature::from_slice(&signature).unwrap();
+        VerifyingKey::from(&config.key)
+            .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
+            .unwrap();
+    }
+
+    #[test]
+    fn message_pushes_say_who_wrote_but_not_what() {
+        assert_eq!(
+            message_alert("Alice", None),
+            ("Alice".into(), "New message".into())
+        );
+        assert_eq!(
+            message_alert("Alice", Some("Team")),
+            ("Team".into(), "Alice: New message".into())
+        );
+        assert_eq!(message_alert("", None).0, "SereS");
+        assert_eq!(
+            message_payload("chat-1", "Team", "Alice: New message", Some(3)),
+            json!({
+                "aps": {
+                    "alert": {"title": "Team", "body": "Alice: New message"},
+                    "sound": "default",
+                    "badge": 3,
+                    "thread-id": "chat-1",
+                    "mutable-content": 1,
+                },
+                "type": "message",
+                "chat_id": "chat-1",
+            })
+        );
+        assert!(
+            message_payload("chat-1", "A", "B", None)["aps"]
+                .get("badge")
+                .is_none()
+        );
     }
 
     #[tokio::test]
