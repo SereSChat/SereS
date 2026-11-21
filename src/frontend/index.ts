@@ -250,6 +250,9 @@
     if (reason) params.set("reason", reason);
     if (pendingInvite) params.set("invite", pendingInvite);
     if (pendingJoin) params.set("join", pendingJoin);
+    // A link QR code opened in a browser that isn't logged in: the login page explains it.
+    const linkToken = new URLSearchParams(window.location.search).get("link");
+    if (linkToken) params.set("link", linkToken);
     const query = params.toString();
     window.location.href = "login.html" + (query ? "?" + query : "");
   }

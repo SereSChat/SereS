@@ -491,7 +491,7 @@ window.SeresLang.fr = {
   "approval.lost": "Appareil principal perdu ? Réinitialiser avec un code de secours",
   "link.start": "Associer avec ton appareil principal (QR code)",
   "link.title": "Associer cet appareil",
-  "link.hint": "Scanne le QR code avec ton appareil principal, ouvre le lien dessus, ou saisis le code dans ses paramètres sous \"Tes appareils\".",
+  "link.hint": "Scanne le QR code avec SereS sur ton appareil principal (app : Réglages → Associer un nouvel appareil ; navigateur : Paramètres → Tes appareils) ou saisis-y le code. L'appareil photo seul ouvre le navigateur, pas SereS.",
   "link.copy": "Copier le lien",
   "link.copied": "Lien copié.",
   "link.check": "Code de contrôle : {code} – ton appareil principal affiche le même code.",
@@ -573,4 +573,5 @@ window.SeresLang.fr = {
   "search.noMessages": "Aucun message trouvé.",
   "search.more": "et {count} de plus – précise ta recherche",
   "search.depth": "Recherche dans les {count} derniers messages de chaque discussion, uniquement sur cet appareil.",
+  "link.openOnMain": "C'est le QR code d'un appareil qui veut être associé. Scanne-le dans SereS sur ton appareil principal : dans l’app sous Réglages → Associer un nouvel appareil, dans le navigateur sous Paramètres → Tes appareils.",
 };
