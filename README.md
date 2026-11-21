@@ -131,6 +131,32 @@ including profile pictures and attachments, is kept in `./data`, the settings an
 - Calls need `https://` (or `localhost`) because browsers only allow the microphone there. Calls
   only ring while SereS is open in a browser tab.
 
+## 📱 Push notifications for the iOS app (APNs)
+
+The native iOS app can't use web push; the server sends its notifications through Apple's push
+service (APNs) instead. New messages show who wrote (never the text, it stays end-to-end
+encrypted), calls ring with CallKit through a VoIP push, and a silent push stops the ringing when
+the call was answered elsewhere or ended. Without these settings the iOS app simply gets no
+notifications; everything else keeps working.
+
+1. In the [Apple Developer account](https://developer.apple.com/account) open
+   **Certificates, Identifiers & Profiles → Keys**, press **+**, give the key a name, tick
+   **Apple Push Notifications service (APNs)**, then *Continue* and *Register*.
+2. **Download** the `AuthKey_XXXXXXXXXX.p8` file (only possible once) and note the **Key ID**.
+   The **Team ID** is shown top right in the account (or under *Membership*).
+3. Put the key where SereS can read it (with Docker: into `./data`, the container sees it as
+   `/data/...`) and set in `.env`:
+
+```bash
+APNS_KEY_P8=/data/AuthKey_ABC123DEFG.p8   # path, or the key itself on one line with \n
+APNS_KEY_ID=ABC123DEFG
+APNS_TEAM_ID=TEAM456789
+APNS_TOPIC=net.fyralsmp.seres            # bundle id of the app (default); VoIP uses <topic>.voip
+```
+
+One key works for development (sandbox) and App Store/TestFlight (production) builds; the app
+tells the server which one each device token belongs to. Keep the `.p8` file secret and out of git.
+
 ## 🔒 How the end-to-end encryption works
 
 - **Your password never reaches the server in usable form.** The browser derives a master key with
