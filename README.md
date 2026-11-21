@@ -162,6 +162,12 @@ SereS serves `/.well-known/apple-app-site-association`, so the iPhone opens devi
 (`/?link=…`) and invite links (`/?join=…`, `/?invite=…`) straight in the app when it is installed.
 The app needs the *Associated Domains* capability with `applinks:your.domain` (see the app's README).
 Check it with `curl https://your.domain/.well-known/apple-app-site-association`.
+If the camera still opens the website: the `curl` must return JSON (not 404) from the same domain the
+QR code shows, and the app must be built with `applinks:that.domain` and installed again afterwards.
+Apple loads the file through its own CDN, which can take a while to see a new file; for testing, use
+`applinks:that.domain?mode=developer` and turn on *Settings → Developer → Associated Domains Development*
+on the iPhone. A long press on a link and "Open in Safari" also makes iOS stop opening that domain in the
+app until you choose "Open in SereS" once.
 
 ## 🔒 How the end-to-end encryption works
 

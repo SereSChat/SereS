@@ -4561,6 +4561,30 @@ body.bright-body .device-item {
   font-weight: 600;
 }
 
+.link-label {
+  margin: 8px 0 0;
+  font-size: 0.85rem;
+  opacity: 0.8;
+  text-align: center;
+}
+
+.link-check-box {
+  margin: 12px 0 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.link-check-digits {
+  margin: 4px 0;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 1.9rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
 #link-qr svg {
   width: 200px;
   height: 200px;
