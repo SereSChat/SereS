@@ -686,6 +686,7 @@
     }
     if (params.get("invite")) setWarning(t("invite.loginHint"));
     if (params.get("join")) setWarning(t("groupInvite.loginHint"));
+    if (params.get("link")) setWarning(t("link.openOnMain"));
     if (reason === "keys") {
       setWarning(t("login.reloginKeys"));
     }

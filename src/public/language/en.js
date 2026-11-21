@@ -491,7 +491,7 @@ window.SeresLang.en = {
   "approval.lost": "Lost your main device? Reset with a backup code",
   "link.start": "Link with your main device (QR code)",
   "link.title": "Link this device",
-  "link.hint": "Scan the QR code with your main device, open the link there, or enter the code in its settings under \"Your devices\".",
+  "link.hint": "Scan the QR code with SereS on your main device (app: Settings → Link a new device; browser: Settings → Your devices), or enter the code there. The phone camera alone opens the browser, not SereS.",
   "link.copy": "Copy link",
   "link.copied": "Link copied.",
   "link.check": "Check code: {code} – your main device shows the same code.",
@@ -573,4 +573,5 @@ window.SeresLang.en = {
   "search.noMessages": "No messages found.",
   "search.more": "and {count} more – type more to narrow it down",
   "search.depth": "Searches the latest {count} messages of each chat, on this device only.",
+  "link.openOnMain": "This is the QR code of a device that wants to be linked. Scan it in SereS on your main device: in the app under Settings → Link a new device, in the browser under Settings → Your devices → Link a device with a code.",
 };

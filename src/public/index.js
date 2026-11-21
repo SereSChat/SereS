@@ -92,6 +92,10 @@
             params.set("invite", pendingInvite);
         if (pendingJoin)
             params.set("join", pendingJoin);
+        // A link QR code opened in a browser that isn't logged in: the login page explains it.
+        const linkToken = new URLSearchParams(window.location.search).get("link");
+        if (linkToken)
+            params.set("link", linkToken);
         const query = params.toString();
         window.location.href = "login.html" + (query ? "?" + query : "");
     }
@@ -3406,7 +3410,9 @@
         openModal(id);
     }
     function closeAllModals() {
-        document.querySelectorAll(".modal-overlay").forEach((modal) => modal.classList.add("modal-hidden"));
+        // The device dialogs (choosing the main device, allowing a login) wait for
+        // an answer; they close only through their own buttons.
+        document.querySelectorAll(".modal-overlay:not([data-locked])").forEach((modal) => modal.classList.add("modal-hidden"));
     }
     // ------------------------------------------------------------ settings
     async function uploadAvatar() {
@@ -4336,7 +4342,7 @@
         });
         document.querySelectorAll(".modal-overlay").forEach((overlay) => {
             overlay.addEventListener("click", (event) => {
-                if (event.target !== overlay)
+                if (event.target !== overlay || overlay.hasAttribute("data-locked"))
                     return;
                 // A click next to a small settings dialog only closes that dialog.
                 if (overlay.classList.contains("sub-modal"))
@@ -4534,9 +4540,11 @@
         });
         modal.classList.remove("modal-hidden");
         deviceDialogOpen = true;
+        let cleanup = () => { };
         return new Promise((resolve) => {
             const finish = (result) => {
                 deviceDialogOpen = false;
+                cleanup();
                 modal.classList.add("modal-hidden");
                 $("device-choice-confirm").removeEventListener("click", onConfirm);
                 $("device-choice-cancel").removeEventListener("click", onCancel);
@@ -4548,8 +4556,22 @@
                     finish(picked.value);
             };
             const onCancel = () => finish(null);
+            const onOutside = (event) => {
+                if (event.target === modal && options.cancellable)
+                    finish(null);
+            };
+            const onKey = (event) => {
+                if (event.key === "Escape" && options.cancellable)
+                    finish(null);
+            };
             $("device-choice-confirm").addEventListener("click", onConfirm);
             $("device-choice-cancel").addEventListener("click", onCancel);
+            modal.addEventListener("click", onOutside);
+            document.addEventListener("keydown", onKey);
+            cleanup = () => {
+                modal.removeEventListener("click", onOutside);
+                document.removeEventListener("keydown", onKey);
+            };
         });
     }
     /** Asks the main device about a new login or a device to link: true = allow, false = refuse, null = closed. */
@@ -4569,8 +4591,14 @@
                 $("device-request-allow").removeEventListener("click", onAllow);
                 $("device-request-deny").removeEventListener("click", onDeny);
                 modal.removeEventListener("click", onOutside);
+                document.removeEventListener("keydown", onKey);
                 resolve(result);
             };
+            const onKey = (event) => {
+                if (event.key === "Escape")
+                    finish(null);
+            };
+            document.addEventListener("keydown", onKey);
             const onAllow = () => finish(true);
             const onDeny = () => finish(false);
             const onOutside = (event) => {

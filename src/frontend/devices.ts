@@ -11,6 +11,16 @@ interface SeresDevice {
 const SeresDevices = (() => {
   function describe(userAgent: string | null | undefined): SeresDevice {
     const ua = userAgent || "";
+    // The native app doesn't send a browser user agent: on iOS it is like
+    // "SereS/12 CFNetwork/1568.100.1 Darwin/24.0.0", on Android "okhttp/4.12.0".
+    // A Mac app would say "Macintosh" or "x86_64", so the rest is an iPhone/iPad.
+    if (!/Mozilla\//.test(ua) && /CFNetwork|Darwin/.test(ua) && !/Macintosh|x86_64|MacBook|iMac/.test(ua)) {
+      const ipad = /iPad/.test(ua);
+      return { type: ipad ? "tablet" : "phone", icon: ipad ? "tablet" : "smartphone", os: ipad ? "iPad" : "iPhone", browser: "SereS App" };
+    }
+    if (!/Mozilla\//.test(ua) && /okhttp|Dalvik|Android/i.test(ua)) {
+      return { type: "phone", icon: "smartphone", os: "Android", browser: "SereS App" };
+    }
     const os = /iPhone/.test(ua)
       ? "iPhone"
       : /iPad/.test(ua)
