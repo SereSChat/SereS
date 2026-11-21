@@ -512,7 +512,7 @@
     </div>
 
     <!-- Pick the main device (first time, or before leaving the main device) -->
-    <div class="modal-overlay modal-hidden" id="device-choice-modal">
+    <div class="modal-overlay modal-hidden" id="device-choice-modal" data-locked>
       <div class="modal-box">
         <h3><span class="material-symbols-rounded">phonelink_lock</span> <span id="device-choice-title"></span></h3>
         <p id="device-choice-text"></p>
@@ -526,7 +526,7 @@
     </div>
 
     <!-- A new login or a device to link asks the main device -->
-    <div class="modal-overlay modal-hidden" id="device-request-modal">
+    <div class="modal-overlay modal-hidden" id="device-request-modal" data-locked>
       <div class="modal-box">
         <h3><span class="material-symbols-rounded" id="device-request-icon">devices</span> <span id="device-request-title"></span></h3>
         <p id="device-request-text"></p>

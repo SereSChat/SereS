@@ -3781,7 +3781,9 @@
   }
 
   function closeAllModals() {
-    document.querySelectorAll(".modal-overlay").forEach((modal) => modal.classList.add("modal-hidden"));
+    // The device dialogs (choosing the main device, allowing a login) wait for
+    // an answer; they close only through their own buttons.
+    document.querySelectorAll(".modal-overlay:not([data-locked])").forEach((modal) => modal.classList.add("modal-hidden"));
   }
 
   // ------------------------------------------------------------ settings
@@ -4707,7 +4709,7 @@
     });
     document.querySelectorAll<HTMLElement>(".modal-overlay").forEach((overlay) => {
       overlay.addEventListener("click", (event) => {
-        if (event.target !== overlay) return;
+        if (event.target !== overlay || overlay.hasAttribute("data-locked")) return;
         // A click next to a small settings dialog only closes that dialog.
         if (overlay.classList.contains("sub-modal")) closeSubModal(overlay.id);
         else closeAllModals();
@@ -4925,9 +4927,11 @@
     });
     modal.classList.remove("modal-hidden");
     deviceDialogOpen = true;
+    let cleanup = () => {};
     return new Promise((resolve) => {
       const finish = (result: string | null) => {
         deviceDialogOpen = false;
+        cleanup();
         modal.classList.add("modal-hidden");
         $("device-choice-confirm").removeEventListener("click", onConfirm);
         $("device-choice-cancel").removeEventListener("click", onCancel);
@@ -4938,8 +4942,20 @@
         if (picked) finish(picked.value);
       };
       const onCancel = () => finish(null);
+      const onOutside = (event: Event) => {
+        if (event.target === modal && options.cancellable) finish(null);
+      };
+      const onKey = (event: KeyboardEvent) => {
+        if (event.key === "Escape" && options.cancellable) finish(null);
+      };
       $("device-choice-confirm").addEventListener("click", onConfirm);
       $("device-choice-cancel").addEventListener("click", onCancel);
+      modal.addEventListener("click", onOutside);
+      document.addEventListener("keydown", onKey);
+      cleanup = () => {
+        modal.removeEventListener("click", onOutside);
+        document.removeEventListener("keydown", onKey);
+      };
     });
   }
 
@@ -4960,8 +4976,13 @@
         $("device-request-allow").removeEventListener("click", onAllow);
         $("device-request-deny").removeEventListener("click", onDeny);
         modal.removeEventListener("click", onOutside);
+        document.removeEventListener("keydown", onKey);
         resolve(result);
       };
+      const onKey = (event: KeyboardEvent) => {
+        if (event.key === "Escape") finish(null);
+      };
+      document.addEventListener("keydown", onKey);
       const onAllow = () => finish(true);
       const onDeny = () => finish(false);
       const onOutside = (event: Event) => {
