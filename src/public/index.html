@@ -553,6 +553,24 @@
       </form>
     </div>
 
+    <!-- Share the location, once or live -->
+    <div class="modal-overlay modal-hidden" id="location-modal">
+      <div class="modal-box">
+        <h3><span class="material-symbols-rounded">location_on</span> <span data-i18n="location.share">Share location</span></h3>
+        <div class="location-preview" id="location-preview"></div>
+        <h4 class="modal-warning" id="location-warning"></h4>
+        <button class="modal-btn confirm-btn location-btn" type="button" id="location-send" data-i18n="location.sendNow">Send your current location</button>
+        <div class="location-live-row">
+          <button class="modal-btn secondary-btn location-btn" type="button" id="location-live" data-i18n="location.shareLive">Share live location</button>
+          <select id="location-duration" aria-label="Duration"></select>
+        </div>
+        <p class="settings-hint" data-i18n="location.hint">Your location is end-to-end encrypted. A live location is updated while SereS stays open in this tab.</p>
+        <div class="modal-buttons">
+          <button class="modal-btn cancel-btn" type="button" data-close-modal data-i18n="common.cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <!-- New poll -->
     <div class="modal-overlay modal-hidden" id="poll-modal">
       <form class="modal-box" id="poll-form">
