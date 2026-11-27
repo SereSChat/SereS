@@ -698,10 +698,25 @@ async fn edit_message(
         Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
         Err(_) => return db_error(),
     };
+    if state.rate_limited(format!("edit:{}", me.id), 30, 60) {
+        return error(
+            "You are editing messages too fast",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     let members = match member_ids(&state.db, &chat_id).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
+    if chat.try_get::<String, _>("type").ok().as_deref() == Some("dm")
+        && let Some(other) = members.iter().find(|v| *v != &me.id)
+        && is_blocked(&state.db, &me.id, other).await.unwrap_or(true)
+    {
+        return error(
+            "You can't edit messages in this chat",
+            StatusCode::FORBIDDEN,
+        );
+    }
     let Some(payload) = body.get("payload") else {
         return error("Unsupported message format", StatusCode::BAD_REQUEST);
     };
@@ -713,7 +728,6 @@ async fn edit_message(
         };
         return error(problem, status);
     };
-    let _ = chat;
     let now = now();
     let mut tx = match state.db.begin().await {
         Ok(v) => v,
@@ -925,10 +939,14 @@ async fn remove_member_route(
         )
         .await
         .is_err()
+        || crate::api::calls::remove_user_from_chat_calls(&mut tx, &chat_id, &other.0)
+            .await
+            .is_err()
         || tx.commit().await.is_err()
     {
         return db_error();
     }
+    crate::api::apns::calls_stopped_ringing(state.db.clone(), None);
     json_ok(json!({"message":"Member removed"})).into_response()
 }
 async fn rename_group(
@@ -1008,13 +1026,17 @@ async fn delete_chat_for(state: &AppState, me: &User, chat_id: &str) -> axum::re
         Ok(v) => v,
         Err(_) => return db_error(),
     };
-    if chat.try_get::<String, _>("type").ok().as_deref() == Some("group") {
+    let is_group = chat.try_get::<String, _>("type").ok().as_deref() == Some("group");
+    if is_group {
         if sqlx::query("DELETE FROM chat_members WHERE chat_id=? AND user_id=?")
             .bind(chat_id)
             .bind(&me.id)
             .execute(&mut *tx)
             .await
             .is_err()
+            || crate::api::calls::remove_user_from_chat_calls(&mut tx, chat_id, &me.id)
+                .await
+                .is_err()
         {
             return db_error();
         }
@@ -1116,6 +1138,9 @@ async fn delete_chat_for(state: &AppState, me: &User, chat_id: &str) -> axum::re
     }
     if tx.commit().await.is_err() {
         return db_error();
+    }
+    if is_group {
+        crate::api::apns::calls_stopped_ringing(state.db.clone(), None);
     }
     json_ok(json!({"message":"Chat deleted successfully"})).into_response()
 }
@@ -1579,13 +1604,21 @@ async fn upload_file(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    if membership(&state.db, &chat_id, &me.id)
-        .await
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        return error("Chat not found", StatusCode::NOT_FOUND);
+    let chat = match membership(&state.db, &chat_id, &me.id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
+        Err(_) => return db_error(),
+    };
+    if chat.try_get::<String, _>("type").ok().as_deref() == Some("dm") {
+        let members = match member_ids(&state.db, &chat_id).await {
+            Ok(v) => v,
+            Err(_) => return db_error(),
+        };
+        if let Some(other) = members.iter().find(|v| *v != &me.id)
+            && is_blocked(&state.db, &me.id, other).await.unwrap_or(true)
+        {
+            return error("You can't send files to this chat", StatusCode::FORBIDDEN);
+        }
     }
     if state.rate_limited(format!("upload:{}", me.id), 30, 60) {
         return error("You are uploading too fast", StatusCode::TOO_MANY_REQUESTS);
@@ -2276,6 +2309,9 @@ async fn chat_summary(state: &AppState, row: &SqliteRow, me: &str) -> Result<Val
     Ok(value)
 }
 async fn presence(pool: &SqlitePool, me: &str, other: &str) -> Result<Option<Value>, sqlx::Error> {
+    if is_blocked(pool, me, other).await? {
+        return Ok(None);
+    }
     let visible=are_friends(pool,me,other).await?||sqlx::query("SELECT 1 FROM chat_members a JOIN chat_members b ON a.chat_id=b.chat_id WHERE a.user_id=? AND b.user_id=?").bind(me).bind(other).fetch_optional(pool).await?.is_some();
     if !visible {
         return Ok(None);
@@ -2504,4 +2540,236 @@ async fn invite_join(
         return db_error();
     }
     json_ok(json!({"chat_id":chat_id})).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderValue, header};
+
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        async fn new() -> (Self, AppState) {
+            let dir = std::env::temp_dir().join(format!("seres-chats-{}", uuid::Uuid::new_v4()));
+            let pool = crate::db::connect(&dir.join("users.db")).await.unwrap();
+            (Self(dir), AppState::new(pool))
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn auth_headers(pool: &SqlitePool, user_id: &str) -> HeaderMap {
+        let token = format!("tok-{user_id}");
+        let hash = crate::api::auth::hash_token(&token);
+        sqlx::query(
+            "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,?,'2999-01-01T00:00:00Z','now',1)",
+        )
+        .bind(hash)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("sessioncookie={token}")).unwrap(),
+        );
+        headers
+    }
+
+    fn valid_dm_payload(a: &str, b: &str) -> Value {
+        json!({
+            "v": 1,
+            "iv": "AAAA",
+            "sig": "AAAA",
+            "ct": "AAAA",
+            "keys": {
+                a: {"iv": "AAAA", "k": "AAAA"},
+                b: {"iv": "AAAA", "k": "AAAA"},
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn dm_blocking_enforced_for_presence_edit_and_upload_and_edit_rate_limited() {
+        let (_fix, state) = Fixture::new().await;
+        let seen = now();
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO users(id,username,last_seen,show_last_seen) VALUES(?,?,?,1)")
+                .bind(id)
+                .bind(id)
+                .bind(&seen)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO friendships(user_a,user_b,created_at) VALUES('alice','bob','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for id in ["alice", "bob"] {
+            sqlx::query(
+                "INSERT INTO chat_members(chat_id,user_id,joined_at) VALUES('dm1',?,'now')",
+            )
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        sqlx::query("INSERT INTO messages(id,chat_id,sender_id,kind,payload,created_at,rev) VALUES('m1','dm1','alice','e2e','{}','now',1)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        assert!(presence(&state.db, "alice", "bob").await.unwrap().is_some());
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let bob_headers = auth_headers(&state.db, "bob").await;
+
+        // Before block: edit succeeds
+        let ok = edit_message(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("dm1".into(), "m1".into())),
+            Json(json!({"payload": valid_dm_payload("alice", "bob")})),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        // Bob blocks Alice
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('bob','alice','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        assert!(presence(&state.db, "alice", "bob").await.unwrap().is_none());
+        assert!(presence(&state.db, "bob", "alice").await.unwrap().is_none());
+
+        let edit_blocked = edit_message(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("dm1".into(), "m1".into())),
+            Json(json!({"payload": valid_dm_payload("alice", "bob")})),
+        )
+        .await;
+        assert_eq!(edit_blocked.status(), StatusCode::FORBIDDEN);
+
+        let upload_blocked_a = upload_file(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path("dm1".into()),
+            Bytes::from_static(b"enc"),
+        )
+        .await;
+        assert_eq!(upload_blocked_a.status(), StatusCode::FORBIDDEN);
+
+        let upload_blocked_b = upload_file(
+            State(state.clone()),
+            bob_headers,
+            Path("dm1".into()),
+            Bytes::from_static(b"enc"),
+        )
+        .await;
+        assert_eq!(upload_blocked_b.status(), StatusCode::FORBIDDEN);
+
+        // Rate limit on edit_message (30 per 60s; 2 already consumed above)
+        for _ in 0..28 {
+            let resp = edit_message(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path(("dm1".into(), "m1".into())),
+                Json(json!({"payload": valid_dm_payload("alice", "bob")})),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+        let limited = edit_message(
+            State(state.clone()),
+            alice_headers,
+            Path(("dm1".into(), "m1".into())),
+            Json(json!({"payload": valid_dm_payload("alice", "bob")})),
+        )
+        .await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn remove_member_and_group_leave_clean_up_active_calls() {
+        let (_fix, state) = Fixture::new().await;
+        for id in ["alice", "bob", "carol"] {
+            sqlx::query("INSERT INTO users(id,username) VALUES(?,?)")
+                .bind(id)
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO chats(id,type,name,owner_id,created_at,last_activity) VALUES('g1','group','Team','alice','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for (id, role) in [("alice", "owner"), ("bob", "member"), ("carol", "member")] {
+            sqlx::query(
+                "INSERT INTO chat_members(chat_id,user_id,role,joined_at) VALUES('g1',?,?,'now')",
+            )
+            .bind(id)
+            .bind(role)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO calls(id,chat_id,started_by,started_at) VALUES('c1','g1','alice','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        for (id, st) in [("alice", "joined"), ("bob", "ringing"), ("carol", "joined")] {
+            sqlx::query("INSERT INTO call_participants(call_id,user_id,state,updated_at,seen_at) VALUES('c1',?,?,'now','now')")
+                .bind(id)
+                .bind(st)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let carol_headers = auth_headers(&state.db, "carol").await;
+
+        // Owner removes bob -> bob is marked 'left', call stays active (alice+carol joined)
+        let resp = remove_member_route(
+            State(state.clone()),
+            alice_headers,
+            Path("g1".into()),
+            Json(json!({"username": "bob"})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bob_state: String = sqlx::query_scalar(
+            "SELECT state FROM call_participants WHERE call_id='c1' AND user_id='bob'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(bob_state, "left");
+
+        // Carol leaves group -> only alice remains -> call ends
+        let resp = delete_chat(State(state.clone()), carol_headers, Path("g1".into())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ended: Option<String> = sqlx::query_scalar("SELECT ended_at FROM calls WHERE id='c1'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert!(ended.is_some());
+    }
 }
