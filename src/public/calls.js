@@ -24,6 +24,7 @@ const SeresCalls = (() => {
     let polling = false;
     let calls = [];
     const signKeys = new Map();
+    const warnedUntrusted = new Set();
     // Calls I declined or that rang out here, so they don't ring again.
     const dismissed = new Set();
     let active = null;
@@ -261,20 +262,36 @@ const SeresCalls = (() => {
     }
     async function signKey(userId) {
         if (!signKeys.has(userId)) {
-            const data = await deps.api("/api/users/keys?ids=" + encodeURIComponent(userId));
-            const user = (data.users || [])[0];
-            if (user?.pub_sign)
-                signKeys.set(userId, user.pub_sign);
+            const resolved = await deps.signKey(userId);
+            if (resolved)
+                signKeys.set(userId, resolved);
         }
         return signKeys.get(userId) || null;
+    }
+    function clearSignKeys(userIds) {
+        if (!userIds) {
+            signKeys.clear();
+            return;
+        }
+        for (const id of userIds)
+            signKeys.delete(id);
     }
     async function handleSignal(signal) {
         if (!active || signal.call_id !== active.call.id)
             return;
         const current = active;
         const key = await signKey(signal.from);
+        if (!key) {
+            const warnKey = `${signal.call_id}:${signal.from}`;
+            if (!warnedUntrusted.has(warnKey)) {
+                warnedUntrusted.add(warnKey);
+                deps.showAlert(t("msg.keyChanged"));
+            }
+            console.warn("Ignored a call signal from unpinned or key-changed peer", signal.from);
+            return;
+        }
         const meId = deps.me().id;
-        const valid = key && (await SeresCrypto.verifyCall(key, signal.call_id, signal.from, meId, signal.kind, signal.data.sdp, signal.data.sig));
+        const valid = await SeresCrypto.verifyCall(key, signal.call_id, signal.from, meId, signal.kind, signal.data.sdp, signal.data.sig);
         if (!valid) {
             console.warn("Ignored a call signal with a wrong signature from", signal.from);
             return;
@@ -997,6 +1014,7 @@ const SeresCalls = (() => {
         init,
         start,
         hangUp,
+        clearSignKeys,
         /** The chat that has a running call I'm in, if any. */
         activeChat: () => active?.call.chat_id || null,
     };

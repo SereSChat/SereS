@@ -23,9 +23,6 @@ interface SeresIdentity {
   signPriv: CryptoKey;
   pubEcdh: string;
   pubSign: string;
-  // The private keys encrypted with a key that never leaves this device, so
-  // the main device can hand them to a device it links (see sealIdentity).
-  transfer?: { key: CryptoKey; box: string };
 }
 
 /** The account keys sealed for a new device by the main device. */
@@ -174,8 +171,13 @@ const SeresCrypto = (() => {
       wrapKey,
       fromB64(blob.ct),
     );
-    const keys = JSON.parse(decoder.decode(plain));
-    return { ecdh: fromB64(keys.ecdh), sign: fromB64(keys.sign) };
+    const plainBytes = new Uint8Array(plain);
+    try {
+      const keys = JSON.parse(decoder.decode(plainBytes));
+      return { ecdh: fromB64(keys.ecdh), sign: fromB64(keys.sign) };
+    } finally {
+      plainBytes.fill(0);
+    }
   }
 
   /** Creates a new identity and returns what the server stores for it. */
@@ -207,7 +209,7 @@ const SeresCrypto = (() => {
     return identityFromRaw(userId, raw, pubEcdh, pubSign);
   }
 
-  /** Imports the private keys (non-extractable) and keeps a device-bound copy for linking. */
+  /** Imports the private keys as non-extractable keys without persisting raw key material. */
   async function identityFromRaw(
     userId: string,
     raw: { ecdh: Uint8Array<ArrayBuffer>; sign: Uint8Array<ArrayBuffer> },
@@ -217,20 +219,11 @@ const SeresCrypto = (() => {
     try {
       const ecdhPriv = await subtle.importKey("pkcs8", raw.ecdh, ECDH, false, ["deriveBits"]);
       const signPriv = await subtle.importKey("pkcs8", raw.sign, ECDSA, false, ["sign"]);
-      const deviceKey = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
-      const box = await encryptPrivateKeys(raw.ecdh, raw.sign, deviceKey);
-      return { userId, ecdhPriv, signPriv, pubEcdh, pubSign, transfer: { key: deviceKey, box } };
+      return { userId, ecdhPriv, signPriv, pubEcdh, pubSign };
     } finally {
       raw.ecdh.fill(0);
       raw.sign.fill(0);
     }
-  }
-
-  /** For devices that were logged in before linking existed: adds the copy with the password's key. */
-  async function addTransfer(identity: SeresIdentity, encPrivate: string, wrapKey: CryptoKey) {
-    const raw = await decryptPrivateKeys(encPrivate, wrapKey);
-    const fresh = await identityFromRaw(identity.userId, raw, identity.pubEcdh, identity.pubSign);
-    return { ...identity, transfer: fresh.transfer };
   }
 
   // ---------------------------------------------------------- linking
@@ -266,18 +259,24 @@ const SeresCrypto = (() => {
     return digits.slice(0, 3) + " " + digits.slice(3);
   }
 
-  /** Main device: the account keys, encrypted for the new device. */
-  async function sealIdentity(identity: SeresIdentity, devicePub: string): Promise<SeresSealedIdentity> {
-    if (!identity.transfer) throw new Error("No transfer copy on this device");
-    const raw = await decryptPrivateKeys(identity.transfer.box, identity.transfer.key);
+  /** Main device: decrypts encPrivate with wrapKey and seals the account keys for the new device. */
+  async function sealPrivateKeys(
+    encPrivate: string,
+    wrapKey: CryptoKey,
+    devicePub: string,
+  ): Promise<SeresSealedIdentity> {
+    const raw = await decryptPrivateKeys(encPrivate, wrapKey);
     try {
       const ephemeral = await subtle.generateKey(ECDH, false, ["deriveBits"]);
       const key = await linkKey(ephemeral.privateKey, devicePub);
       const iv = randomBytes(12);
       const plain = encoder.encode(JSON.stringify({ ecdh: toB64(raw.ecdh), sign: toB64(raw.sign) }));
-      const ct = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: LINK_INFO }, key, plain);
-      plain.fill(0);
-      return { epub: toB64(await subtle.exportKey("spki", ephemeral.publicKey)), iv: toB64(iv), ct: toB64(ct) };
+      try {
+        const ct = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: LINK_INFO }, key, plain);
+        return { epub: toB64(await subtle.exportKey("spki", ephemeral.publicKey)), iv: toB64(iv), ct: toB64(ct) };
+      } finally {
+        plain.fill(0);
+      }
     } finally {
       raw.ecdh.fill(0);
       raw.sign.fill(0);
@@ -296,8 +295,12 @@ const SeresCrypto = (() => {
     const plain = new Uint8Array(
       await subtle.decrypt({ name: "AES-GCM", iv: fromB64(sealed.iv), additionalData: LINK_INFO }, key, fromB64(sealed.ct)),
     );
-    const keys = JSON.parse(decoder.decode(plain));
-    plain.fill(0);
+    let keys: { ecdh: string; sign: string };
+    try {
+      keys = JSON.parse(decoder.decode(plain));
+    } finally {
+      plain.fill(0);
+    }
     return identityFromRaw(userId, { ecdh: fromB64(keys.ecdh), sign: fromB64(keys.sign) }, pubEcdh, pubSign);
   }
 
@@ -348,14 +351,29 @@ const SeresCrypto = (() => {
     }
   }
 
+  function stripTransfer(identity: SeresIdentity): SeresIdentity {
+    return {
+      userId: identity.userId,
+      ecdhPriv: identity.ecdhPriv,
+      signPriv: identity.signPriv,
+      pubEcdh: identity.pubEcdh,
+      pubSign: identity.pubSign,
+    };
+  }
+
   async function saveIdentity(identity: SeresIdentity): Promise<void> {
-    await withStore("readwrite", (store) => store.put(identity));
+    await withStore("readwrite", (store) => store.put(stripTransfer(identity)));
   }
 
   async function loadIdentity(userId: string): Promise<SeresIdentity | null> {
     try {
       const result = await withStore("readonly", (store) => store.get(userId));
-      return (result as SeresIdentity) || null;
+      if (!result) return null;
+      const clean = stripTransfer(result as SeresIdentity);
+      if ("transfer" in (result as any)) {
+        await saveIdentity(clean).catch(() => {});
+      }
+      return clean;
     } catch {
       return null;
     }
@@ -734,10 +752,9 @@ const SeresCrypto = (() => {
     deriveAccountKeys,
     createKeyBundle,
     unlockIdentity,
-    addTransfer,
     newLinkKeyPair,
     linkCheckCode,
-    sealIdentity,
+    sealPrivateKeys,
     openSealedIdentity,
     rewrapPrivateKeys,
     saveIdentity,

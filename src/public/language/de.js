@@ -156,6 +156,7 @@ window.SeresLang.de = {
 
   "msg.deleted": "Diese Nachricht wurde gelöscht",
   "msg.decryptError": " Diese Nachricht konnte nicht entschlüsselt oder überprüft werden.",
+  "msg.untrustedHistoricalKey": "⚠️ Diese Nachricht verwendet einen nicht überprüften historischen Schlüssel und wurde nicht verifiziert.",
   "msg.unknown": "Unbekannt",
   "msg.you": "Du",
   "msg.notEncrypted": "nicht verschlüsselt",

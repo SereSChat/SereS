@@ -20,6 +20,7 @@
   interface Member extends UserRef {
     pub_ecdh: string | null;
     pub_sign: string | null;
+    previous_keys?: { pub_ecdh: string; pub_sign: string; until: string }[];
     role: string;
     // Reset the password by e-mail and can't read these messages until someone shares them.
     history_reset?: { from_seq: number; until_seq: number } | null;
@@ -206,10 +207,35 @@
   }
   const userKeys = new Map<string, KnownKeys>();
 
-  /** The sender's keys that were valid when the message was written. */
-  function keysAt(user: KnownKeys, createdAt: string) {
-    const previous = (user.previous_keys || []).find((old) => createdAt <= old.until);
-    return previous || { pub_ecdh: user.pub_ecdh, pub_sign: user.pub_sign };
+  /** The sender's keys that were valid when the message was written, verifying historical keys against local pins. */
+  async function keysAt(
+    user: KnownKeys,
+    createdAt: string,
+  ): Promise<{ pub_ecdh: string | null; pub_sign: string | null; untrustedHistory?: boolean }> {
+    const createdMs = Date.parse(createdAt);
+    const history = readJsonStore<Record<string, PinHistoryEntry[]>>("pin-history", {})[user.id] || [];
+    let untrustedHistory = false;
+    for (const old of user.previous_keys || []) {
+      const oldUntilMs = Date.parse(old.until);
+      if (!Number.isFinite(createdMs) || !Number.isFinite(oldUntilMs) || createdMs > oldUntilMs) continue;
+      const fp = await SeresCrypto.fingerprint(old.pub_ecdh, old.pub_sign);
+      const local = history.find(
+        (entry) =>
+          entry.fp === fp &&
+          entry.pub_ecdh === old.pub_ecdh &&
+          entry.pub_sign === old.pub_sign,
+      );
+      const localUntilMs = local ? Date.parse(local.until) : NaN;
+      if (!local || !Number.isFinite(localUntilMs) || oldUntilMs > localUntilMs) {
+        untrustedHistory = true;
+        continue;
+      }
+      return { pub_ecdh: old.pub_ecdh, pub_sign: old.pub_sign };
+    }
+    if (untrustedHistory) {
+      return { pub_ecdh: null, pub_sign: null, untrustedHistory: true };
+    }
+    return { pub_ecdh: user.pub_ecdh, pub_sign: user.pub_sign };
   }
   const shownCache = new Map<string, Promise<Shown>>();
   const avatarState = new Map<string, "yes" | "no">();
@@ -380,19 +406,30 @@
 
   // ------------------------------------------------------------------ keys
 
+  interface PinKeyRecord {
+    fp: string;
+    pub_ecdh: string;
+    pub_sign: string;
+  }
+
+  interface PinHistoryEntry extends PinKeyRecord {
+    until: string;
+  }
+
   function pinStoreKey(kind: string) {
     return "seres-" + kind + ":" + me.id;
   }
 
-  function readStore(kind: string): Record<string, string> {
+  function readJsonStore<T>(kind: string, fallback: T): T {
     try {
-      return JSON.parse(localStorage.getItem(pinStoreKey(kind)) || "{}");
+      const raw = localStorage.getItem(pinStoreKey(kind));
+      return raw ? (JSON.parse(raw) as T) : fallback;
     } catch {
-      return {};
+      return fallback;
     }
   }
 
-  function writeStore(kind: string, value: Record<string, string>) {
+  function writeJsonStore(kind: string, value: unknown) {
     try {
       localStorage.setItem(pinStoreKey(kind), JSON.stringify(value));
     } catch {
@@ -400,9 +437,44 @@
     }
   }
 
+  function readStore(kind: string): Record<string, string> {
+    return readJsonStore<Record<string, string>>(kind, {});
+  }
+
+  function writeStore(kind: string, value: Record<string, string>) {
+    writeJsonStore(kind, value);
+  }
+
   async function memberFingerprint(member: { pub_ecdh: string | null; pub_sign: string | null }) {
     if (!member.pub_ecdh || !member.pub_sign) return null;
     return SeresCrypto.fingerprint(member.pub_ecdh, member.pub_sign);
+  }
+
+  function appendPinHistory(
+    pinHistory: Record<string, PinHistoryEntry[]>,
+    userId: string,
+    oldKey: PinKeyRecord,
+    transitionIso: string,
+    serverHistory?: { pub_ecdh: string; pub_sign: string; until: string }[],
+  ) {
+    const list = pinHistory[userId] || [];
+    if (list.some((entry) => entry.fp === oldKey.fp)) return;
+    const transitionMs = Date.parse(transitionIso);
+    const matched = (serverHistory || []).find(
+      (prev) => prev.pub_ecdh === oldKey.pub_ecdh && prev.pub_sign === oldKey.pub_sign,
+    );
+    const matchedMs = matched ? Date.parse(matched.until) : NaN;
+    const boundedUntil =
+      matched && Number.isFinite(matchedMs) && Number.isFinite(transitionMs) && matchedMs <= transitionMs
+        ? matched.until
+        : transitionIso;
+    list.push({
+      fp: oldKey.fp,
+      pub_ecdh: oldKey.pub_ecdh,
+      pub_sign: oldKey.pub_sign,
+      until: boundedUntil,
+    });
+    pinHistory[userId] = list;
   }
 
   /**
@@ -411,37 +483,76 @@
    */
   async function checkPins(members: Member[]) {
     const pins = readStore("pins");
+    const pinKeys = readJsonStore<Record<string, PinKeyRecord>>("pin-keys", {});
     const changed: Member[] = [];
     const missing: Member[] = [];
-    let dirty = false;
+    let pinsDirty = false;
+    let pinKeysDirty = false;
     for (const member of members) {
       if (member.id === me.id) continue;
       const fp = await memberFingerprint(member);
-      if (!fp) {
+      if (!fp || !member.pub_ecdh || !member.pub_sign) {
         missing.push(member);
         continue;
       }
       if (!pins[member.id]) {
         pins[member.id] = fp;
-        dirty = true;
+        pinsDirty = true;
+        pinKeys[member.id] = { fp, pub_ecdh: member.pub_ecdh, pub_sign: member.pub_sign };
+        pinKeysDirty = true;
       } else if (pins[member.id] !== fp) {
         changed.push(member);
+      } else if (!pinKeys[member.id] || pinKeys[member.id].fp !== fp) {
+        pinKeys[member.id] = { fp, pub_ecdh: member.pub_ecdh, pub_sign: member.pub_sign };
+        pinKeysDirty = true;
       }
     }
-    if (dirty) writeStore("pins", pins);
+    if (pinsDirty) writeStore("pins", pins);
+    if (pinKeysDirty) writeJsonStore("pin-keys", pinKeys);
+    if (changed.length && typeof SeresCalls !== "undefined") {
+      SeresCalls.clearSignKeys(changed.map((m) => m.id));
+    }
     return { changed, missing };
   }
 
   async function acceptNewKeys(members: Member[]) {
     const pins = readStore("pins");
     const verified = readStore("verified");
+    const pinKeys = readJsonStore<Record<string, PinKeyRecord>>("pin-keys", {});
+    const pinHistory = readJsonStore<Record<string, PinHistoryEntry[]>>("pin-history", {});
+    const transitionIso = new Date().toISOString();
     for (const member of members) {
       const fp = await memberFingerprint(member);
-      if (fp) pins[member.id] = fp;
+      if (!fp || !member.pub_ecdh || !member.pub_sign) continue;
+      const oldFp = pins[member.id];
+      const serverHistory = member.previous_keys || userKeys.get(member.id)?.previous_keys || [];
+      if (oldFp && oldFp !== fp) {
+        let oldKey: PinKeyRecord | null = pinKeys[member.id]?.fp === oldFp ? pinKeys[member.id] : null;
+        if (!oldKey) {
+          for (const prev of serverHistory) {
+            if ((await SeresCrypto.fingerprint(prev.pub_ecdh, prev.pub_sign)) === oldFp) {
+              oldKey = { fp: oldFp, pub_ecdh: prev.pub_ecdh, pub_sign: prev.pub_sign };
+              break;
+            }
+          }
+        }
+        if (oldKey) {
+          appendPinHistory(pinHistory, member.id, oldKey, transitionIso, serverHistory);
+        }
+      }
+      pins[member.id] = fp;
+      pinKeys[member.id] = { fp, pub_ecdh: member.pub_ecdh, pub_sign: member.pub_sign };
+      userKeys.set(member.id, member);
       delete verified[member.id];
     }
     writeStore("pins", pins);
     writeStore("verified", verified);
+    writeJsonStore("pin-keys", pinKeys);
+    writeJsonStore("pin-history", pinHistory);
+    shownCache.clear();
+    if (typeof SeresCalls !== "undefined") {
+      SeresCalls.clearSignKeys(members.map((m) => m.id));
+    }
   }
 
   async function ensureUserKeys(ids: string[]) {
@@ -499,7 +610,11 @@
         try {
           await ensureUserKeys([message.sender_id!]);
           const known = userKeys.get(message.sender_id!);
-          const sender = known ? { id: known.id, ...keysAt(known, message.created_at) } : null;
+          const sender = known ? { id: known.id, ...(await keysAt(known, message.created_at)) } : null;
+          if (sender?.untrustedHistory) {
+            console.warn("Refused untrusted historical key for message", message.id);
+            return { type: "error", text: t("msg.untrustedHistoricalKey") };
+          }
           if (!sender || !sender.pub_ecdh || !sender.pub_sign) throw new Error("unknown sender");
           const content = await SeresCrypto.decryptMessage(
             identity,
@@ -1575,6 +1690,7 @@
           if (!current) return;
           await acceptNewKeys(current.changedKeys);
           await refreshCurrentDetails();
+          await renderMessages({ keepPosition: true });
         }),
       );
       box.appendChild(button(t("app.chatInfo"), "pill-btn secondary", () => openChatInfo()));
@@ -1624,11 +1740,17 @@
    * keys. The messages themselves are not sent again and stay end-to-end encrypted.
    */
   async function shareHistory(opened: OpenChat, member: Member): Promise<number> {
+    const pins = readStore("pins");
+    const memberFp = await memberFingerprint(member);
+    if (!memberFp || pins[member.id] !== memberFp) {
+      throw new Error(t("msg.keyChanged"));
+    }
     const range = member.history_reset!;
     const recipient = { id: member.id, pub_ecdh: member.pub_ecdh! };
     const url = `/api/chats/${encodeURIComponent(opened.id)}/history/${encodeURIComponent(member.id)}`;
     let keys: Record<string, { iv: string; k: string }> = {};
     let count = 0;
+    let sawUntrustedHistory = false;
     let before = range.until_seq + 1;
     for (;;) {
       const data = await api(`/api/chats/${encodeURIComponent(opened.id)}/messages?limit=200&before_seq=${before}`);
@@ -1638,7 +1760,12 @@
         try {
           await ensureUserKeys([message.sender_id!]);
           const known = userKeys.get(message.sender_id!);
-          const sender = known ? { id: known.id, ...keysAt(known, message.created_at) } : null;
+          const sender = known ? { id: known.id, ...(await keysAt(known, message.created_at)) } : null;
+          if (sender?.untrustedHistory) {
+            sawUntrustedHistory = true;
+            console.warn("Refused untrusted historical key while sharing message", message.id);
+            continue;
+          }
           if (!sender || !sender.pub_ecdh || !sender.pub_sign) continue;
           keys[message.id] = await SeresCrypto.shareMessageKey(
             identity,
@@ -1663,6 +1790,7 @@
       before = page[0].seq;
     }
     await post(url, { keys, done: true });
+    if (sawUntrustedHistory) showAlert(t("msg.untrustedHistoricalKey"));
     return count;
   }
 
@@ -5404,22 +5532,18 @@
         await post("/api/link/deny", { id: found.id });
         return;
       }
-      if (!identity.transfer) {
-        // Logged in before linking existed: the password unlocks the keys once more.
-        const password = await askPassword(t("link.needPassword"));
-        if (password === null) return;
-        const pre = await post("/api/prelogin", { nameomail: me.username });
-        const keys = await SeresCrypto.deriveAccountKeys(password, pre.kdf_salt, pre.kdf_iterations);
-        const fresh = (await api("/api/me")).user;
-        try {
-          identity = await SeresCrypto.addTransfer(identity, fresh.enc_private, keys.wrapKey);
-        } catch {
-          showAlert(t("settings.wrongPassword"));
-          return;
-        }
-        await SeresCrypto.saveIdentity(identity);
+      const password = await askPassword(t("link.needPassword"));
+      if (password === null) return;
+      const pre = await post("/api/prelogin", { nameomail: me.username });
+      const keys = await SeresCrypto.deriveAccountKeys(password, pre.kdf_salt, pre.kdf_iterations);
+      const fresh = (await api("/api/me")).user;
+      let sealed: SeresSealedIdentity;
+      try {
+        sealed = await SeresCrypto.sealPrivateKeys(fresh.enc_private, keys.wrapKey, found.pub);
+      } catch {
+        showAlert(t("settings.wrongPassword"));
+        return;
       }
-      const sealed = await SeresCrypto.sealIdentity(identity, found.pub);
       await post("/api/link/approve", { id: found.id, sealed });
       showAlert(t("link.done"));
     } catch (error) {
@@ -5504,6 +5628,15 @@
     }
     identity = stored;
     userKeys.set(me.id, { id: me.id, username: me.username, pub_ecdh: me.pub_ecdh, pub_sign: me.pub_sign });
+    const meFp = await SeresCrypto.fingerprint(me.pub_ecdh, me.pub_sign);
+    const pinKeys = readJsonStore<Record<string, PinKeyRecord>>("pin-keys", {});
+    if (pinKeys[me.id] && pinKeys[me.id].fp !== meFp) {
+      const pinHistory = readJsonStore<Record<string, PinHistoryEntry[]>>("pin-history", {});
+      appendPinHistory(pinHistory, me.id, pinKeys[me.id], new Date().toISOString());
+      writeJsonStore("pin-history", pinHistory);
+    }
+    pinKeys[me.id] = { fp: meFp, pub_ecdh: me.pub_ecdh, pub_sign: me.pub_sign };
+    writeJsonStore("pin-keys", pinKeys);
 
     showOwnName();
     loadOwnAvatar();
@@ -5555,6 +5688,18 @@
       post,
       me: () => me,
       identity: () => identity,
+      signKey: async (userId: string) => {
+        if (!userId || userId === me.id) return null;
+        const pins = readStore("pins");
+        const pinnedFp = pins[userId];
+        if (!pinnedFp) return null;
+        await ensureUserKeys([userId]).catch(() => {});
+        const known = userKeys.get(userId);
+        if (!known) return null;
+        const fp = await memberFingerprint(known);
+        if (!fp || fp !== pinnedFp) return null;
+        return known.pub_sign;
+      },
       showAlert,
       errorText,
       pickPeople: pickCallPeople,
