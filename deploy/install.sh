@@ -161,8 +161,8 @@ cargo build --release --locked --manifest-path "$DIR/src/backend-rs/Cargo.toml"
 [[ -x "$BIN" ]] || die "Rust backend build did not produce $BIN"
 
 # Settings from an earlier run stay when the options are left out. They are
-# kept in ecosystem.config.js instead of src/backend/.env, because .env is part
-# of the repository and a changed .env would block "git pull".
+# kept in ecosystem.config.js rather than src/backend/.env (which is untracked
+# and ignored by git for local secrets like mail settings).
 previous() {
   [[ -f "$DIR/ecosystem.config.js" ]] || return 0
   node -e 'try { const app=require(process.argv[1]).apps?.[0]; const key=process.argv[2]; const v=app?.env?.[key]; if (v !== undefined) process.stdout.write(String(v)); else if (key === "PORT") { const m=String(app?.args || "").match(/-b 127\.0\.0\.1:(\d+)/); if (m) process.stdout.write(m[1]); } } catch {}' \
