@@ -16,7 +16,13 @@ use rand::rngs::OsRng;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, sqlite::SqliteRow};
-use std::{net::SocketAddr, sync::OnceLock};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Condvar, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 use uuid::Uuid;
 
 const SESSION_DAYS: i64 = 90;
@@ -144,6 +150,55 @@ fn seconds_between(a: &str, b: &str) -> f64 {
     }
 }
 
+const MAX_CONCURRENT_ARGON2: usize = 4;
+
+struct ArgonSemaphore {
+    permits: Mutex<usize>,
+    available: Condvar,
+}
+
+struct ArgonPermit<'a> {
+    sem: &'a ArgonSemaphore,
+}
+
+impl ArgonSemaphore {
+    const fn new(permits: usize) -> Self {
+        Self {
+            permits: Mutex::new(permits),
+            available: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> ArgonPermit<'_> {
+        let mut count = self
+            .permits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *count == 0 {
+            count = self
+                .available
+                .wait(count)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *count -= 1;
+        ArgonPermit { sem: self }
+    }
+}
+
+impl Drop for ArgonPermit<'_> {
+    fn drop(&mut self) {
+        let mut count = self
+            .sem
+            .permits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *count += 1;
+        self.sem.available.notify_one();
+    }
+}
+
+static ARGON_SEMAPHORE: ArgonSemaphore = ArgonSemaphore::new(MAX_CONCURRENT_ARGON2);
+
 fn password_hasher() -> Argon2<'static> {
     let params = Params::new(65_536, 4, 4, None).expect("valid Argon2 parameters");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
@@ -174,30 +229,54 @@ fn hash_password_now(password: &str) -> ApiResult<String> {
 }
 
 pub(crate) fn hash_password(password: &str) -> ApiResult<String> {
-    cpu_bound(|| hash_password_now(password))
+    cpu_bound(|| {
+        let _permit = ARGON_SEMAPHORE.acquire();
+        hash_password_now(password)
+    })
 }
 
-/// Hashes several credentials at once, one thread each, returning results in
-/// input order.
+/// Hashes several credentials using a globally bounded worker pool, returning
+/// results in input order.
 pub(crate) fn hash_passwords(passwords: &[&str]) -> Vec<ApiResult<String>> {
+    if passwords.is_empty() {
+        return Vec::new();
+    }
     cpu_bound(|| {
+        let next = AtomicUsize::new(0);
+        let results: Vec<Mutex<Option<ApiResult<String>>>> =
+            (0..passwords.len()).map(|_| Mutex::new(None)).collect();
+        let workers = passwords.len().min(MAX_CONCURRENT_ARGON2);
         std::thread::scope(|scope| {
-            let handles: Vec<_> = passwords
-                .iter()
-                .map(|password| scope.spawn(move || hash_password_now(password)))
-                .collect();
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle.join().unwrap_or_else(|_| {
-                        Err(ApiError::new(
-                            "Could not hash credential",
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                        ))
-                    })
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let idx = next.fetch_add(1, Ordering::Relaxed);
+                        if idx >= passwords.len() {
+                            break;
+                        }
+                        let hashed = {
+                            let _permit = ARGON_SEMAPHORE.acquire();
+                            hash_password_now(passwords[idx])
+                        };
+                        let mut slot = results[idx]
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        *slot = Some(hashed);
+                    }
+                });
+            }
+        });
+        results
+            .into_iter()
+            .map(|slot| {
+                slot.into_inner().ok().flatten().unwrap_or_else(|| {
+                    Err(ApiError::new(
+                        "Could not hash credential",
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    ))
                 })
-                .collect()
-        })
+            })
+            .collect()
     })
 }
 
@@ -208,6 +287,7 @@ pub(crate) fn verify_password(stored: Option<&str>, candidate: &str) -> bool {
     });
     let valid = PasswordHash::new(hash).ok().is_some_and(|parsed| {
         cpu_bound(|| {
+            let _permit = ARGON_SEMAPHORE.acquire();
             password_hasher()
                 .verify_password(candidate.as_bytes(), &parsed)
                 .is_ok()
@@ -299,10 +379,7 @@ pub(crate) fn validate_keys(body: &Value) -> ApiResult<(String, String, String)>
 }
 
 fn login_cookie(response: &mut Response, token: &str, headers: &HeaderMap, persistent: bool) {
-    let secure = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        == Some("https");
+    let secure = super::is_https(headers);
     let mut cookie = format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/");
     if persistent {
         cookie.push_str(&format!("; Max-Age={}", SESSION_DAYS * 24 * 3600));
@@ -313,17 +390,26 @@ fn login_cookie(response: &mut Response, token: &str, headers: &HeaderMap, persi
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
-    if let Ok(value) = HeaderValue::from_str("username=; Max-Age=0; Path=/") {
+    let clear_username = if secure {
+        "username=; Max-Age=0; Path=/; Secure"
+    } else {
+        "username=; Max-Age=0; Path=/"
+    };
+    if let Ok(value) = HeaderValue::from_str(clear_username) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
 }
 
-fn consent_cookie(response: &mut Response, accepted: bool) {
+fn consent_cookie(response: &mut Response, accepted: bool, headers: &HeaderMap) {
     let value = if accepted { "accepted" } else { "denied" };
-    if let Ok(cookie) = HeaderValue::from_str(&format!(
+    let mut raw = format!(
         "{CONSENT_COOKIE}={value}; Max-Age={}; SameSite=Lax; Path=/",
         365 * 24 * 3600
-    )) {
+    );
+    if super::is_https(headers) {
+        raw.push_str("; Secure");
+    }
+    if let Ok(cookie) = HeaderValue::from_str(&raw) {
         response.headers_mut().append(header::SET_COOKIE, cookie);
     }
 }
@@ -601,11 +687,31 @@ async fn login(
         let token = Uuid::new_v4().simple().to_string() + &Uuid::new_v4().simple().to_string();
         let token_hash = hash_token(&token);
         let challenge = Uuid::new_v4().simple().to_string();
-        let _=sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,?,'login',?,0,?)")
-            .bind(token_hash).bind(&id).bind(challenge).bind(iso_after(300)).execute(&state.db).await;
-        return json_ok(
-            json!({"two_factor":{"token":token,"methods":{ "totp":totp,"passkey":passkeys },"backup_codes":has_backup_codes(&state,&id).await}}),
-        );
+        if sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,?,'login',?,0,?)")
+            .bind(token_hash)
+            .bind(&id)
+            .bind(challenge)
+            .bind(iso_after(300))
+            .execute(&state.db)
+            .await
+            .is_err()
+        {
+            return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        let mut methods = Vec::new();
+        if passkeys {
+            methods.push("passkey");
+        }
+        if totp {
+            methods.push("totp");
+        }
+        return json_ok(json!({
+            "two_factor": {
+                "token": token,
+                "methods": methods,
+                "backup_codes": has_backup_codes(&state, &id).await
+            }
+        }));
     }
     login_response(&state, &id, &headers).await
 }
@@ -697,10 +803,18 @@ pub(crate) async fn create_session(
     } else if let Some(main) = main {
         super::push::login_waiting(state.db.clone(), user_id.to_owned(), main, user_agent);
     }
-    let mut reply = json!({"success":true,"user":own_user(&user),"enc_private":user.try_get::<Option<String>,_>("enc_private").ok().flatten()});
-    if !approved {
-        reply["approval_required"] = json!(true);
-    }
+    let mut reply = if approved {
+        json!({
+            "success": true,
+            "user": own_user(&user),
+            "enc_private": user.try_get::<Option<String>, _>("enc_private").ok().flatten(),
+        })
+    } else {
+        json!({
+            "success": true,
+            "approval_required": true,
+        })
+    };
     if let (Some(reply), Value::Object(extra)) = (reply.as_object_mut(), extra) {
         reply.extend(extra);
     }
@@ -721,8 +835,15 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
         StatusCode::OK,
         json!({"message":"Logout succesfull!","success":true}),
     );
+    let secure_suffix = if super::is_https(&headers) {
+        "; Secure"
+    } else {
+        ""
+    };
     for name in [SESSION_COOKIE, "username"] {
-        if let Ok(value) = HeaderValue::from_str(&format!("{name}=; Max-Age=0; Path=/")) {
+        if let Ok(value) =
+            HeaderValue::from_str(&format!("{name}=; Max-Age=0; Path=/{secure_suffix}"))
+        {
             response.headers_mut().append(header::SET_COOKIE, value);
         }
     }
@@ -739,7 +860,7 @@ async fn cookie_consent(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let mut response = json_response(StatusCode::OK, json!({"success":true,"accepted":accepted}));
-    consent_cookie(&mut response, accepted);
+    consent_cookie(&mut response, accepted, &headers);
     if let (Some(token), Some(_)) = (
         cookie_value(&headers, SESSION_COOKIE),
         current_user(&state, &headers).await,
@@ -820,23 +941,310 @@ async fn change_password(
         .execute(&mut *tx)
         .await
         .is_err()
+        || sqlx::query("DELETE FROM user_sessions WHERE user_id=? AND token_hash!=?")
+            .bind(&user_id)
+            .bind(current_hash)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        || sqlx::query("DELETE FROM password_resets WHERE user_id=?")
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        || sqlx::query("DELETE FROM twofa_challenges WHERE user_id=?")
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        || tx.commit().await.is_err()
     {
-        return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
-    }
-    if sqlx::query("DELETE FROM user_sessions WHERE user_id=? AND token_hash!=?")
-        .bind(&user_id)
-        .bind(current_hash)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-    {
-        return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
-    }
-    if tx.commit().await.is_err() {
         return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
     }
     json_response(
         StatusCode::OK,
         json!({"message":"Password changed","success":true}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    async fn test_state() -> (AppState, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("seres-auth-test-{}.db", Uuid::new_v4()));
+        let pool = crate::db::connect(&path).await.unwrap();
+        (AppState::new(pool), path)
+    }
+
+    async fn response_json(response: Response) -> Value {
+        let body = axum::body::to_bytes(response.into_body(), 16_384)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unapproved_session_omits_sensitive_fields_and_blocks_me() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version,pub_ecdh,pub_sign,enc_private,status_text) VALUES(?,?,?,?,1,?,?,?,?)")
+            .bind(&user_id)
+            .bind("alice@example.com")
+            .bind("alice")
+            .bind("hash")
+            .bind("ecdh-pub")
+            .bind("sign-pub")
+            .bind("secret-enc-private")
+            .bind("private status")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let main_hash = hash_token("main-token");
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,?,?,?,1)")
+            .bind(&main_hash)
+            .bind(&user_id)
+            .bind(iso_after(3600))
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET main_session=? WHERE id=?")
+            .bind(&main_hash)
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let resp = create_session(
+            &state,
+            &user_id,
+            &HeaderMap::new(),
+            json!({"message": "Login succesfull!"}),
+            false,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set_cookie = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find(|v| v.starts_with("sessioncookie="))
+            .unwrap()
+            .to_owned();
+        let session_cookie_pair = set_cookie.split(';').next().unwrap().to_owned();
+        let body = response_json(resp).await;
+        assert_eq!(body["success"], true);
+        assert_eq!(body["approval_required"], true);
+        assert!(body.get("enc_private").is_none());
+        assert!(body.get("user").is_none());
+
+        let mut cookie_headers = HeaderMap::new();
+        cookie_headers.insert(header::COOKIE, session_cookie_pair.parse().unwrap());
+        assert!(require_user(&state, &cookie_headers).await.is_err());
+
+        let trusted_resp = create_session(
+            &state,
+            &user_id,
+            &HeaderMap::new(),
+            json!({"state": "approved"}),
+            true,
+        )
+        .await;
+        let trusted_body = response_json(trusted_resp).await;
+        assert_eq!(trusted_body["enc_private"], "secret-enc-private");
+        assert_eq!(trusted_body["user"]["email"], "alice@example.com");
+        assert!(trusted_body.get("approval_required").is_none());
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn login_returns_two_factor_methods_as_array() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        let auth_hash = STANDARD.encode([7u8; 32]);
+        let pw_hash = hash_password(&auth_hash).unwrap();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version,totp_secret) VALUES(?,?,?,?,1,?)")
+            .bind(&user_id)
+            .bind("bob@example.com")
+            .bind("bob")
+            .bind(pw_hash)
+            .bind("JBSWY3DPEHPK3PXP")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO passkeys(id,user_id,public_key,sign_count,name,created_at) VALUES(?,?,?,0,?,?)")
+            .bind("pk-1")
+            .bind(&user_id)
+            .bind("{}")
+            .bind("Key")
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let resp = login(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({"nameomail": "bob", "auth_hash": auth_hash})),
+        )
+        .await;
+        let body = response_json(resp).await;
+        assert_eq!(body["two_factor"]["methods"], json!(["passkey", "totp"]));
+
+        sqlx::query("DELETE FROM passkeys WHERE user_id=?")
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let resp = login(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({"nameomail": "bob", "auth_hash": auth_hash})),
+        )
+        .await;
+        let body = response_json(resp).await;
+        assert_eq!(body["two_factor"]["methods"], json!(["totp"]));
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cookies_include_secure_only_on_https() {
+        let mut http_resp = json_ok(json!({}));
+        consent_cookie(&mut http_resp, true, &HeaderMap::new());
+        let http_cookie = http_resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(!http_cookie.contains("; Secure"));
+
+        let mut https_headers = HeaderMap::new();
+        https_headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        let mut https_resp = json_ok(json!({}));
+        consent_cookie(&mut https_resp, true, &https_headers);
+        let https_cookie = https_resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(https_cookie.contains("; Secure"));
+    }
+
+    #[test]
+    fn argon2_semaphore_bounds_concurrency_and_hash_passwords_preserves_order() {
+        let active = AtomicUsize::new(0);
+        let max_active = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    let _permit = ARGON_SEMAPHORE.acquire();
+                    let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(cur, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        assert!(max_active.load(Ordering::SeqCst) <= MAX_CONCURRENT_ARGON2);
+
+        let inputs = ["alpha-pw", "beta-pw", "gamma-pw", "delta-pw", "epsilon-pw"];
+        let hashed = hash_passwords(&inputs);
+        assert_eq!(hashed.len(), inputs.len());
+        for (plain, result) in inputs.iter().zip(hashed.iter()) {
+            let h = result.as_ref().unwrap();
+            assert!(verify_password(Some(h), plain));
+            assert!(!verify_password(Some(h), "wrong-pw"));
+        }
+    }
+
+    #[tokio::test]
+    async fn change_password_clears_pending_resets_and_twofa_challenges() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        let old_auth = STANDARD.encode([1u8; 32]);
+        let new_auth = STANDARD.encode([2u8; 32]);
+        let pw_hash = hash_password(&old_auth).unwrap();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version) VALUES(?,?,?,?,1)")
+            .bind(&user_id)
+            .bind("carol@example.com")
+            .bind("carol")
+            .bind(pw_hash)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let session_token = "sess-token-1";
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,?,?,?,1)")
+            .bind(hash_token(session_token))
+            .bind(&user_id)
+            .bind(iso_after(3600))
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO password_resets(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
+        )
+        .bind("reset-1")
+        .bind(&user_id)
+        .bind(now_iso())
+        .bind(iso_after(3600))
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,?,'login','c',0,?)")
+            .bind("chal-1")
+            .bind(&user_id)
+            .bind(iso_after(300))
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={session_token}").parse().unwrap(),
+        );
+        let resp = change_password(
+            State(state.clone()),
+            headers,
+            Json(json!({
+                "old_auth_hash": old_auth,
+                "auth_hash": new_auth,
+                "kdf_salt": STANDARD.encode([3u8; 16]),
+                "kdf_iterations": 600_000,
+                "enc_private": "{}"
+            })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resets: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM password_resets WHERE user_id=?")
+                .bind(&user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        let challenges: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM twofa_challenges WHERE user_id=?")
+                .bind(&user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(resets, 0);
+        assert_eq!(challenges, 0);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
 }

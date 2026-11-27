@@ -268,7 +268,6 @@ async fn verified_recovery(state: &AppState, body: &Value) -> Option<(SqliteRow,
         Some((user, code)) => {
             let hash: Option<String> = code.try_get("auth_hash").ok();
             if !verify_hash(hash.as_deref(), auth_hash) {
-                let _ = auth::verify_password(None, auth_hash);
                 None
             } else {
                 Some((user, code))
@@ -363,6 +362,16 @@ async fn recovery_reset(
         .await
         .is_err()
         || sqlx::query("DELETE FROM user_sessions WHERE user_id=?")
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        || sqlx::query("DELETE FROM password_resets WHERE user_id=?")
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        || sqlx::query("DELETE FROM twofa_challenges WHERE user_id=?")
             .bind(&user_id)
             .execute(&mut *tx)
             .await
@@ -958,7 +967,10 @@ async fn login_second_factor(
             .await
         {
             Ok(v) if v.rows_affected() == 1 => {}
-            _ => return invalid_second_factor(&state, &pending).await,
+            _ => {
+                drop(tx);
+                return invalid_second_factor(&state, &pending).await;
+            }
         }
     }
     if let Some(slot) = recovery_slot {
@@ -972,7 +984,10 @@ async fn login_second_factor(
         .await
         {
             Ok(v) if v.rows_affected() == 1 => {}
-            _ => return invalid_second_factor(&state, &pending).await,
+            _ => {
+                drop(tx);
+                return invalid_second_factor(&state, &pending).await;
+            }
         }
     }
     if let Some((id, serialized, count)) = passkey_update
@@ -990,13 +1005,22 @@ async fn login_second_factor(
     {
         return db_error();
     }
-    if sqlx::query("DELETE FROM twofa_challenges WHERE token_hash=?")
+    let deleted = sqlx::query("DELETE FROM twofa_challenges WHERE token_hash=?")
         .bind(auth::hash_token(token))
         .execute(&mut *tx)
-        .await
-        .is_err()
-        || tx.commit().await.is_err()
-    {
+        .await;
+    match deleted {
+        Ok(r) if r.rows_affected() == 1 => {}
+        Ok(_) => {
+            let _ = tx.rollback().await;
+            return error(
+                "The login expired, please log in again",
+                StatusCode::UNAUTHORIZED,
+            );
+        }
+        Err(_) => return db_error(),
+    }
+    if tx.commit().await.is_err() {
         return db_error();
     }
     auth::login_response(&state, &user_id, &headers).await
@@ -1004,23 +1028,30 @@ async fn login_second_factor(
 
 async fn invalid_second_factor(state: &AppState, pending: &SqliteRow) -> axum::response::Response {
     let hash: String = pending.try_get("token_hash").unwrap_or_default();
-    let attempts = pending.try_get::<i64, _>("attempts").unwrap_or(0) + 1;
-    if attempts >= MAX_2FA_ATTEMPTS {
-        let _ = sqlx::query("DELETE FROM twofa_challenges WHERE token_hash=?")
-            .bind(hash)
-            .execute(&state.db)
-            .await;
-        return error(
-            "Too many wrong attempts, please log in again",
+    let updated = sqlx::query_scalar::<_, i64>(
+        "UPDATE twofa_challenges SET attempts = attempts + 1 WHERE token_hash=? RETURNING attempts",
+    )
+    .bind(&hash)
+    .fetch_optional(&state.db)
+    .await;
+    match updated {
+        Ok(Some(attempts)) if attempts >= MAX_2FA_ATTEMPTS => {
+            let _ = sqlx::query("DELETE FROM twofa_challenges WHERE token_hash=?")
+                .bind(&hash)
+                .execute(&state.db)
+                .await;
+            error(
+                "Too many wrong attempts, please log in again",
+                StatusCode::UNAUTHORIZED,
+            )
+        }
+        Ok(Some(_)) => error("The code or passkey is wrong", StatusCode::BAD_REQUEST),
+        Ok(None) => error(
+            "The login expired, please log in again",
             StatusCode::UNAUTHORIZED,
-        );
+        ),
+        Err(_) => db_error(),
     }
-    let _ = sqlx::query("UPDATE twofa_challenges SET attempts=? WHERE token_hash=?")
-        .bind(attempts)
-        .bind(hash)
-        .execute(&state.db)
-        .await;
-    error("The code or passkey is wrong", StatusCode::BAD_REQUEST)
 }
 
 async fn load_passkeys(pool: &SqlitePool, user: &str) -> Result<Vec<Passkey>, sqlx::Error> {
@@ -1093,54 +1124,155 @@ async fn find_challenge(
 }
 
 fn webauthn_for(headers: &HeaderMap) -> ApiResult<Webauthn> {
-    let public = std::env::var("PUBLIC_URL")
-        .ok()
+    webauthn_for_with(
+        headers,
+        std::env::var("PUBLIC_URL").ok().as_deref(),
+        std::env::var("WEBAUTHN_RP_ID").ok().as_deref(),
+        std::env::var("SERES_ALLOWED_HOSTS").ok().as_deref(),
+    )
+}
+
+fn webauthn_origins_and_rp(
+    headers: &HeaderMap,
+    public_url: Option<&str>,
+    rp_id_env: Option<&str>,
+    allowed_hosts_env: Option<&str>,
+) -> ApiResult<(String, Vec<url::Url>)> {
+    let has_public = public_url.is_some_and(|v| !v.trim().is_empty());
+    let public = if has_public {
+        let raw = public_url.unwrap_or_default().trim();
+        let mut parsed = url::Url::parse(raw)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
+            .ok_or_else(|| {
+                ApiError::new(
+                    "WebAuthn configuration is invalid",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            })?;
+        parsed.set_path("/");
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        Some(parsed)
+    } else {
+        None
+    };
+
+    let has_allowed = allowed_hosts_env.is_some_and(|v| !v.trim().is_empty());
+    let extra_hosts: Vec<String> = allowed_hosts_env
+        .map(|v| {
+            v.split(',')
+                .filter_map(super::normalize_host_port)
+                .collect()
+        })
+        .unwrap_or_default();
+    if has_allowed && extra_hosts.is_empty() {
+        return Err(ApiError::new(
+            "WebAuthn configuration is invalid",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+    }
+
+    let mut origins = Vec::new();
+    if has_public || has_allowed {
+        if let Some(url) = public.as_ref() {
+            origins.push(url.clone());
+        }
+        for host in extra_hosts {
+            let scheme = if super::is_loopback_host(&host) {
+                if public.as_ref().is_some_and(|u| u.scheme() == "http")
+                    || (public.is_none() && !super::is_https_with(headers, public_url))
+                {
+                    "http"
+                } else {
+                    "https"
+                }
+            } else {
+                "https"
+            };
+            if let Ok(mut origin) = url::Url::parse(&format!("{scheme}://{host}")) {
+                origin.set_path("/");
+                origin.set_query(None);
+                origin.set_fragment(None);
+                if !origins.contains(&origin) {
+                    origins.push(origin);
+                }
+            }
+        }
+    } else {
+        let host = super::first_header_host(headers, "x-forwarded-host")
+            .or_else(|| super::first_header_host(headers, "host"));
+        let host = match host {
+            Some(h) if super::is_loopback_host(&h) => h,
+            Some(_) => {
+                return Err(ApiError::new(
+                    "WebAuthn origin is not configured",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ));
+            }
+            None => {
+                if headers.contains_key("x-forwarded-host")
+                    || headers.contains_key(axum::http::header::HOST)
+                {
+                    return Err(ApiError::new(
+                        "WebAuthn origin is not configured",
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    ));
+                }
+                "localhost".to_owned()
+            }
+        };
+        let scheme = if super::is_https_with(headers, public_url) {
+            "https"
+        } else {
+            "http"
+        };
+        let mut origin = url::Url::parse(&format!("{scheme}://{host}")).map_err(|_| {
+            ApiError::new(
+                "WebAuthn configuration is invalid",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+        origin.set_path("/");
+        origin.set_query(None);
+        origin.set_fragment(None);
+        origins.push(origin);
+    }
+
+    if origins.is_empty() {
+        return Err(ApiError::new(
+            "WebAuthn origin is not configured",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+    }
+
+    let rp_id = rp_id_env
+        .map(str::trim)
         .filter(|v| !v.is_empty())
-        .and_then(|v| url::Url::parse(&v).ok());
-    let host = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get(axum::http::header::HOST))
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost");
-    let host_url = url::Url::parse(&format!("http://{host}")).ok();
-    let rp_id = std::env::var("WEBAUTHN_RP_ID")
-        .ok()
-        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
         .or_else(|| {
             public
                 .as_ref()
                 .and_then(|v| v.host_str().map(str::to_owned))
         })
         .or_else(|| {
-            host_url
-                .as_ref()
+            origins
+                .first()
                 .and_then(|v| v.host_str().map(str::to_owned))
         })
         .unwrap_or_else(|| "localhost".into());
-    let mut origins = Vec::new();
-    if let Some(url) = public.as_ref() {
-        let mut origin = url.clone();
-        origin.set_path("/");
-        origin.set_query(None);
-        origin.set_fragment(None);
-        origins.push(origin);
-    }
-    for host in [
-        headers.get(axum::http::header::HOST),
-        headers.get("x-forwarded-host"),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(|v| v.to_str().ok())
-    {
-        for scheme in ["https", "http"] {
-            if let Ok(origin) = url::Url::parse(&format!("{scheme}://{host}"))
-                && !origins.contains(&origin)
-            {
-                origins.push(origin)
-            }
-        }
-    }
+
+    Ok((rp_id, origins))
+}
+
+fn webauthn_for_with(
+    headers: &HeaderMap,
+    public_url: Option<&str>,
+    rp_id_env: Option<&str>,
+    allowed_hosts_env: Option<&str>,
+) -> ApiResult<Webauthn> {
+    let (rp_id, origins) =
+        webauthn_origins_and_rp(headers, public_url, rp_id_env, allowed_hosts_env)?;
     let Some(origin) = origins.first() else {
         return Err(ApiError::new(
             "WebAuthn origin is not configured",
@@ -1162,4 +1294,270 @@ fn webauthn_for(headers: &HeaderMap) -> ApiResult<Webauthn> {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD;
+
+    async fn test_state() -> (AppState, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("seres-auth-extra-test-{}.db", Uuid::new_v4()));
+        let pool = crate::db::connect(&path).await.unwrap();
+        (AppState::new(pool), path)
+    }
+
+    fn current_totp_code(secret: &str) -> String {
+        let secret = BASE32_NOPAD.decode(secret.as_bytes()).unwrap();
+        let step = chrono::Utc::now().timestamp() / 30;
+        let mut mac = Hmac::<Sha1>::new_from_slice(&secret).unwrap();
+        mac.update(&(step as u64).to_be_bytes());
+        let digest = mac.finalize().into_bytes();
+        let offset = (digest[19] & 15) as usize;
+        let value = ((u32::from(digest[offset] & 127) << 24)
+            | (u32::from(digest[offset + 1]) << 16)
+            | (u32::from(digest[offset + 2]) << 8)
+            | u32::from(digest[offset + 3]))
+            % 1_000_000;
+        format!("{value:06}")
+    }
+
+    #[test]
+    fn webauthn_origins_ignore_untrusted_headers_and_never_append_http() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "evil.example".parse().unwrap());
+        headers.insert("x-forwarded-host", "attacker.example".parse().unwrap());
+
+        let (rp, origins) =
+            webauthn_origins_and_rp(&headers, Some("https://chat.example"), None, None).unwrap();
+        assert_eq!(rp, "chat.example");
+        assert_eq!(
+            origins.iter().map(|u| u.as_str()).collect::<Vec<_>>(),
+            vec!["https://chat.example/"]
+        );
+        assert!(webauthn_for_with(&headers, Some("https://chat.example"), None, None).is_ok());
+
+        let (_, origins) = webauthn_origins_and_rp(
+            &headers,
+            Some("https://chat.example"),
+            None,
+            Some("alt.example:8443"),
+        )
+        .unwrap();
+        assert_eq!(
+            origins.iter().map(|u| u.as_str()).collect::<Vec<_>>(),
+            vec!["https://chat.example/", "https://alt.example:8443/"]
+        );
+
+        assert!(webauthn_origins_and_rp(&headers, None, None, None).is_err());
+
+        let mut local_headers = HeaderMap::new();
+        local_headers.insert("host", "localhost:2222".parse().unwrap());
+        let (rp, origins) = webauthn_origins_and_rp(&local_headers, None, None, None).unwrap();
+        assert_eq!(rp, "localhost");
+        assert_eq!(
+            origins.iter().map(|u| u.as_str()).collect::<Vec<_>>(),
+            vec!["http://localhost:2222/"]
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_second_factor_increments_atomically_and_locks_out_at_limit() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version) VALUES(?,?,?,?,1)")
+            .bind(&user_id)
+            .bind("dave@example.com")
+            .bind("dave")
+            .bind("hash")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let token = "twofa-token-1";
+        let token_hash = auth::hash_token(token);
+        sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,?,'login','c',0,?)")
+            .bind(&token_hash)
+            .bind(&user_id)
+            .bind("2099-01-01T00:00:00Z")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let row = find_challenge(&state.db, token, "login")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..6 {
+            let st = state.clone();
+            let th = token_hash.clone();
+            set.spawn(async move {
+                let row = sqlx::query("SELECT * FROM twofa_challenges WHERE token_hash=?")
+                    .bind(&th)
+                    .fetch_optional(&st.db)
+                    .await
+                    .unwrap();
+                match row {
+                    Some(r) => invalid_second_factor(&st, &r).await.status(),
+                    None => StatusCode::UNAUTHORIZED,
+                }
+            });
+        }
+        let mut statuses = Vec::new();
+        while let Some(res) = set.join_next().await {
+            statuses.push(res.unwrap());
+        }
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|s| **s == StatusCode::BAD_REQUEST)
+                .count(),
+            4
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|s| **s == StatusCode::UNAUTHORIZED)
+                .count(),
+            2
+        );
+        assert!(row.try_get::<String, _>("token_hash").is_ok());
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM twofa_challenges WHERE token_hash=?")
+                .bind(&token_hash)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn login_second_factor_consumes_challenge_once_and_recovery_reset_clears_tokens() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        let secret = "JBSWY3DPEHPK3PXP";
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version,totp_secret,totp_last_step) VALUES(?,?,?,?,1,?,0)")
+            .bind(&user_id)
+            .bind("erin@example.com")
+            .bind("erin")
+            .bind("hash")
+            .bind(secret)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let token = "twofa-token-single";
+        sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,?,'login','c',0,?)")
+            .bind(auth::hash_token(token))
+            .bind(&user_id)
+            .bind("2099-01-01T00:00:00Z")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let code = current_totp_code(secret);
+        let res1 = login_second_factor(
+            State(state.clone()),
+            HeaderMap::new(),
+            ConnectInfo(peer),
+            Json(json!({"token": token, "method": "totp", "code": code})),
+        )
+        .await;
+        assert_eq!(res1.status(), StatusCode::OK);
+        let res2 = login_second_factor(
+            State(state.clone()),
+            HeaderMap::new(),
+            ConnectInfo(peer),
+            Json(json!({"token": token, "method": "totp", "code": code})),
+        )
+        .await;
+        assert_eq!(res2.status(), StatusCode::UNAUTHORIZED);
+
+        // Recovery reset clears pending password_resets and twofa_challenges.
+        let code_auth = STANDARD.encode([4u8; 32]);
+        let code_hash = auth::hash_password(&code_auth).unwrap();
+        sqlx::query("INSERT INTO recovery_codes(user_id,slot,kdf_salt,auth_hash,enc_private,created_at) VALUES(?,?,?,?,?,?)")
+            .bind(&user_id)
+            .bind("ABCD")
+            .bind(STANDARD.encode([5u8; 16]))
+            .bind(code_hash)
+            .bind("{}")
+            .bind(now())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO password_resets(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
+        )
+        .bind("pending-reset")
+        .bind(&user_id)
+        .bind(now())
+        .bind("2099-01-01T00:00:00Z")
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,?,'login','c',0,?)")
+            .bind("pending-2fa")
+            .bind(&user_id)
+            .bind("2099-01-01T00:00:00Z")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let bad_reset = recovery_reset(
+            State(state.clone()),
+            HeaderMap::new(),
+            ConnectInfo(peer),
+            Json(json!({
+                "nameomail": "erin",
+                "slot": "ABCD",
+                "auth_hash": STANDARD.encode([9u8; 32]),
+                "new_auth_hash": STANDARD.encode([6u8; 32]),
+                "kdf_salt": STANDARD.encode([7u8; 16]),
+                "kdf_iterations": 600_000,
+                "enc_private": "{}"
+            })),
+        )
+        .await;
+        assert_eq!(bad_reset.status(), StatusCode::BAD_REQUEST);
+
+        let good_reset = recovery_reset(
+            State(state.clone()),
+            HeaderMap::new(),
+            ConnectInfo(peer),
+            Json(json!({
+                "nameomail": "erin",
+                "slot": "ABCD",
+                "auth_hash": code_auth,
+                "new_auth_hash": STANDARD.encode([6u8; 32]),
+                "kdf_salt": STANDARD.encode([7u8; 16]),
+                "kdf_iterations": 600_000,
+                "enc_private": "{}"
+            })),
+        )
+        .await;
+        assert_eq!(good_reset.status(), StatusCode::OK);
+        let resets: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM password_resets WHERE user_id=?")
+                .bind(&user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        let challenges: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM twofa_challenges WHERE user_id=?")
+                .bind(&user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(resets, 0);
+        assert_eq!(challenges, 0);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
 }
