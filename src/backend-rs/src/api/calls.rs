@@ -263,7 +263,7 @@ async fn my_calls(
     };
     if expire_calls(&mut tx).await.is_err()||sqlx::query("UPDATE call_participants SET seen_at=? WHERE user_id=? AND state='joined' AND call_id IN (SELECT id FROM calls WHERE ended_at IS NULL)").bind(now()).bind(&me.id).execute(&mut *tx).await.is_err()||tx.commit().await.is_err(){return err_db()};
     stopped_ringing(&state, &headers, &me);
-    let rows=sqlx::query("SELECT c.id FROM calls c JOIN call_participants p ON p.call_id=c.id WHERE p.user_id=? AND p.state IN ('ringing','joined') AND c.ended_at IS NULL ORDER BY c.started_at").bind(&me.id).fetch_all(&state.db).await;
+    let rows=sqlx::query("SELECT c.id FROM calls c JOIN call_participants p ON p.call_id=c.id JOIN chat_members m ON m.chat_id=c.chat_id AND m.user_id=p.user_id WHERE p.user_id=? AND p.state IN ('ringing','joined') AND c.ended_at IS NULL ORDER BY c.started_at").bind(&me.id).fetch_all(&state.db).await;
     let rows = match rows {
         Ok(v) => v,
         Err(_) => return err_db(),
@@ -605,6 +605,17 @@ async fn require_call(
         .await
         .map_err(|_| ())?;
     let Some(call) = call else { return Err(()) };
+    let chat_id: String = call.try_get("chat_id").map_err(|_| ())?;
+    let is_member = sqlx::query("SELECT 1 FROM chat_members WHERE chat_id=? AND user_id=?")
+        .bind(&chat_id)
+        .bind(user)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ())?
+        .is_some();
+    if !is_member {
+        return Err(());
+    }
     let mine = sqlx::query("SELECT state FROM call_participants WHERE call_id=? AND user_id=?")
         .bind(id)
         .bind(user)
@@ -619,6 +630,27 @@ async fn require_call(
     } else {
         Err(())
     }
+}
+pub(crate) async fn remove_user_from_chat_calls(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    chat_id: &str,
+    user_id: &str,
+) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT p.call_id FROM call_participants p
+         JOIN calls c ON c.id=p.call_id
+         WHERE c.chat_id=? AND c.ended_at IS NULL AND p.user_id=? AND p.state IN ('ringing','joined')",
+    )
+    .bind(chat_id)
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in rows {
+        let call_id: String = row.try_get("call_id")?;
+        set_state(tx, &call_id, user_id, "left").await?;
+        finish_if_over(tx, &call_id).await?;
+    }
+    Ok(())
 }
 async fn set_state(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -857,4 +889,118 @@ fn valid_b64(v: &str, max: usize) -> bool {
         && unpadded
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"+/_-".contains(&b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        async fn new() -> (Self, SqlitePool) {
+            let dir = std::env::temp_dir().join(format!("seres-calls-{}", uuid::Uuid::new_v4()));
+            let pool = crate::db::connect(&dir.join("users.db")).await.unwrap();
+            (Self(dir), pool)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn require_call_checks_chat_membership_and_remove_user_from_chat_calls_cleans_up() {
+        let (_fix, pool) = Fixture::new().await;
+        for id in ["alice", "bob", "carol"] {
+            sqlx::query("INSERT INTO users(id,username) VALUES(?,?)")
+                .bind(id)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO apns_tokens(token,user_id,session_hash,kind,environment,created_at) VALUES('voip-c','carol','sc','voip','sandbox','now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chats(id,type,name,owner_id,created_at,last_activity) VALUES('g1','group','Team','alice','now','now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for id in ["alice", "bob", "carol"] {
+            sqlx::query("INSERT INTO chat_members(chat_id,user_id,joined_at) VALUES('g1',?,'now')")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let mut tx = pool.begin().await.unwrap();
+        let call_id = start_call(&mut tx, "g1", "alice").await.unwrap();
+        set_state(&mut tx, &call_id, "bob", "joined").await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert!(
+            require_call(&pool, &call_id, "carol", &["ringing"])
+                .await
+                .is_ok()
+        );
+
+        // Removing carol from chat_members immediately blocks require_call even before participant update
+        sqlx::query("DELETE FROM chat_members WHERE chat_id='g1' AND user_id='carol'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            require_call(&pool, &call_id, "carol", &["ringing"])
+                .await
+                .is_err()
+        );
+
+        // remove_user_from_chat_calls marks carol 'left' and notes apns_call_ends, keeping call active for alice+bob
+        let mut tx = pool.begin().await.unwrap();
+        remove_user_from_chat_calls(&mut tx, "g1", "carol")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let carol_state: String = sqlx::query_scalar(
+            "SELECT state FROM call_participants WHERE call_id=? AND user_id='carol'",
+        )
+        .bind(&call_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(carol_state, "left");
+        let ended: Option<String> = sqlx::query_scalar("SELECT ended_at FROM calls WHERE id=?")
+            .bind(&call_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(ended.is_none());
+        let apns_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM apns_call_ends WHERE call_id=? AND user_id='carol'",
+        )
+        .bind(&call_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(apns_count, 1);
+
+        // Removing bob leaves only alice joined -> finish_if_over ends the call
+        sqlx::query("DELETE FROM chat_members WHERE chat_id='g1' AND user_id='bob'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        remove_user_from_chat_calls(&mut tx, "g1", "bob")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let ended: Option<String> = sqlx::query_scalar("SELECT ended_at FROM calls WHERE id=?")
+            .bind(&call_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(ended.is_some());
+    }
 }

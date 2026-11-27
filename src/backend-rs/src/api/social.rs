@@ -457,6 +457,12 @@ async fn user_profile(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
+    if state.rate_limited(format!("profile:{me}"), 60, 60) {
+        return error(
+            "Too many requests, please wait",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     let other = sqlx::query("SELECT * FROM users WHERE username=? COLLATE NOCASE")
         .bind(username.trim())
         .fetch_optional(&state.db)
@@ -495,7 +501,20 @@ async fn user_profile(
         &oid,
     )
     .await;
-    let can_see = friend || exists(&state.db, "SELECT 1 FROM chat_members a JOIN chat_members b ON a.chat_id=b.chat_id WHERE a.user_id=? AND b.user_id=? LIMIT 1", &me, &oid).await;
+    let blocked_either = !is_me
+        && match is_blocked(&state.db, &me, &oid).await {
+            Ok(v) => v,
+            Err(_) => return db_error(),
+        };
+    let can_see = !blocked_either
+        && (friend
+            || exists(
+                &state.db,
+                "SELECT 1 FROM chat_members a JOIN chat_members b ON a.chat_id=b.chat_id WHERE a.user_id=? AND b.user_id=? LIMIT 1",
+                &me,
+                &oid,
+            )
+            .await);
     let presence = if !is_me && can_see {
         let visibility=sqlx::query("SELECT v.show_last_seen viewer_show,o.show_last_seen other_show,o.last_seen FROM users v JOIN users o ON o.id=? WHERE v.id=?").bind(&oid).bind(&me).fetch_optional(&state.db).await;
         match visibility {
@@ -626,3 +645,127 @@ fn db_error() -> axum::response::Response {
     error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR)
 }
 use axum::response::IntoResponse;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::to_bytes,
+        http::{HeaderValue, header},
+    };
+
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        async fn new() -> (Self, AppState) {
+            let dir = std::env::temp_dir().join(format!("seres-social-{}", uuid::Uuid::new_v4()));
+            let pool = crate::db::connect(&dir.join("users.db")).await.unwrap();
+            (Self(dir), AppState::new(pool))
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn auth_headers(pool: &SqlitePool, user_id: &str) -> HeaderMap {
+        let token = format!("tok-{user_id}");
+        let hash = crate::api::auth::hash_token(&token);
+        sqlx::query(
+            "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,?,'2999-01-01T00:00:00Z','now',1)",
+        )
+        .bind(hash)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("sessioncookie={token}")).unwrap(),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn user_profile_hides_status_and_presence_when_blocked_and_rate_limits() {
+        let (_fix, state) = Fixture::new().await;
+        let seen = now();
+        for id in ["alice", "bob"] {
+            sqlx::query(
+                "INSERT INTO users(id,username,status_text,last_seen,show_last_seen) VALUES(?,?,'hello',?,1)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(&seen)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO chats(id,type,created_at,last_activity) VALUES('g1','group','now','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO chat_members(chat_id,user_id,joined_at) VALUES('g1',?,'now')")
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let bob_headers = auth_headers(&state.db, "bob").await;
+
+        let resp = user_profile(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path("bob".into()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["user"]["status"], "hello");
+        assert!(body["presence"].is_object());
+
+        // Bob blocks Alice -> Alice sees neither status nor presence
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('bob','alice','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let resp = user_profile(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path("bob".into()),
+        )
+        .await;
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert!(body["user"]["status"].is_null());
+        assert!(body["presence"].is_null());
+
+        // Bob also sees neither Alice's status nor presence
+        let resp = user_profile(State(state.clone()), bob_headers, Path("alice".into())).await;
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert!(body["user"]["status"].is_null());
+        assert!(body["presence"].is_null());
+
+        // Remaining requests up to 60 succeed, 61st is rate limited
+        for _ in 0..58 {
+            let resp = user_profile(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("bob".into()),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let limited = user_profile(State(state.clone()), alice_headers, Path("bob".into())).await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+}
