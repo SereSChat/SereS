@@ -194,6 +194,7 @@ fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_default()
@@ -214,18 +215,14 @@ struct Delivery {
     ttl: u32,
 }
 
-/// Sends `payload` to every device of `user_ids` that is still logged in.
-async fn send(pool: &SqlitePool, user_ids: &[String], payload: &Value, delivery: &Delivery) {
-    if user_ids.is_empty() {
-        return;
-    }
-    let Some(key) = vapid(pool).await else {
-        return;
-    };
+async fn eligible_subscriptions(
+    pool: &SqlitePool,
+    user_ids: &[String],
+) -> Result<Vec<sqlx::sqlite::SqliteRow>, sqlx::Error> {
     let placeholders = vec!["?"; user_ids.len()].join(",");
     let sql = format!(
         "SELECT p.endpoint,p.p256dh,p.auth FROM push_subscriptions p
-         JOIN user_sessions s ON s.token_hash=p.session_hash AND s.expires_at>?
+         JOIN user_sessions s ON s.token_hash=p.session_hash AND s.expires_at>? AND s.approved=1
          WHERE (s.last_seen IS NULL OR s.last_seen<?) AND p.user_id IN ({placeholders})"
     );
     // Devices with SereS open right now show notifications themselves.
@@ -238,7 +235,18 @@ async fn send(pool: &SqlitePool, user_ids: &[String], payload: &Value, delivery:
     for id in user_ids {
         query = query.bind(id);
     }
-    let Ok(rows) = query.fetch_all(pool).await else {
+    query.fetch_all(pool).await
+}
+
+/// Sends `payload` to every device of `user_ids` that is still logged in.
+async fn send(pool: &SqlitePool, user_ids: &[String], payload: &Value, delivery: &Delivery) {
+    if user_ids.is_empty() {
+        return;
+    }
+    let Some(key) = vapid(pool).await else {
+        return;
+    };
+    let Ok(rows) = eligible_subscriptions(pool, user_ids).await else {
         return;
     };
     deliver(pool, &key, rows, payload, delivery).await;
@@ -457,6 +465,42 @@ mod tests {
         ));
         assert!(!endpoint_allowed("https://127.0.0.1/x"));
         assert!(!endpoint_allowed("not a url"));
+    }
+
+    #[tokio::test]
+    async fn send_skips_unapproved_sessions() {
+        let dir = std::env::temp_dir().join(format!("seres-push-{}", uuid::Uuid::new_v4()));
+        let pool = crate::db::connect(&dir.join("users.db")).await.unwrap();
+        sqlx::query("INSERT INTO users(id,username) VALUES('u1','alice')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES
+             ('s-ok','u1','2999-01-01T00:00:00Z','now',1),
+             ('s-wait','u1','2999-01-01T00:00:00Z','now',0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO push_subscriptions(endpoint,user_id,session_hash,p256dh,auth,created_at) VALUES
+             ('https://fcm.googleapis.com/ok','u1','s-ok','k','a','now'),
+             ('https://fcm.googleapis.com/wait','u1','s-wait','k','a','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = eligible_subscriptions(&pool, &["u1".into()]).await.unwrap();
+        let endpoints: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get::<String, _>("endpoint").unwrap())
+            .collect();
+        assert_eq!(endpoints, vec!["https://fcm.googleapis.com/ok"]);
+        let _ = client();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

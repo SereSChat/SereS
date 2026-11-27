@@ -207,13 +207,19 @@ fn is_public(ip: IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_public(IpAddr::V4(v4));
             }
-            let first = v6.segments()[0];
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (first & 0xfe00) == 0xfc00 // unique local
-                || (first & 0xffc0) == 0xfe80 // link local
-                || first == 0x2001 && v6.segments()[1] == 0x0db8) // documentation
+            let seg = v6.segments();
+            // Allow only global unicast (2000::/3).
+            if (seg[0] & 0xe000) != 0x2000 {
+                return false;
+            }
+            // Exclude documentation (2001:db8::/32), Teredo (2001::/32), and 6to4 (2002::/16).
+            if seg[0] == 0x2001 && (seg[1] == 0x0db8 || seg[1] == 0x0000) {
+                return false;
+            }
+            if seg[0] == 0x2002 {
+                return false;
+            }
+            true
         }
     }
 }
@@ -361,15 +367,32 @@ mod tests {
             "192.168.1.1",
             "169.254.169.254",
             "100.64.0.1",
+            "::",
             "::1",
+            "::7f00:1",
+            "64:ff9b::127.0.0.1",
+            "64:ff9b:1::1",
+            "100::1",
+            "2001::1",
+            "2001:db8::1",
+            "2002:7f00:1::1",
+            "fc00::1",
             "fd00::1",
             "fe80::1",
+            "fec0::1",
+            "ff02::1",
             "::ffff:127.0.0.1",
             "0.0.0.0",
         ] {
             assert!(!is_public(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["1.1.1.1", "93.184.216.34", "2606:4700::1111"] {
+        for ip in [
+            "1.1.1.1",
+            "93.184.216.34",
+            "2606:4700::1111",
+            "2001:4860:4860::8888",
+            "2a00:1450:4001:828::200e",
+        ] {
             assert!(is_public(ip.parse().unwrap()), "{ip}");
         }
     }

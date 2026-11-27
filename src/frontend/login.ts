@@ -372,12 +372,18 @@
         el("link-warning").textContent = t("link.expired");
         return;
       }
-      const status = await fetch("/api/link/status?token=" + encodeURIComponent(session.token), { credentials: "include" }).catch(() => null);
+      const status = await fetch("/api/link/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ token: session.token }),
+      }).catch(() => null);
       if (!status) continue;
       if (status.status === 410) {
         el("link-warning").textContent = t("link.expired");
         return;
       }
+      if (!status.ok) continue;
       const data = await status.json().catch(() => null);
       if (data?.state === "denied") {
         el("link-warning").textContent = t("link.denied");
