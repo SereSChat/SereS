@@ -506,7 +506,7 @@ window.SeresLang.en = {
   "link.confirmTitle": "Link a new device",
   "link.confirmText": "{device} wants to be linked to your account. It will be able to read your chats.",
   "link.checkCompare": "Check code: {code} – only allow it if the new device shows the same code.",
-  "link.needPassword": "Enter your password once to link devices from this device.",
+  "link.needPassword": "Enter your password to link this device. It isn't stored on this device.",
   "link.done": "The device is linked.",
   "call.reconnecting": "reconnecting…",
   "call.routeRelay": "via relay",
@@ -599,4 +599,6 @@ window.SeresLang.en = {
   "location.unsupported": "This browser can't determine the location.",
   "location.denied": "Location access is blocked. Allow it for this site in the browser settings.",
   "location.failed": "The location couldn't be determined. Try again outside or with Wi-Fi on.",
+  "link.keyMismatch": "The device in this link doesn't match its QR code. It was not linked; start again on the new device.",
+  "msg.untrustedKey": "⚠️ Sent with a new key of this person. Compare and accept the new security code in the chat info to read it.",
 };

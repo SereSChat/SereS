@@ -65,8 +65,10 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil(
     (async () => {
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      // Only the chat page (/ or /index.html) understands "open-chat".
       for (const client of windows) {
-        if (new URL(client.url).origin !== self.location.origin) continue;
+        const page = new URL(client.url);
+        if (page.origin !== self.location.origin || !["/", "/index.html"].includes(page.pathname)) continue;
         await client.focus();
         if (chat) client.postMessage({ type: "open-chat", chat });
         return;

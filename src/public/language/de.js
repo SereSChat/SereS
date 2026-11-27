@@ -506,7 +506,7 @@ window.SeresLang.de = {
   "link.confirmTitle": "Neues Gerät koppeln",
   "link.confirmText": "{device} möchte mit deinem Konto gekoppelt werden. Es kann danach deine Chats lesen.",
   "link.checkCompare": "Prüfcode: {code} – erlaube es nur, wenn das neue Gerät denselben Code zeigt.",
-  "link.needPassword": "Gib einmal dein Passwort ein, um von diesem Gerät aus Geräte zu koppeln.",
+  "link.needPassword": "Gib dein Passwort ein, um das Gerät zu koppeln. Es wird auf diesem Gerät nicht gespeichert.",
   "link.done": "Das Gerät ist gekoppelt.",
   "call.reconnecting": "verbindet neu…",
   "call.routeRelay": "über Relay",
@@ -599,4 +599,6 @@ window.SeresLang.de = {
   "location.unsupported": "Dieser Browser kann den Standort nicht ermitteln.",
   "location.denied": "Der Standortzugriff ist blockiert. Erlaube ihn für diese Seite in den Browsereinstellungen.",
   "location.failed": "Der Standort konnte nicht ermittelt werden. Versuch es draußen oder mit eingeschaltetem WLAN nochmal.",
+  "link.keyMismatch": "Das Gerät in diesem Link passt nicht zu seinem QR-Code. Es wurde nicht gekoppelt; starte auf dem neuen Gerät nochmal.",
+  "msg.untrustedKey": "⚠️ Mit einem neuen Schlüssel dieser Person gesendet. Vergleiche und bestätige den neuen Sicherheitscode in der Chat-Info, um sie zu lesen.",
 };
