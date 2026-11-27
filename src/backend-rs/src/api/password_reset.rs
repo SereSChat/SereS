@@ -43,6 +43,18 @@ async fn request_reset(
         );
     }
 
+    let lang = body
+        .get("lang")
+        .and_then(Value::as_str)
+        .filter(|v| matches!(*v, "en" | "de" | "fr"))
+        .unwrap_or("en");
+    let Some(url) = public_base_url(&headers) else {
+        return error(
+            "Public URL is not configured",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    };
+
     let ip = client_ip(&headers, peer);
     if state.rate_limited(format!("reset-ip:{ip}"), 10, 3600)
         || state.rate_limited(
@@ -104,13 +116,7 @@ async fn request_reset(
                 .filter(|v| !v.is_empty())
                 .or_else(|| user.try_get("username").ok())
                 .unwrap_or_default();
-            let lang = body
-                .get("lang")
-                .and_then(Value::as_str)
-                .filter(|v| matches!(*v, "en" | "de" | "fr"))
-                .unwrap_or("en");
             let (subject, template) = mail_copy(lang);
-            let url = public_base_url(&headers);
             let link = format!("{url}/login.html?reset={token}");
             let content = template
                 .replace("{name}", &name)
@@ -490,21 +496,89 @@ fn mail_copy(language: &str) -> (&'static str, &'static str) {
     }
 }
 
-fn public_base_url(headers: &HeaderMap) -> String {
-    if let Ok(value) = std::env::var("PUBLIC_URL")
-        && !value.trim().is_empty()
-    {
-        return value.trim_end_matches('/').to_owned();
+fn public_base_url(headers: &HeaderMap) -> Option<String> {
+    public_base_url_with(
+        headers,
+        std::env::var("PUBLIC_URL").ok().as_deref(),
+        std::env::var("SERES_ALLOWED_HOSTS").ok().as_deref(),
+    )
+}
+
+fn public_base_url_with(
+    headers: &HeaderMap,
+    public_url: Option<&str>,
+    allowed_hosts_env: Option<&str>,
+) -> Option<String> {
+    if let Some(value) = public_url.map(str::trim).filter(|v| !v.is_empty()) {
+        let parsed = url::Url::parse(value).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return None;
+        }
+        return Some(value.trim_end_matches('/').to_owned());
     }
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .unwrap_or("http");
-    let host = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get("host"))
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost");
-    format!("{}://{}", scheme.trim(), host.trim())
+    let scheme = if super::is_https_with(headers, public_url) {
+        "https"
+    } else {
+        "http"
+    };
+    let candidate = super::first_header_host(headers, "x-forwarded-host")
+        .or_else(|| super::first_header_host(headers, "host"));
+    if let Some(extra) = allowed_hosts_env.map(str::trim).filter(|v| !v.is_empty()) {
+        let allowed: std::collections::HashSet<String> = extra
+            .split(',')
+            .filter_map(super::normalize_host_port)
+            .collect();
+        let host = candidate.filter(|h| allowed.contains(h))?;
+        return Some(format!("{scheme}://{host}"));
+    }
+    match candidate {
+        Some(host) if super::is_loopback_host(&host) => Some(format!("{scheme}://{host}")),
+        Some(_) => None,
+        None => {
+            if headers.contains_key("x-forwarded-host") || headers.contains_key("host") {
+                None
+            } else {
+                Some(format!("{scheme}://localhost"))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_base_url_requires_config_or_loopback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "evil.example".parse().unwrap());
+        assert_eq!(public_base_url_with(&headers, None, None), None);
+        assert_eq!(
+            public_base_url_with(&headers, Some("https://chat.example/"), None),
+            Some("https://chat.example".into())
+        );
+        assert_eq!(
+            public_base_url_with(&headers, None, Some("chat.example")),
+            None
+        );
+
+        let mut allowed_headers = HeaderMap::new();
+        allowed_headers.insert("host", "chat.example".parse().unwrap());
+        allowed_headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert_eq!(
+            public_base_url_with(&allowed_headers, None, Some("chat.example")),
+            Some("https://chat.example".into())
+        );
+
+        let mut local_headers = HeaderMap::new();
+        local_headers.insert("host", "127.0.0.1:2222".parse().unwrap());
+        assert_eq!(
+            public_base_url_with(&local_headers, None, None),
+            Some("http://127.0.0.1:2222".into())
+        );
+    }
 }

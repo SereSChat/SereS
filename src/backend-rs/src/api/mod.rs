@@ -14,6 +14,7 @@ mod social;
 use axum::{
     Json, Router,
     body::Body,
+    extract::ConnectInfo,
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -79,9 +80,39 @@ async fn online() -> Response {
     Json(json!({"message":"im up", "success":true})).into_response()
 }
 
-pub async fn security_middleware(request: Request<Body>, next: Next) -> Response {
-    let method = request.method().clone();
+pub async fn security_middleware(mut request: Request<Body>, next: Next) -> Response {
     let is_api = request.uri().path().starts_with("/api/");
+    let is_https = match prepare_security_request(&mut request) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let mut response = next.run(request).await;
+    apply_security_headers(&mut response, is_api, is_https);
+    response
+}
+
+fn prepare_security_request(request: &mut Request<Body>) -> Result<bool, Response> {
+    let is_loopback = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(peer)| peer.ip().is_loopback());
+    if !is_loopback {
+        for name in [
+            "x-forwarded-host",
+            "x-forwarded-proto",
+            "x-forwarded-for",
+            "cf-connecting-ip",
+            "x-real-ip",
+        ] {
+            request.headers_mut().remove(name);
+        }
+    }
+    let is_https = request
+        .uri()
+        .scheme_str()
+        .is_some_and(|s| s.eq_ignore_ascii_case("https"))
+        || (is_loopback && forwarded_proto_is_https(request.headers()));
+    let method = request.method().clone();
     if !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS)
         && let Some(origin) = request
             .headers()
@@ -89,11 +120,14 @@ pub async fn security_middleware(request: Request<Body>, next: Next) -> Response
             .and_then(|v| v.to_str().ok())
         && !origin_allowed(request.headers(), origin)
     {
-        return error("Cross-site request rejected", StatusCode::FORBIDDEN);
+        return Err(error("Cross-site request rejected", StatusCode::FORBIDDEN));
     }
-    let mut response = next.run(request).await;
+    Ok(is_https)
+}
+
+fn apply_security_headers(response: &mut Response, is_api: bool, is_https: bool) {
     let headers = response.headers_mut();
-    headers.entry("Content-Security-Policy").or_insert(HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; object-src 'self'; frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"));
+    headers.entry("Content-Security-Policy").or_insert(HeaderValue::from_static("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; object-src 'self'; frame-src 'self'; connect-src 'self' https: wss: http://localhost:* http://127.0.0.1:* http://[::1]:*; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"));
     headers
         .entry("X-Content-Type-Options")
         .or_insert(HeaderValue::from_static("nosniff"));
@@ -108,6 +142,11 @@ pub async fn security_middleware(request: Request<Body>, next: Next) -> Response
         .or_insert(HeaderValue::from_static(
             "camera=(self), microphone=(self), display-capture=(self), geolocation=()",
         ));
+    if is_https {
+        headers
+            .entry("Strict-Transport-Security")
+            .or_insert(HeaderValue::from_static("max-age=31536000"));
+    }
     if is_api {
         headers
             .entry(header::CACHE_CONTROL)
@@ -117,41 +156,140 @@ pub async fn security_middleware(request: Request<Body>, next: Next) -> Response
             .entry(header::CACHE_CONTROL)
             .or_insert(HeaderValue::from_static("no-cache"));
     }
-    response
 }
 
-fn allowed_hosts(headers: &HeaderMap) -> HashSet<String> {
+fn forwarded_proto_is_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"))
+}
+
+pub(crate) fn is_https_with(headers: &HeaderMap, public_url: Option<&str>) -> bool {
+    forwarded_proto_is_https(headers)
+        || public_url.is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("https://"))
+}
+
+pub(crate) fn is_https(headers: &HeaderMap) -> bool {
+    is_https_with(headers, std::env::var("PUBLIC_URL").ok().as_deref())
+}
+
+pub(crate) fn normalize_host_port(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().any(char::is_whitespace)
+        || trimmed.contains([',', '@', '/', '\\', '?', '#'])
+    {
+        return None;
+    }
+    let parsed = Url::parse(&format!("http://{trimmed}")).ok()?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.host_str().is_none()
+    {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
+}
+
+pub(crate) fn is_loopback_host(host_port: &str) -> bool {
+    let Ok(parsed) = Url::parse(&format!("http://{host_port}")) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+pub(crate) fn first_header_host(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .and_then(normalize_host_port)
+}
+
+fn allowed_hosts_with(
+    headers: &HeaderMap,
+    public_url: Option<&str>,
+    extra_hosts: Option<&str>,
+) -> HashSet<String> {
+    let has_public = public_url.is_some_and(|v| !v.trim().is_empty());
+    let has_extra = extra_hosts.is_some_and(|v| !v.trim().is_empty());
+    if has_public || has_extra {
+        let mut allowed = HashSet::new();
+        if let Some(url) = public_url
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .and_then(|v| Url::parse(v).ok())
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            && let Some(host) = url.host_str()
+        {
+            let authority = match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            };
+            allowed.insert(authority.to_ascii_lowercase());
+        }
+        if let Some(extra) = extra_hosts {
+            allowed.extend(extra.split(',').filter_map(normalize_host_port));
+        }
+        return allowed;
+    }
     let mut allowed = HashSet::new();
     for name in ["host", "x-forwarded-host"] {
-        if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
-            allowed.insert(value.trim().to_ascii_lowercase());
+        if let Some(host) = first_header_host(headers, name) {
+            allowed.insert(host);
         }
-    }
-    if let Ok(extra) = std::env::var("SERES_ALLOWED_HOSTS") {
-        allowed.extend(
-            extra
-                .split(',')
-                .map(|host| host.trim().to_ascii_lowercase())
-                .filter(|host| !host.is_empty()),
-        );
     }
     allowed
 }
 
-fn origin_allowed(headers: &HeaderMap, origin: &str) -> bool {
+fn origin_allowed_with(
+    headers: &HeaderMap,
+    origin: &str,
+    public_url: Option<&str>,
+    extra_hosts: Option<&str>,
+) -> bool {
     Url::parse(origin)
         .ok()
-        .filter(|url| matches!(url.scheme(), "http" | "https"))
-        .is_some_and(|url| {
-            allowed_hosts(headers).iter().any(|host| {
-                Url::parse(&format!("{}://{host}", url.scheme()))
-                    .ok()
-                    .is_some_and(|allowed| {
-                        allowed.host_str() == url.host_str()
-                            && allowed.port_or_known_default() == url.port_or_known_default()
-                    })
-            })
+        .filter(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none()
+                && matches!(url.path(), "" | "/")
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && url.host_str().is_some()
         })
+        .is_some_and(|url| {
+            allowed_hosts_with(headers, public_url, extra_hosts)
+                .iter()
+                .any(|host| {
+                    Url::parse(&format!("{}://{host}", url.scheme()))
+                        .ok()
+                        .is_some_and(|allowed| {
+                            allowed.host_str() == url.host_str()
+                                && allowed.port_or_known_default() == url.port_or_known_default()
+                        })
+                })
+        })
+}
+
+fn origin_allowed(headers: &HeaderMap, origin: &str) -> bool {
+    origin_allowed_with(
+        headers,
+        origin,
+        std::env::var("PUBLIC_URL").ok().as_deref(),
+        std::env::var("SERES_ALLOWED_HOSTS").ok().as_deref(),
+    )
 }
 
 /// Forwarded addresses are accepted only from the local reverse proxy.
@@ -277,5 +415,152 @@ mod tests {
         assert!(!state.rate_limited(format!("login-ip:{other_ip}"), 1, 60));
         let remote = "198.51.100.10:9000".parse().unwrap();
         assert_eq!(client_ip(&headers, remote), remote.ip());
+    }
+
+    #[test]
+    fn origin_allowed_hardens_configured_and_malformed_hosts() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "evil.com@good.example".parse().unwrap());
+        assert!(!origin_allowed_with(
+            &headers,
+            "https://good.example",
+            None,
+            None
+        ));
+        headers.insert("host", "evil.com".parse().unwrap());
+        headers.insert("x-forwarded-host", "evil.com".parse().unwrap());
+        assert!(origin_allowed_with(
+            &headers,
+            "https://chat.example",
+            Some("https://chat.example"),
+            None,
+        ));
+        assert!(!origin_allowed_with(
+            &headers,
+            "https://evil.com",
+            Some("https://chat.example"),
+            None,
+        ));
+        assert!(origin_allowed_with(
+            &headers,
+            "https://alt.example:8443",
+            Some("https://chat.example"),
+            Some("alt.example:8443"),
+        ));
+        assert!(!origin_allowed_with(
+            &headers,
+            "https://chat.example/path",
+            Some("https://chat.example"),
+            None,
+        ));
+    }
+
+    #[tokio::test]
+    async fn security_middleware_strips_untrusted_headers_and_sets_csp_hsts() {
+        // 1. Non-loopback peer: forwarded headers stripped, no HSTS, spoofed origin rejected.
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/echo")
+            .header("host", "chat.example")
+            .header("origin", "https://evil.example")
+            .header("x-forwarded-host", "evil.example")
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-for", "1.2.3.4")
+            .header("cf-connecting-ip", "1.2.3.4")
+            .header("x-real-ip", "1.2.3.4")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "198.51.100.10:1234".parse::<SocketAddr>().unwrap(),
+        ));
+        let err_resp = prepare_security_request(&mut req).unwrap_err();
+        assert_eq!(err_resp.status(), StatusCode::FORBIDDEN);
+        assert!(
+            err_resp
+                .headers()
+                .get("Strict-Transport-Security")
+                .is_none()
+        );
+
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/echo")
+            .header("host", "chat.example")
+            .header("origin", "https://chat.example")
+            .header("x-forwarded-host", "evil.example")
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-for", "1.2.3.4")
+            .header("cf-connecting-ip", "1.2.3.4")
+            .header("x-real-ip", "1.2.3.4")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "198.51.100.10:1234".parse::<SocketAddr>().unwrap(),
+        ));
+        let is_https = prepare_security_request(&mut req).unwrap();
+        assert!(!is_https);
+        for name in [
+            "x-forwarded-host",
+            "x-forwarded-proto",
+            "x-forwarded-for",
+            "cf-connecting-ip",
+            "x-real-ip",
+        ] {
+            assert!(req.headers().get(name).is_none());
+        }
+        let mut resp = json_ok(json!({}));
+        apply_security_headers(&mut resp, true, is_https);
+        assert!(resp.headers().get("Strict-Transport-Security").is_none());
+
+        // 2. End-to-end Axum middleware over loopback TCP: forwarded headers preserved, CSP + HSTS set.
+        async fn echo_headers(headers: HeaderMap) -> Response {
+            let forwarded = headers.contains_key("x-forwarded-host")
+                && headers.contains_key("x-forwarded-proto");
+            json_ok(json!({ "forwarded": forwarded }))
+        }
+        let app = Router::new()
+            .route("/api/echo", axum::routing::post(echo_headers))
+            .layer(axum::middleware::from_fn(security_middleware));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let res = client
+            .post(format!("http://{addr}/api/echo"))
+            .header("origin", "https://chat.example")
+            .header("x-forwarded-host", "chat.example")
+            .header("x-forwarded-proto", "https")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get("Strict-Transport-Security")
+                .and_then(|v| v.to_str().ok()),
+            Some("max-age=31536000")
+        );
+        let csp = res
+            .headers()
+            .get("Content-Security-Policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval'"));
+        assert!(csp.contains(
+            "connect-src 'self' https: wss: http://localhost:* http://127.0.0.1:* http://[::1]:*"
+        ));
+        let bytes = res.bytes().await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["forwarded"], true);
+        server.abort();
     }
 }
