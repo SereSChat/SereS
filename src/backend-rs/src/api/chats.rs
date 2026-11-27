@@ -18,11 +18,17 @@ const MAX_GROUP_MEMBERS: usize = 50;
 const MAX_CIPHERTEXT_LEN: usize = 64 * 1024;
 const MAX_FILES_PER_MESSAGE: usize = 10;
 const MAX_FILE_BYTES: usize = 16 * 1024 * 1024 + 1024;
+/// JSON requests (messages for 50 members, history shares) stay well below this.
+const MAX_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 pub async fn scheduled_loop(pool: SqlitePool) {
     loop {
         if let Err(error) = deliver_due_messages(&pool).await {
             tracing::error!(%error, "scheduled message delivery failed");
+        }
+        // Disappearing messages are deleted on time even when nobody looks.
+        if let Err(error) = purge_expired(&pool).await {
+            tracing::error!(%error, "purging expired messages failed");
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
@@ -84,13 +90,17 @@ pub fn router() -> Router<AppState> {
             "/api/chats/{chat_id}/scheduled/{message_id}",
             axum::routing::delete(cancel_scheduled),
         )
-        .route("/api/chats/{chat_id}/files", post(upload_file))
+        // Only uploads take 16 MB bodies; everything else is JSON (limit below).
+        .route(
+            "/api/chats/{chat_id}/files",
+            post(upload_file).layer(DefaultBodyLimit::max(MAX_FILE_BYTES + 64 * 1024)),
+        )
         .route("/api/chats/{chat_id}/files/{file_id}", get(download_file))
         .route(
             "/api/chats/{chat_id}/history/{user_id}",
             post(share_history),
         )
-        .layer(DefaultBodyLimit::max(MAX_FILE_BYTES + 64 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
 }
 
 async fn list_chats(State(state): State<AppState>, headers: HeaderMap) -> axum::response::Response {
@@ -216,7 +226,7 @@ async fn create_chat(
     }
     let chat_id = Uuid::new_v4().to_string();
     let now = now();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -291,7 +301,7 @@ async fn open_dm(state: &AppState, me: &str, other: &str) -> axum::response::Res
         .flatten()
     {
         let id: String = row.try_get("id").unwrap_or_default();
-        let mut tx = match state.db.begin().await {
+        let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
             Ok(v) => v,
             Err(_) => return db_error(),
         };
@@ -307,7 +317,7 @@ async fn open_dm(state: &AppState, me: &str, other: &str) -> axum::response::Res
     }
     let id = Uuid::new_v4().to_string();
     let now = now();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -579,7 +589,7 @@ async fn post_message(
             .to_string()
     });
     let now = now();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -655,7 +665,7 @@ async fn delete_message(
     {
         return error("Chat not found", StatusCode::NOT_FOUND);
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -689,6 +699,8 @@ async fn edit_message(
     Path((chat_id, message_id)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> axum::response::Response {
+    // Expired disappearing messages are gone here too, not only in the lists.
+    let _ = purge_expired(&state.db).await;
     let me = match user(&state, &headers).await {
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
@@ -729,7 +741,7 @@ async fn edit_message(
         return error(problem, status);
     };
     let now = now();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -864,10 +876,21 @@ async fn add_member_route(
     if count >= MAX_GROUP_MEMBERS as i64 {
         return error("The group is full", StatusCode::BAD_REQUEST);
     }
-    let mut tx = match state.db.begin().await {
+    let by_owner = chat.try_get::<String, _>("role").ok().as_deref() == Some("owner");
+    match group_admission(&state.db, &chat_id, &other_id, by_owner).await {
+        Ok(Some(reason)) => return error(reason, StatusCode::BAD_REQUEST),
+        Ok(None) => {}
+        Err(_) => return db_error(),
+    }
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
+    let _ = sqlx::query("DELETE FROM group_bans WHERE chat_id=? AND user_id=?")
+        .bind(&chat_id)
+        .bind(&other_id)
+        .execute(&mut *tx)
+        .await;
     if insert_member(&mut tx, &chat_id, &other_id, "member")
         .await
         .is_err()
@@ -921,7 +944,7 @@ async fn remove_member_route(
     {
         return error("Not a member", StatusCode::BAD_REQUEST);
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -931,6 +954,12 @@ async fn remove_member_route(
         .execute(&mut *tx)
         .await
         .is_err()
+        || sqlx::query("INSERT OR IGNORE INTO group_bans(chat_id,user_id) VALUES(?,?)")
+            .bind(&chat_id)
+            .bind(&other.0)
+            .execute(&mut *tx)
+            .await
+            .is_err()
         || system_message(
             &mut tx,
             &chat_id,
@@ -981,7 +1010,7 @@ async fn rename_group(
             StatusCode::BAD_REQUEST,
         );
     };
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1022,7 +1051,7 @@ async fn delete_chat_for(state: &AppState, me: &User, chat_id: &str) -> axum::re
         Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
         Err(_) => return db_error(),
     };
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1163,6 +1192,8 @@ async fn single_message(
     headers: HeaderMap,
     Path((chat_id, message_id)): Path<(String, String)>,
 ) -> axum::response::Response {
+    // Expired disappearing messages are gone here too, not only in the lists.
+    let _ = purge_expired(&state.db).await;
     let me = match user(&state, &headers).await {
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
@@ -1257,10 +1288,19 @@ async fn pin_message(
     Path(chat_id): Path<String>,
     Json(body): Json<Value>,
 ) -> axum::response::Response {
+    // Expired disappearing messages are gone here too, not only in the lists.
+    let _ = purge_expired(&state.db).await;
     let me = match user(&state, &headers).await {
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
+    // Each pin posts a system message: limited like sending.
+    if state.rate_limited(format!("pin:{}", me.id), 20, 60) {
+        return error(
+            "Too many pins, please wait a moment",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     let chat = match membership(&state.db, &chat_id, &me.id).await {
         Ok(Some(v)) => v,
         Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
@@ -1281,7 +1321,7 @@ async fn pin_message(
         Ok(None) => return error("Message not found", StatusCode::NOT_FOUND),
         Err(_) => return db_error(),
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1343,7 +1383,7 @@ async fn chat_prefs(
     {
         return error("Chat not found", StatusCode::NOT_FOUND);
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1399,7 +1439,7 @@ async fn set_disappearing(
     if seconds == number(&chat, "disappear_seconds") {
         return json_ok(json!({"disappear_seconds":seconds})).into_response();
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1642,8 +1682,34 @@ async fn upload_file(
             StatusCode::TOO_MANY_REQUESTS,
         );
     }
+    // How much one account may upload per day (SERES_UPLOAD_DAILY_MB, default
+    // 2048), so nobody can fill the server's disk.
+    let daily_limit = std::env::var("SERES_UPLOAD_DAILY_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(2048)
+        * 1024
+        * 1024;
+    let since = (chrono::Utc::now() - chrono::Duration::hours(24))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let uploaded = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(SUM(size),0) FROM files WHERE uploader_id=? AND created_at>?",
+    )
+    .bind(&me.id)
+    .bind(&since)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+    if uploaded + body.len() as i64 > daily_limit {
+        return error(
+            "You've uploaded a lot today; please try again tomorrow",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     let id = Uuid::new_v4().simple().to_string();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1655,6 +1721,8 @@ async fn download_file(
     headers: HeaderMap,
     Path((chat_id, file_id)): Path<(String, String)>,
 ) -> axum::response::Response {
+    // Expired disappearing messages are gone here too, not only in the lists.
+    let _ = purge_expired(&state.db).await;
     let me = match user(&state, &headers).await {
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
@@ -1764,7 +1832,7 @@ async fn share_history(
             _ => return db_error(),
         };
     let mut stored = 0i64;
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1839,7 +1907,7 @@ async fn deliver_due_messages(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     if due.is_empty() {
         return Ok(());
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let mut delivered = Vec::new();
     for item in due {
         let id: String = item.try_get("id")?;
@@ -2048,6 +2116,50 @@ async fn are_friends(pool: &SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::
             .is_some(),
     )
 }
+/// Whether `user` may join the group: not removed by the owner (unless the
+/// owner adds them), no block with any member, and the account has keys
+/// (without them nobody could encrypt for the group any more).
+async fn group_admission(
+    pool: &SqlitePool,
+    chat_id: &str,
+    user: &str,
+    by_owner: bool,
+) -> Result<Option<&'static str>, sqlx::Error> {
+    let keys: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT pub_ecdh,pub_sign FROM users WHERE id=?")
+            .bind(user)
+            .fetch_optional(pool)
+            .await?;
+    if !matches!(keys, Some((Some(_), Some(_)))) {
+        return Ok(Some("This account can't be added yet (no encryption keys)"));
+    }
+    if !by_owner
+        && sqlx::query("SELECT 1 FROM group_bans WHERE chat_id=? AND user_id=?")
+            .bind(chat_id)
+            .bind(user)
+            .fetch_optional(pool)
+            .await?
+            .is_some()
+    {
+        return Ok(Some("The owner removed this person from the group"));
+    }
+    let blocked = sqlx::query(
+        "SELECT 1 FROM blocks b JOIN chat_members m ON m.chat_id=?
+         WHERE (b.blocker_id=m.user_id AND b.blocked_id=?) OR (b.blocker_id=? AND b.blocked_id=m.user_id) LIMIT 1",
+    )
+    .bind(chat_id)
+    .bind(user)
+    .bind(user)
+    .fetch_optional(pool)
+    .await?;
+    if blocked.is_some() {
+        return Ok(Some(
+            "Not possible: someone in the group blocked this person or was blocked",
+        ));
+    }
+    Ok(None)
+}
+
 async fn is_blocked(pool: &SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query("SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)").bind(a).bind(b).bind(b).bind(a).fetch_optional(pool).await?.is_some())
 }
@@ -2112,7 +2224,7 @@ async fn advance_receipt(
     kind: &str,
     seq: i64,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let kinds: &[&str] = if kind == "read" {
         &["delivered", "read"]
     } else {
@@ -2204,7 +2316,7 @@ async fn purge_expired(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     if expired.is_empty() && stale.is_empty() {
         return Ok(());
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     for row in expired {
         let id: String = row.try_get("id")?;
         let chat: String = row.try_get("chat_id")?;
@@ -2520,7 +2632,12 @@ async fn invite_join(
     if count >= MAX_GROUP_MEMBERS as i64 {
         return error("The group is full", StatusCode::BAD_REQUEST);
     }
-    let mut tx = match state.db.begin().await {
+    match group_admission(&state.db, &chat_id, &me.id, false).await {
+        Ok(Some(reason)) => return error(reason, StatusCode::FORBIDDEN),
+        Ok(None) => {}
+        Err(_) => return db_error(),
+    }
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };

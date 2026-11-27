@@ -565,7 +565,7 @@ async fn register(
     let hashed = hashes.next().unwrap_or_default();
     let user_id = Uuid::new_v4().to_string();
     let created = now_iso();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
     };
@@ -616,11 +616,14 @@ async fn login(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    if state.rate_limited(
-        format!("login-ip:{}", super::client_ip(&headers, peer)),
-        60,
-        60,
-    ) || state.rate_limited(format!("login-account:{}", name.to_lowercase()), 10, 300)
+    // Per account the tight limit counts per address, so a stranger guessing
+    // can't lock the owner out; a looser limit per account catches attempts
+    // spread over many addresses.
+    let ip = super::client_ip(&headers, peer);
+    let account = name.to_lowercase();
+    if state.rate_limited(format!("login-ip:{ip}"), 60, 60)
+        || state.rate_limited(format!("login-account:{account}:{ip}"), 10, 300)
+        || state.rate_limited(format!("login-account:{account}"), 100, 3600)
     {
         return error(
             "Too many login attempts, please wait a few minutes",
@@ -819,13 +822,34 @@ pub(crate) async fn create_session(
         reply.extend(extra);
     }
     let mut response = json_response(StatusCode::OK, reply);
-    let persistent = cookie_value(headers, CONSENT_COOKIE).as_deref() == Some("accepted");
-    login_cookie(&mut response, &token, headers, persistent);
+    // The login cookie is strictly necessary and always kept for the session's
+    // lifetime: a browser-session cookie would vanish with the browser while
+    // the session stays the main device on the server, locking the user out.
+    login_cookie(&mut response, &token, headers, true);
     response
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = cookie_value(&headers, SESSION_COOKIE) {
+        // The main device hands its role to another device first (the apps do
+        // this before logging out); otherwise approval would silently be off.
+        let hash = hash_token(&token);
+        let others: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_sessions s JOIN users u ON u.id=s.user_id
+             WHERE u.main_session=? AND s.user_id=u.id AND s.token_hash!=? AND s.approved=1 AND s.expires_at>?",
+        )
+        .bind(&hash)
+        .bind(&hash)
+        .bind(now_iso())
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+        if others > 0 {
+            return error(
+                "This is your main device. Choose another main device before logging out.",
+                StatusCode::CONFLICT,
+            );
+        }
         let _ = sqlx::query("DELETE FROM user_sessions WHERE token_hash=?")
             .bind(hash_token(&token))
             .execute(&state.db)
@@ -865,7 +889,7 @@ async fn cookie_consent(
         cookie_value(&headers, SESSION_COOKIE),
         current_user(&state, &headers).await,
     ) {
-        login_cookie(&mut response, &token, &headers, accepted);
+        login_cookie(&mut response, &token, &headers, true);
     }
     response
 }
@@ -928,7 +952,7 @@ async fn change_password(
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
     let current_hash = hash_token(&cookie_value(&headers, SESSION_COOKIE).unwrap_or_default());
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
     };
@@ -941,9 +965,18 @@ async fn change_password(
         .execute(&mut *tx)
         .await
         .is_err()
-        || sqlx::query("DELETE FROM user_sessions WHERE user_id=? AND token_hash!=?")
+        // Other devices are logged out, except the main device: otherwise a
+        // secondary device could remove it and become the main device itself.
+        || sqlx::query("DELETE FROM user_sessions WHERE user_id=? AND token_hash!=? AND token_hash IS NOT (SELECT main_session FROM users WHERE id=?)")
             .bind(&user_id)
             .bind(current_hash)
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        // Device links approved before the change can't be collected any more.
+        || sqlx::query("DELETE FROM device_links WHERE user_id=?")
+            .bind(&user_id)
             .execute(&mut *tx)
             .await
             .is_err()

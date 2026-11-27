@@ -293,20 +293,36 @@ fn origin_allowed(headers: &HeaderMap, origin: &str) -> bool {
 }
 
 /// Forwarded addresses are accepted only from the local reverse proxy.
+/// The client's address for rate limits. Behind a proxy on the same machine,
+/// exactly one header is trusted: the one the proxy sets
+/// (`SERES_CLIENT_IP_HEADER`, default `cf-connecting-ip` for a Cloudflare
+/// tunnel; `x-real-ip` or `x-forwarded-for` for nginx/Caddy). Trusting any of
+/// several headers let clients pick one the proxy passes through unchanged.
 pub(crate) fn client_ip(headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
     if peer.ip().is_loopback() {
-        for name in ["cf-connecting-ip", "x-real-ip", "x-forwarded-for"] {
-            if let Some(ip) = headers
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.rsplit(',').next())
-                .and_then(|v| v.trim().parse::<IpAddr>().ok())
-            {
-                return ip;
-            }
+        let name = client_ip_header();
+        if let Some(ip) = headers
+            .get(name.as_str())
+            .and_then(|v| v.to_str().ok())
+            // X-Forwarded-For: the last entry is the one the proxy added.
+            .and_then(|v| v.rsplit(',').next())
+            .and_then(|v| v.trim().parse::<IpAddr>().ok())
+        {
+            return ip;
         }
     }
     peer.ip()
+}
+
+fn client_ip_header() -> &'static String {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        std::env::var("SERES_CLIENT_IP_HEADER")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "cf-connecting-ip".into())
+    })
 }
 
 pub fn json_ok(value: Value) -> Response {
@@ -402,6 +418,10 @@ mod tests {
             "x-forwarded-for",
             "198.51.100.1, 203.0.113.2".parse().unwrap(),
         );
+        // Only the configured header counts (default cf-connecting-ip): a
+        // header the proxy doesn't set is ignored.
+        assert_eq!(client_ip(&headers, peer), peer.ip());
+        headers.insert("cf-connecting-ip", "203.0.113.2".parse().unwrap());
         let ip = client_ip(&headers, peer);
         assert_eq!(ip.to_string(), "203.0.113.2");
         headers.insert("cf-connecting-ip", "203.0.113.3".parse().unwrap());

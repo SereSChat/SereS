@@ -190,9 +190,33 @@ async fn set_main(
     if exists.is_none() {
         return Err(ApiError::new("Device not found", StatusCode::NOT_FOUND));
     }
-    let mut tx = state.db.begin().await.map_err(|_| db_error())?;
-    sqlx::query("UPDATE users SET main_session=? WHERE id=?")
-        .bind(target)
+    let mut tx = state
+        .db
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| db_error())?;
+    // Only the current main device, or the first choice while there is none,
+    // changes it; two devices choosing at the same time can't both win.
+    let changed = sqlx::query(
+        "UPDATE users SET main_session=? WHERE id=? AND (main_session IS ? OR main_session IS NULL
+         OR main_session NOT IN (SELECT token_hash FROM user_sessions WHERE user_id=? AND approved=1 AND expires_at>?))",
+    )
+    .bind(target)
+    .bind(&me.id)
+    .bind(me.main.as_deref())
+    .bind(&me.id)
+    .bind(now_iso())
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| db_error())?;
+    if changed.rows_affected() == 0 {
+        return Err(ApiError::new(
+            "The main device has changed meanwhile",
+            StatusCode::CONFLICT,
+        ));
+    }
+    // Links approved by the previous main device can't be collected any more.
+    sqlx::query("DELETE FROM device_links WHERE user_id=? AND state='approved'")
         .bind(&me.id)
         .execute(&mut *tx)
         .await

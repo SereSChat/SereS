@@ -87,7 +87,7 @@ async fn request_reset(
             let expires = (chrono::Utc::now() + chrono::Duration::minutes(RESET_MINUTES))
                 .format("%Y-%m-%dT%H:%M:%SZ")
                 .to_string();
-            let mut tx = match state.db.begin().await {
+            let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
                 Ok(v) => v,
                 Err(_) => return db_error(),
             };
@@ -215,7 +215,7 @@ async fn confirm_reset(
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
     let user_id: String = user.try_get("id").unwrap_or_default();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -314,6 +314,11 @@ async fn complete_reset(
         .execute(&mut **tx)
         .await?;
     sqlx::query("DELETE FROM user_sessions WHERE user_id=?")
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+    // A link approved before the reset must not hand out a new session.
+    sqlx::query("DELETE FROM device_links WHERE user_id=?")
         .bind(user_id)
         .execute(&mut **tx)
         .await?;
