@@ -156,6 +156,7 @@ window.SeresLang.en = {
 
   "msg.deleted": "This message was deleted",
   "msg.decryptError": " This message could not be decrypted or verified.",
+  "msg.untrustedHistoricalKey": "⚠️ This message uses an unverified historical key and was not verified.",
   "msg.unknown": "Unknown",
   "msg.you": "You",
   "msg.notEncrypted": "not encrypted",

@@ -156,6 +156,7 @@ window.SeresLang.fr = {
 
   "msg.deleted": "Ce message a été supprimé",
   "msg.decryptError": " Ce message n'a pas pu être déchiffré ou vérifié.",
+  "msg.untrustedHistoricalKey": "⚠️ Ce message utilise une ancienne clé non vérifiée et n'a pas été vérifié.",
   "msg.unknown": "Inconnu",
   "msg.you": "Toi",
   "msg.notEncrypted": "non chiffré",
