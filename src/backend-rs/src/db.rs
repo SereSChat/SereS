@@ -133,6 +133,13 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_session ON push_subscriptions(session_hash)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("CREATE TRIGGER IF NOT EXISTS push_subscriptions_logout AFTER DELETE ON user_sessions BEGIN DELETE FROM push_subscriptions WHERE session_hash=OLD.token_hash; END")
+        .execute(&pool).await?;
     // APNs (iOS app): device tokens for alerts and VoIP calls, also tied to
     // the device's session (see api/apns.rs). They go when the device logs out.
     sqlx::query("CREATE TABLE IF NOT EXISTS apns_tokens (token TEXT PRIMARY KEY, user_id TEXT NOT NULL, session_hash TEXT NOT NULL, kind TEXT NOT NULL, environment TEXT NOT NULL, topic TEXT, created_at TEXT NOT NULL, last_used_at TEXT)")
@@ -666,6 +673,45 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn deleting_session_removes_its_push_subscriptions() {
+        let fixture = Fixture::new();
+        let pool = connect(&fixture.0.join("users.db")).await.unwrap();
+        sqlx::query("INSERT INTO users(id,username) VALUES('u1','alice')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at) VALUES
+             ('s1','u1','2999-01-01T00:00:00Z','now'),
+             ('s2','u1','2999-01-01T00:00:00Z','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO push_subscriptions(endpoint,user_id,session_hash,p256dh,auth,created_at) VALUES
+             ('https://fcm.googleapis.com/1','u1','s1','k','a','now'),
+             ('https://fcm.googleapis.com/2','u1','s2','k','a','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query("DELETE FROM user_sessions WHERE token_hash='s1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let remaining: Vec<String> =
+            sqlx::query_scalar("SELECT endpoint FROM push_subscriptions ORDER BY endpoint")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, vec!["https://fcm.googleapis.com/2"]);
         pool.close().await;
     }
 }

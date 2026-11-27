@@ -16,7 +16,7 @@ use super::{ApiError, ApiResult, b64_field, json_ok, str_field};
 use crate::state::AppState;
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode, header},
     response::Response,
     routing::{get, post},
@@ -24,7 +24,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool};
-use std::{collections::HashMap, net::SocketAddr};
+use std::net::SocketAddr;
 
 /// A new login waits this long for the main device.
 const PENDING_SECONDS: i64 = 15 * 60;
@@ -40,7 +40,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/devices/approve", post(approve))
         .route("/api/devices/approval", get(approval_status))
         .route("/api/link/start", post(link_start))
-        .route("/api/link/status", get(link_status))
+        .route("/api/link/status", post(link_status))
         .route("/api/link/find", post(link_find))
         .route("/api/link/approve", post(link_approve))
         .route("/api/link/deny", post(link_deny))
@@ -377,10 +377,18 @@ async fn link_start(
 /// device gets them and its session (only once).
 async fn link_status(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Query(params): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
 ) -> ApiResult<Response> {
-    let token = params.get("token").map(String::as_str).unwrap_or_default();
+    let ip = super::client_ip(&headers, peer);
+    if state.rate_limited(format!("link-status:{ip}"), 60, 60) {
+        return Err(ApiError::new(
+            "Too many attempts, please try again later",
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
+    let token = str_field(&body, "token", 256)?;
     let gone = || ApiError::new("This code has expired", StatusCode::GONE);
     let row = sqlx::query("SELECT * FROM device_links WHERE token_hash=? AND expires_at>?")
         .bind(hash_token(token))
@@ -530,4 +538,156 @@ async fn link_deny(
     .execute(&state.db)
     .await;
     Ok(json_ok(json!({})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        async fn new() -> (Self, AppState) {
+            let dir = std::env::temp_dir().join(format!("seres-devices-{}", uuid::Uuid::new_v4()));
+            let pool = crate::db::connect(&dir.join("users.db")).await.unwrap();
+            (Self(dir), AppState::new(pool))
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn post_link_status_handles_states_and_rate_limits_by_ip() {
+        let (_fix, state) = Fixture::new().await;
+        sqlx::query("INSERT INTO users(id,username,enc_private) VALUES('u1','alice','enc')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let peer: SocketAddr = "198.51.100.10:1234".parse().unwrap();
+
+        // Missing token -> 400
+        let err = link_status(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({})),
+        )
+        .await
+        .unwrap_err();
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Waiting -> 200 waiting
+        let tok_wait = "waiting-token-1";
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,state) VALUES(?,'CODE1111','pub','now','2999-01-01T00:00:00Z','waiting')")
+            .bind(hash_token(tok_wait))
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let resp = link_status(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({"token": tok_wait})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["state"], "waiting");
+
+        // Denied -> 200 denied, second call -> 410 Gone
+        let tok_deny = "denied-token-1";
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,state) VALUES(?,'CODE2222','pub','now','2999-01-01T00:00:00Z','denied')")
+            .bind(hash_token(tok_deny))
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let resp = link_status(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({"token": tok_deny})),
+        )
+        .await
+        .unwrap();
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["state"], "denied");
+        let err = link_status(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({"token": tok_deny})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            axum::response::IntoResponse::into_response(err).status(),
+            StatusCode::GONE
+        );
+
+        // Approved -> 200 approved with sealed + session cookie, consumed once
+        let tok_ok = "approved-token-1";
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,user_id,sealed,state) VALUES(?,'CODE3333','pub','now','2999-01-01T00:00:00Z','u1',?,'approved')")
+            .bind(hash_token(tok_ok))
+            .bind(json!({"epub": "e", "iv": "i", "ct": "c"}).to_string())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let resp = link_status(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({"token": tok_ok})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().contains_key(header::SET_COOKIE));
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["state"], "approved");
+        assert_eq!(body["sealed"]["epub"], "e");
+
+        let err = link_status(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({"token": tok_ok})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            axum::response::IntoResponse::into_response(err).status(),
+            StatusCode::GONE
+        );
+
+        // Rate limit: 60 per 60s per IP (6 calls already consumed above)
+        for _ in 0..54 {
+            let _ = link_status(
+                State(state.clone()),
+                ConnectInfo(peer),
+                HeaderMap::new(),
+                Json(json!({"token": tok_wait})),
+            )
+            .await;
+        }
+        let err = link_status(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({"token": tok_wait})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            axum::response::IntoResponse::into_response(err).status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
 }
