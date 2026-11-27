@@ -86,10 +86,16 @@
                 }
                 throw new Error(res.status === 429 ? res.data.message : t("twofa.wrong"));
             }
-            await finishLogin(res.data.user, current.wrapKey, {}, !!res.data.approval_required);
+            const wrapKey = current.wrapKey;
+            twofa = null;
+            await finishLogin(res.data.user, wrapKey, {}, !!res.data.approval_required);
         }
         catch (error) {
-            warning.textContent = error instanceof Error ? error.message : t("common.unreachable");
+            const message = error instanceof Error ? error.message : t("common.unreachable");
+            if (el("twofa-panel").classList.contains("modal-hidden"))
+                setWarning(message);
+            else
+                warning.textContent = message;
             busy = false;
         }
     }
@@ -129,19 +135,39 @@
      * With a main device on the account, the login first waits until it is allowed there.
      */
     async function finishLogin(user, wrapKey, extraParams = {}, waitForMain = false) {
-        let identity;
+        let pendingWrapKey = wrapKey;
         try {
-            identity = await SeresCrypto.unlockIdentity(user.id, user.enc_private, wrapKey, user.pub_ecdh, user.pub_sign);
+            let resolvedUser = user;
+            if (waitForMain) {
+                const approved = await waitForMainDevice();
+                if (!approved)
+                    return;
+                const meRes = await fetch("/api/me", { credentials: "include" }).catch(() => null);
+                const meData = meRes && meRes.ok ? await meRes.json().catch(() => null) : null;
+                if (!meData?.success || !meData?.user) {
+                    showPanel("login");
+                    await fetch("/api/logout", { method: "POST", credentials: "include" }).catch(() => { });
+                    throw new Error(t("login.unlockFailed"));
+                }
+                resolvedUser = meData.user;
+            }
+            let identity;
+            try {
+                identity = await SeresCrypto.unlockIdentity(resolvedUser.id, resolvedUser.enc_private, pendingWrapKey, resolvedUser.pub_ecdh, resolvedUser.pub_sign);
+            }
+            catch {
+                if (waitForMain)
+                    showPanel("login");
+                await fetch("/api/logout", { method: "POST", credentials: "include" }).catch(() => { });
+                throw new Error(t("login.unlockFailed"));
+            }
+            await SeresCrypto.clearIdentities();
+            await SeresCrypto.saveIdentity(identity);
+            openChats(extraParams);
         }
-        catch {
-            await fetch("/api/logout", { method: "POST", credentials: "include" });
-            throw new Error(t("login.unlockFailed"));
+        finally {
+            pendingWrapKey = null;
         }
-        await SeresCrypto.clearIdentities();
-        await SeresCrypto.saveIdentity(identity);
-        if (waitForMain && !(await waitForMainDevice()))
-            return;
-        openChats(extraParams);
     }
     function openChats(extraParams = {}) {
         const params = new URLSearchParams({ login: "true", ...extraParams });
@@ -634,6 +660,7 @@
         el("approval-lost").addEventListener("click", (event) => {
             event.preventDefault();
             waitingForMain = false;
+            fetch("/api/logout", { method: "POST", credentials: "include" }).catch(() => { });
             showPanel("recover");
         });
         el("recover-back").addEventListener("click", (event) => {
