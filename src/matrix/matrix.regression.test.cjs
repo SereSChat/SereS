@@ -7,7 +7,7 @@ const { JSDOM } = require('jsdom');
 const { EventEmitter } = require('node:events');
 const source = readFileSync(resolve(__dirname, '../frontend/matrix.ts'), 'utf8').replace(/^import .*;\r?\n/gm, '');
 const compiled = ts.transpileModule(source + `
-window.testApi = { renderRoom, renderRoomList, saveSession, savedSession, cryptoStoreName, matrixServerName, showCall, stop, activate, connect, openMatrixRtc, joinRoomPrompt, joinRoomTarget, parseRoomTarget, handleRoomUpdate, createRoom, inviteToRoom, addJitsi,
+window.testApi = { renderRoom, renderRoomList, saveSession, savedSession, cryptoStoreName, matrixServerName, showCall, stop, activate, connect, openMatrixRtc, joinRoomPrompt, joinRoomTarget, parseRoomTarget, handleRoomUpdate, createRoom, inviteToRoom, addJitsi, showJitsi,
   setClient(value) { client = value; },
   select(room, thread = '') { selectedRoomId = room; threadRootId = thread; },
   space(id) { selectedSpaceId = id; },
@@ -109,6 +109,7 @@ test('invites validate IDs and Jitsi input stays bound to the original room', as
     submitDialog(e, ['@alex:matrix.org']); await task;
     assert.deepEqual(invites[0], ['!a:example.org', '@alex:matrix.org']);
     const writes = [];
+    e.w.open = () => null;
     e.matrix.sendStateEvent = async (...args) => { writes.push(args); };
     task = e.api.addJitsi();
     assert.match(e.w.document.querySelector('dialog input').value, /^https:\/\/meet.jit.si\//);
@@ -794,5 +795,82 @@ test('messages fall back to cached profile names and safely display names as pla
     e.matrix.getUser = () => null;
     e.api.renderRoom();
     assert.equal(e.w.document.querySelector('.matrix-message-sender').textContent, id);
+  } finally { e.close(); }
+});
+
+test('appendAttachment sanitizes disallowed MIME types to application/octet-stream download links', async () => {
+  const e = environment();
+  try {
+    const blobs = [];
+    e.w.URL.createObjectURL = (blob) => { blobs.push(blob); return `blob:https://seres.example/${blobs.length}`; };
+    e.w.fetch = async () => ({ ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer });
+    e.matrix.mxcUrlToHttp = (mxc) => `https://hs.example/_matrix/media/v3/download/${mxc.slice(6)}`;
+    e.matrix.getAccessToken = () => 'token-1';
+
+    const cases = [
+      { id: '$svg-img', msgtype: 'm.image', mimetype: 'image/svg+xml', body: 'evil.svg', expectedMime: 'application/octet-stream', expectedTag: 'A' },
+      { id: '$html-img', msgtype: 'm.image', mimetype: 'text/html; charset=utf-8', body: 'page.html', expectedMime: 'application/octet-stream', expectedTag: 'A' },
+      { id: '$html-vid', msgtype: 'm.video', mimetype: 'text/html', body: 'vid.html', expectedMime: 'application/octet-stream', expectedTag: 'A' },
+      { id: '$svg-aud', msgtype: 'm.audio', mimetype: 'image/svg+xml', body: 'aud.svg', expectedMime: 'application/octet-stream', expectedTag: 'A' },
+      { id: '$file-html', msgtype: 'm.file', mimetype: 'text/html', body: 'doc.html', expectedMime: 'application/octet-stream', expectedTag: 'A' },
+      { id: '$file-png', msgtype: 'm.file', mimetype: 'image/png', body: 'pic.png', expectedMime: 'application/octet-stream', expectedTag: 'A' },
+      { id: '$missing-img', msgtype: 'm.image', mimetype: undefined, body: 'unknown.bin', expectedMime: 'application/octet-stream', expectedTag: 'A' },
+      { id: '$ok-img', msgtype: 'm.image', mimetype: 'image/png', body: 'safe.png', expectedMime: 'image/png', expectedTag: 'IMG' },
+      { id: '$ok-vid', msgtype: 'm.video', mimetype: 'video/mp4', body: 'safe.mp4', expectedMime: 'video/mp4', expectedTag: 'VIDEO' },
+      { id: '$ok-aud', msgtype: 'm.audio', mimetype: 'audio/ogg; codecs=opus', body: 'safe.ogg', expectedMime: 'audio/ogg', expectedTag: 'AUDIO' },
+    ];
+
+    const events = cases.map((c) => ({
+      getId: () => c.id,
+      getType: () => 'm.room.message',
+      getSender: () => '@other:example.org',
+      getDate: () => null,
+      getContent: () => ({ msgtype: c.msgtype, body: c.body, url: `mxc://example.org/${c.id.slice(1)}`, info: c.mimetype ? { mimetype: c.mimetype } : {} }),
+    }));
+    e.rooms.get('!a:example.org').getLiveTimeline = () => ({ getEvents: () => events });
+    e.api.renderRoom();
+
+    for (let i = 0; i < cases.length; i++) {
+      const c = cases[i];
+      const row = e.w.document.querySelector(`[data-event-id="${c.id}"]`);
+      row.querySelector('.matrix-attachment-button').click();
+      await tick();
+      await tick();
+      assert.equal(blobs[i].type, c.expectedMime, `${c.id} blob mime`);
+      assert.equal(row.querySelector('.matrix-attachment-button'), null, `${c.id} button replaced`);
+      const preview = row.querySelector('img, video, audio, a.matrix-attachment-download');
+      assert.ok(preview, `${c.id} rendered preview`);
+      assert.equal(preview.tagName, c.expectedTag, `${c.id} tagName`);
+      if (c.expectedTag === 'A') {
+        assert.equal(preview.download, c.body);
+      }
+    }
+  } finally { e.close(); }
+});
+
+test('Jitsi opens validated HTTPS URLs in a new tab without an iframe and rejects credentials or HTTP', async () => {
+  const e = environment();
+  try {
+    const opened = [];
+    const writes = [];
+    e.w.open = (...args) => { opened.push(args); };
+    e.matrix.sendStateEvent = async (...args) => { writes.push(args); };
+
+    for (const badUrl of ['http://meet.jit.si/insecure', 'https://user:pass@meet.jit.si/creds', 'https://user@meet.jit.si/user']) {
+      const task = e.api.addJitsi();
+      submitDialog(e, [badUrl]);
+      await task;
+      assert.throws(() => e.api.showJitsi(badUrl));
+    }
+    assert.equal(writes.length, 0);
+    assert.equal(opened.length, 0);
+
+    const task = e.api.addJitsi();
+    submitDialog(e, ['https://meet.jit.si/seres-safe']);
+    await task;
+    assert.equal(writes.length, 1);
+    assert.equal(opened.length, 1);
+    assert.deepEqual(Array.from(opened[0]), ['https://meet.jit.si/seres-safe', '_blank', 'noopener,noreferrer']);
+    assert.equal(e.w.document.querySelector('iframe'), null);
   } finally { e.close(); }
 });

@@ -71467,6 +71467,21 @@ function renderRoom() {
     markVisibleThreadRead();
   }
 }
+var SAFE_MEDIA_MIMES = {
+  "m.image": /* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp"]),
+  "m.video": /* @__PURE__ */ new Set(["video/mp4", "video/webm", "video/ogg", "video/quicktime"]),
+  "m.audio": /* @__PURE__ */ new Set(["audio/mpeg", "audio/ogg", "audio/webm", "audio/wav", "audio/mp4", "audio/aac", "audio/flac"])
+};
+function safeAttachmentMime(msgtype, rawMime) {
+  if (msgtype === "m.file" || typeof rawMime !== "string") {
+    return { mimeType: "application/octet-stream", inlineAllowed: false };
+  }
+  const normalized = rawMime.split(";")[0].trim().toLowerCase();
+  if (SAFE_MEDIA_MIMES[msgtype]?.has(normalized)) {
+    return { mimeType: normalized, inlineAllowed: true };
+  }
+  return { mimeType: "application/octet-stream", inlineAllowed: false };
+}
 function appendAttachment(row, content, matrix) {
   if (!["m.image", "m.video", "m.audio", "m.file"].includes(content.msgtype)) return;
   const mediaUrlKey = content.file?.url || content.url;
@@ -71504,7 +71519,7 @@ function appendAttachment(row, content, matrix) {
             encrypted.free();
           }
         } else bytes = encryptedBytes;
-        const mimeType = content.info?.mimetype || "application/octet-stream";
+        const { mimeType, inlineAllowed } = safeAttachmentMime(content.msgtype, content.info?.mimetype);
         const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
         const blobUrl = URL.createObjectURL(new Blob([buffer], { type: mimeType }));
         if (client !== matrix) {
@@ -71513,18 +71528,18 @@ function appendAttachment(row, content, matrix) {
         }
         mediaObjectUrls.add(blobUrl);
         let preview;
-        if (content.msgtype === "m.image") {
+        if (inlineAllowed && content.msgtype === "m.image") {
           const image = h("img", "matrix-attachment-image");
           image.src = blobUrl;
           image.alt = fileName;
           preview = image;
-        } else if (content.msgtype === "m.video") {
+        } else if (inlineAllowed && content.msgtype === "m.video") {
           const video = h("video", "matrix-attachment-video");
           video.src = blobUrl;
           video.controls = true;
           video.playsInline = true;
           preview = video;
-        } else if (content.msgtype === "m.audio") {
+        } else if (inlineAllowed && content.msgtype === "m.audio") {
           const audio = h("audio", "matrix-attachment-audio");
           audio.src = blobUrl;
           audio.controls = true;
@@ -71794,6 +71809,13 @@ async function joinRoomPrompt() {
   const [room] = values;
   if (room?.trim()) void joinRoomTarget(room);
 }
+function validateJitsiUrl(url) {
+  const parsed = new URL(url.trim());
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+    throw new Error("Use a secure HTTPS Jitsi URL without embedded credentials.");
+  }
+  return parsed.href;
+}
 async function addJitsi() {
   const matrix = client;
   const roomId = selectedRoomId;
@@ -71806,8 +71828,7 @@ async function addJitsi() {
   const [url] = values;
   if (!url) return;
   try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== "https:") throw new Error("Use a secure HTTPS Jitsi URL.");
+    const safeUrl = validateJitsiUrl(url);
     const widgetId = `seres-jitsi-${crypto.randomUUID()}`;
     const sendState = matrix.sendStateEvent.bind(matrix);
     await sendState(roomId, "im.vector.modular.widgets", {
@@ -71815,34 +71836,19 @@ async function addJitsi() {
       id: widgetId,
       name: "Jitsi video call",
       type: "jitsi",
-      url: parsed.href,
+      url: safeUrl,
       roomId,
       data: {},
       waitForIframeLoad: true
     }, widgetId);
-    showJitsi(parsed.href, room?.name || selectedRoomId);
+    showJitsi(safeUrl, room?.name || selectedRoomId);
   } catch (error) {
     notify(safeError(error));
   }
 }
-function showJitsi(url, title) {
-  activeCall?.hangup("user_hangup", false);
-  activeCall = null;
-  callPanel?.querySelector("iframe")?.setAttribute("src", "about:blank");
-  const frame = h("iframe", "matrix-jitsi");
-  frame.title = title;
-  frame.src = url;
-  frame.allow = "camera; microphone; display-capture; autoplay; clipboard-write";
-  frame.allowFullscreen = true;
-  const panel = h("section", "matrix-call-panel");
-  const close = action("Close Jitsi", () => {
-    frame.src = "about:blank";
-    callPanel = null;
-    renderRoom();
-  });
-  panel.append(close, frame);
-  callPanel = panel;
-  renderRoom();
+function showJitsi(url, _title) {
+  const safeUrl = validateJitsiUrl(url);
+  window.open(safeUrl, "_blank", "noopener,noreferrer");
 }
 function openMatrixRtc(room) {
   const server = matrixServerName(room.roomId);
