@@ -4948,3 +4948,108 @@ a.link-preview:hover {
 .search-hit {
   cursor: pointer;
 }
+
+/* ---------- Location ---------- */
+.location {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 260px;
+}
+.location-map-link {
+  display: block;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.location-map {
+  position: relative;
+  overflow: hidden;
+  max-width: 100%;
+  background: #d9e3e8;
+  border-radius: 8px;
+}
+.location-tile {
+  position: absolute;
+  width: 256px;
+  height: 256px;
+  max-width: none;
+  user-select: none;
+}
+.location-pin {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -100%);
+  font-size: 36px;
+  color: #e53935;
+  font-variation-settings: "FILL" 1;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.location.running .location-pin {
+  color: #1e88e5;
+}
+.location-attribution {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  padding: 1px 4px;
+  font-size: 10px;
+  color: #333;
+  background: rgba(255, 255, 255, 0.75);
+}
+.location-info {
+  display: flex;
+  flex-direction: column;
+}
+.location-title {
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+}
+.location-title .material-symbols-rounded {
+  font-size: 18px;
+}
+.location-meta {
+  font-size: 0.8em;
+  opacity: 0.75;
+}
+.location-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 0.85em;
+}
+.message-text .location-actions a {
+  color: inherit;
+  opacity: 0.9;
+}
+.location-stop {
+  align-self: flex-start;
+}
+.location-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-height: 60px;
+}
+.location-btn {
+  width: 100%;
+  margin-top: 8px;
+}
+.location-live-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.location-live-row .location-btn {
+  flex: 1;
+}
+.location-live-row select {
+  margin-top: 8px;
+}
+.attach-menu .floating-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

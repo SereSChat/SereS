@@ -513,6 +513,8 @@
         const poll = shown.content?.poll;
         if (poll && validPoll(poll))
             return "📊 " + String(poll.question);
+        if (shown.content?.location)
+            return "📍 " + t(shown.content.live ? "location.live" : "location.title");
         if (!file)
             return text;
         const label = file.kind === "image"
@@ -1517,6 +1519,7 @@
         // Reactions are silent messages; collect them instead of showing them as rows.
         const reactions = new Map();
         const votes = new Map();
+        const liveUpdates = new Map();
         const ordered = [];
         const shown = [];
         all.forEach((message, index) => {
@@ -1537,6 +1540,20 @@
                     if (!previous || previous.seq < message.seq)
                         perSender.set(message.sender_id, { choices, seq: message.seq });
                     votes.set(content.target, perSender);
+                }
+                if (content && content.type === "location" && content.target && message.sender_id) {
+                    const previous = liveUpdates.get(content.target);
+                    if (!previous || previous.seq < message.seq) {
+                        liveUpdates.set(content.target, {
+                            sender: message.sender_id,
+                            seq: message.seq,
+                            at: message.created_at,
+                            lat: Number(content.lat),
+                            lng: Number(content.lng),
+                            acc: Number(content.acc) || undefined,
+                            stopped: !!content.stopped,
+                        });
+                    }
                 }
                 return;
             }
@@ -1575,7 +1592,7 @@
             const compact = previous !== null &&
                 previous.sender_id === message.sender_id &&
                 date.getTime() - parseTime(previous.created_at).getTime() < 5 * 60 * 1000;
-            fragment.appendChild(messageRow(opened, message, view, compact, reactions.get(message.id), votes.get(message.id)));
+            fragment.appendChild(messageRow(opened, message, view, compact, reactions.get(message.id), votes.get(message.id), liveUpdates.get(message.id)));
             previous = message;
         });
         container.textContent = "";
@@ -1590,7 +1607,7 @@
         }
         updateJumpButton();
     }
-    function messageRow(opened, message, view, compact, reactions, votes) {
+    function messageRow(opened, message, view, compact, reactions, votes, liveUpdate) {
         const own = message.sender_id === me.id;
         const sender = message.sender_display || message.sender || t("msg.unknown");
         const content = view.content || {};
@@ -1628,6 +1645,12 @@
             bubble.appendChild(renderFile(opened, content.file));
         if (content.poll && view.type === "text")
             bubble.appendChild(renderPoll(opened, message, content.poll, votes));
+        if (content.location && view.type === "text") {
+            const update = liveUpdate && liveUpdate.sender === message.sender_id ? liveUpdate : undefined;
+            const card = renderLocation(opened, message, content, update);
+            if (card)
+                bubble.appendChild(card);
+        }
         if (view.type === "deleted" || view.type === "error") {
             bubble.classList.add("message-muted");
             bubble.appendChild(document.createTextNode(view.text));
@@ -1900,6 +1923,276 @@
             card.setAttribute("rel", "noopener noreferrer");
         }
         return card;
+    }
+    // --------------------------------------------------------------- location
+    // A location goes end-to-end encrypted like a message. A live location is a
+    // message with an end time; while this tab is open it sends silent updates.
+    // The map is made of OpenStreetMap tiles, loaded by the browser that shows it.
+    const LIVE_INTERVAL_MS = 30 * 1000;
+    const LIVE_DURATIONS = [15 * 60, 60 * 60, 8 * 60 * 60];
+    const liveShares = new Map();
+    function validCoords(lat, lng) {
+        return typeof lat === "number" && typeof lng === "number" && Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+    }
+    function round(value, digits = 6) {
+        const f = 10 ** digits;
+        return Math.round(value * f) / f;
+    }
+    function mapLinks(lat, lng) {
+        return {
+            osm: `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=17/${lat}/${lng}`,
+            google: `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`,
+            apple: `https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent(t("location.title"))}`,
+        };
+    }
+    /** A small map: OpenStreetMap tiles around the point, with a pin in the middle. */
+    function staticMap(lat, lng, width = 260, height = 150, zoom = 16) {
+        const scale = 256 * 2 ** zoom;
+        const px = ((lng + 180) / 360) * scale;
+        const sin = Math.sin((lat * Math.PI) / 180);
+        const py = (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale;
+        const left = px - width / 2;
+        const top = py - height / 2;
+        const map = h("div", { className: "location-map", attrs: { style: `width:${width}px;height:${height}px` } });
+        const max = 2 ** zoom;
+        for (let tx = Math.floor(left / 256); tx <= Math.floor((left + width) / 256); tx++) {
+            for (let ty = Math.floor(top / 256); ty <= Math.floor((top + height) / 256); ty++) {
+                if (ty < 0 || ty >= max)
+                    continue;
+                const x = ((tx % max) + max) % max;
+                const img = h("img", {
+                    className: "location-tile",
+                    attrs: {
+                        src: `https://tile.openstreetmap.org/${zoom}/${x}/${ty}.png`,
+                        alt: "",
+                        loading: "lazy",
+                        draggable: "false",
+                        // The tile servers ask for a referrer; the page itself sends none.
+                        referrerpolicy: "strict-origin-when-cross-origin",
+                        style: `left:${Math.round(tx * 256 - left)}px;top:${Math.round(ty * 256 - top)}px`,
+                    },
+                });
+                // Offline or blocked: the plain background instead of a broken picture.
+                img.addEventListener("error", () => img.remove(), { once: true });
+                map.appendChild(img);
+            }
+        }
+        map.appendChild(h("span", { className: "location-pin material-symbols-rounded", text: "location_on" }));
+        map.appendChild(h("span", { className: "location-attribution", text: "© OpenStreetMap" }));
+        return map;
+    }
+    function renderLocation(opened, message, content, update) {
+        const base = content.location;
+        if (!base || !validCoords(base.lat, base.lng))
+            return null;
+        let lat = base.lat;
+        let lng = base.lng;
+        let acc = base.acc;
+        let updatedAt = message.created_at;
+        // The last update (a "stopped" one carries the last position too).
+        if (update && validCoords(update.lat, update.lng)) {
+            lat = update.lat;
+            lng = update.lng;
+            acc = update.acc;
+            updatedAt = update.at;
+        }
+        const live = content.live && typeof content.live.until === "string" ? content.live : null;
+        const until = live ? parseTime(live.until).getTime() : 0;
+        const running = !!live && !update?.stopped && until > Date.now();
+        const links = mapLinks(lat, lng);
+        const box = h("div", { className: "location" + (live ? " live" : "") + (running ? " running" : "") });
+        const map = h("a", { className: "location-map-link", attrs: { href: links.osm, target: "_blank", rel: "noopener noreferrer" } }, [staticMap(lat, lng)]);
+        box.appendChild(map);
+        const title = live
+            ? running
+                ? t("location.liveUntil", { time: formatTime(live.until) })
+                : t("location.liveEnded")
+            : t("location.title");
+        box.appendChild(h("div", { className: "location-info" }, [
+            h("span", { className: "location-title" }, [
+                h("span", { className: "material-symbols-rounded", text: live ? "share_location" : "location_on" }),
+                document.createTextNode(" " + title),
+            ]),
+            h("span", {
+                className: "location-meta",
+                text: live
+                    ? t("location.updated", { time: formatTime(updatedAt) }) + (acc ? ` · ±${Math.round(acc)} m` : "")
+                    : acc
+                        ? `±${Math.round(acc)} m`
+                        : "",
+            }),
+        ]));
+        const actions = h("div", { className: "location-actions" }, [
+            h("a", { text: "Google Maps", attrs: { href: links.google, target: "_blank", rel: "noopener noreferrer" } }),
+            h("a", { text: t("location.apple"), attrs: { href: links.apple, target: "_blank", rel: "noopener noreferrer" } }),
+            h("a", { text: "OpenStreetMap", attrs: { href: links.osm, target: "_blank", rel: "noopener noreferrer" } }),
+        ]);
+        box.appendChild(actions);
+        if (running && message.sender_id === me.id) {
+            box.appendChild(button(t("location.stop"), "pill-btn danger location-stop", () => stopLive(opened.id, message.id)));
+            // Started in another tab or before a reload: this tab can't send updates.
+            if (!liveShares.has(message.id))
+                box.appendChild(h("span", { className: "location-meta", text: t("location.otherTab") }));
+        }
+        return box;
+    }
+    function currentPosition() {
+        return new Promise((resolve, reject) => {
+            if (!navigator.geolocation)
+                return reject(new Error(t("location.unsupported")));
+            navigator.geolocation.getCurrentPosition(resolve, (error) => {
+                reject(new Error(error.code === error.PERMISSION_DENIED ? t("location.denied") : t("location.failed")));
+            }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 });
+        });
+    }
+    let locationDraft = null;
+    async function openLocationDialog() {
+        closeFloatingMenus();
+        if (!current)
+            return;
+        locationDraft = null;
+        const preview = $("location-preview");
+        preview.textContent = "";
+        preview.appendChild(h("p", { className: "list-hint", text: t("location.finding") }));
+        $("location-warning").textContent = "";
+        $("location-send").disabled = true;
+        $("location-live").disabled = true;
+        const select = $("location-duration");
+        select.textContent = "";
+        for (const seconds of LIVE_DURATIONS) {
+            const option = document.createElement("option");
+            option.value = String(seconds);
+            option.textContent = seconds < 3600 ? t("location.minutes", { count: seconds / 60 }) : t("location.hours", { count: seconds / 3600 });
+            select.appendChild(option);
+        }
+        select.value = String(60 * 60);
+        openModal("location-modal");
+        try {
+            const pos = await currentPosition();
+            locationDraft = pos;
+            preview.textContent = "";
+            preview.appendChild(staticMap(pos.coords.latitude, pos.coords.longitude, 300, 170));
+            preview.appendChild(h("p", { className: "list-hint", text: t("location.accuracy", { meters: Math.round(pos.coords.accuracy) }) }));
+            $("location-send").disabled = false;
+            $("location-live").disabled = false;
+        }
+        catch (error) {
+            preview.textContent = "";
+            $("location-warning").textContent = errorText(error);
+        }
+    }
+    function coords(pos) {
+        return { lat: round(pos.coords.latitude), lng: round(pos.coords.longitude), acc: Math.round(pos.coords.accuracy) };
+    }
+    async function sendLocation(live) {
+        if (!current || !locationDraft)
+            return;
+        const opened = current;
+        const content = { location: coords(locationDraft) };
+        let seconds = 0;
+        if (live) {
+            seconds = Number($("location-duration").value) || 3600;
+            content.live = { until: new Date(Date.now() + seconds * 1000).toISOString() };
+        }
+        try {
+            const id = await sendContent(opened, content);
+            $("location-modal").classList.add("modal-hidden");
+            if (live)
+                startLive(opened, id, Date.now() + seconds * 1000, locationDraft);
+            await syncCurrent();
+            chatsSignature = "";
+            loadChats().catch(() => { });
+        }
+        catch (error) {
+            $("location-warning").textContent = errorText(error);
+        }
+    }
+    function startLive(opened, messageId, until, first) {
+        const share = { chatId: opened.id, until, watch: -1, last: Date.now(), pos: first, details: opened.details };
+        share.watch = navigator.geolocation.watchPosition((pos) => {
+            share.pos = pos;
+        }, () => { }, { enableHighAccuracy: true, maximumAge: 15000 });
+        liveShares.set(messageId, share);
+    }
+    /** Every few seconds: send the newest position of each live share that is due. */
+    async function tickLive() {
+        for (const [messageId, share] of liveShares) {
+            if (Date.now() >= share.until) {
+                navigator.geolocation.clearWatch(share.watch);
+                liveShares.delete(messageId);
+                continue;
+            }
+            if (!share.pos || Date.now() - share.last < LIVE_INTERVAL_MS)
+                continue;
+            share.last = Date.now();
+            try {
+                await sendLiveContent(share, messageId, { type: "location", target: messageId, ...coords(share.pos) });
+            }
+            catch {
+                // Next try in a moment.
+            }
+        }
+    }
+    /**
+     * Sends a silent live location message: through the open chat (with its key
+     * checks), or with the members from when sharing started.
+     */
+    async function sendLiveContent(share, messageId, content) {
+        if (current && current.id === share.chatId) {
+            await sendContent(current, content, { silent: true });
+            share.details = current.details;
+            syncCurrent().catch(() => { });
+            return;
+        }
+        if (!share.details)
+            return;
+        const id = newMessageId();
+        const payload = await SeresCrypto.encryptMessage(identity, share.chatId, id, content, encryptionMembers(share.details));
+        try {
+            await post(`/api/chats/${encodeURIComponent(share.chatId)}/messages`, { id, payload, silent: true, files: [] });
+        }
+        catch (error) {
+            // The members changed: wait until the chat is open and checked again.
+            if (error instanceof ApiError && error.status === 409)
+                share.details = null;
+            throw error;
+        }
+    }
+    async function stopLive(chatId, messageId) {
+        const share = liveShares.get(messageId);
+        if (share) {
+            navigator.geolocation.clearWatch(share.watch);
+            liveShares.delete(messageId);
+        }
+        if (!current || current.id !== chatId)
+            return;
+        try {
+            const last = share?.pos ? coords(share.pos) : {};
+            await sendContent(current, { type: "location", target: messageId, stopped: true, ...last }, { silent: true });
+            await syncCurrent();
+        }
+        catch (error) {
+            showAlert(errorText(error));
+        }
+    }
+    function openAttachMenu(event) {
+        closeFloatingMenus();
+        const menu = h("div", { className: "floating-menu attach-menu" });
+        for (const [icon, label, fn] of [
+            ["attach_file", t("attach.file"), () => $("attach-input").click()],
+            ["location_on", t("location.title"), () => openLocationDialog()],
+            ["ballot", t("poll.button"), () => openPollDialog()],
+        ]) {
+            const entry = button("", "floating-item", () => {
+                closeFloatingMenus();
+                fn();
+            });
+            entry.append(h("span", { className: "material-symbols-rounded", text: icon }), document.createTextNode(" " + label));
+            menu.appendChild(entry);
+        }
+        document.body.appendChild(menu);
+        const rect = event.currentTarget.getBoundingClientRect();
+        placeMenu(menu, rect.left, rect.top - menu.offsetHeight - 6);
     }
     // ------------------------------------------------------------------ polls
     function validPoll(poll) {
@@ -4140,7 +4433,15 @@
             event.stopPropagation();
             toggleEmojiPicker();
         });
-        $("attach-btn").addEventListener("click", () => $("attach-input").click());
+        $("attach-btn").addEventListener("click", (event) => {
+            event.stopPropagation();
+            openAttachMenu(event);
+        });
+        $("location-send").addEventListener("click", () => sendLocation(false));
+        $("location-live").addEventListener("click", () => sendLocation(true));
+        window.setInterval(() => {
+            tickLive().catch(() => { });
+        }, 5000);
         $("poll-btn").addEventListener("click", openPollDialog);
         $("poll-cancel").addEventListener("click", () => $("poll-modal").classList.add("modal-hidden"));
         $("poll-form").addEventListener("submit", (event) => {

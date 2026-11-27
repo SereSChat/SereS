@@ -93,7 +93,7 @@ pub async fn security_middleware(request: Request<Body>, next: Next) -> Response
     }
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.entry("Content-Security-Policy").or_insert(HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; object-src 'self'; frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"));
+    headers.entry("Content-Security-Policy").or_insert(HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://tile.openstreetmap.org; media-src 'self' blob:; object-src 'self'; frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"));
     headers
         .entry("X-Content-Type-Options")
         .or_insert(HeaderValue::from_static("nosniff"));
@@ -106,7 +106,7 @@ pub async fn security_middleware(request: Request<Body>, next: Next) -> Response
     headers
         .entry("Permissions-Policy")
         .or_insert(HeaderValue::from_static(
-            "camera=(self), microphone=(self), display-capture=(self), geolocation=()",
+            "camera=(self), microphone=(self), display-capture=(self), geolocation=(self)",
         ));
     if is_api {
         headers
