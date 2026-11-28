@@ -50,8 +50,13 @@ def deliver(message):
         print("----- MAIL_DEBUG -----\n" + head + "\n" + message.get_content() + "----------------------", flush=True)
         return
     host = os.getenv("SMTP_HOST")
-    port = int(os.getenv("SMTP_PORT", "587"))
-    security = os.getenv("SMTP_SECURITY", "starttls").lower()
+    port_raw = (os.getenv("SMTP_PORT") or "").strip()
+    port = int(port_raw) if port_raw else 587
+    if not 1 <= port <= 65535:
+        raise ValueError(f"Invalid SMTP_PORT: {port}")
+    security = (os.getenv("SMTP_SECURITY") or "starttls").strip().lower()
+    if security not in ("starttls", "ssl", "none"):
+        raise ValueError(f"Unsupported SMTP_SECURITY: {security!r}")
     context = ssl.create_default_context()
     if security == "ssl":
         client = smtplib.SMTP_SSL(host, port, context=context, timeout=20)

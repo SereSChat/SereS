@@ -56,7 +56,9 @@ MAX_PINS = 50
 ONLINE_SECONDS = 45
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,20}$")
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+EMAIL_RE = re.compile(
+    r'^[^@\s,<>\"\\\x00-\x1f\x7f]+@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$'
+)
 B64_RE = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
 
 app = flask.Flask(__name__, static_folder="../public", static_url_path="/")
@@ -866,14 +868,18 @@ def totp_enable():
     user = current_user()
     if rate_limited(("totp-enable", user["id"]), 10, 300):
         return error("Too many attempts, please wait a few minutes", 429)
-    step = totp.verify(user["totp_pending"], json_body().get("code"))
+    pending = user["totp_pending"]
+    step = totp.verify(pending, json_body().get("code"))
     if step is None:
         return error("The code is wrong. Check the time on your phone and try again.")
     conn = get_db()
-    conn.execute(
-        "UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_last_step = ? WHERE id = ?",
-        (step, user["id"]),
+    cur = conn.execute(
+        "UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_last_step = ? WHERE id = ? AND totp_pending = ?",
+        (step, user["id"], pending),
     )
+    if cur.rowcount != 1:
+        conn.rollback()
+        return error("Authenticator setup is no longer pending; please start again.", 409)
     conn.commit()
     return ok(message="Authenticator app enabled")
 

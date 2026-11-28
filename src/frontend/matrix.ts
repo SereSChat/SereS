@@ -11,13 +11,15 @@ type MatrixSession = {
 
 declare global {
   interface Window {
-    SeresMatrix: { activate(): void; deactivate(): void };
+    SeresMatrix: { activate(): void; deactivate(): void; logout(): Promise<void> };
   }
 }
 
 const SESSION_KEY = "seres.matrix.session.v1";
 const TOKEN_KEY = "seres.matrix.token.v1";
 const SSO_STATE_KEY = "seres.matrix.sso.state.v1";
+const SSO_SERVER_KEY = "seres.matrix.sso.server";
+const SERVER_KEY = "seres.matrix.server";
 const ROOT_ID = "matrix-app-root";
 const LIST_ID = "matrix-list";
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -54,6 +56,8 @@ let cryptoLease: (() => void) | null = null;
 let cancelInputDialog: (() => void) | null = null;
 let observedThreadRoom: sdk.Room | null = null;
 let stopObservingThreads: (() => void) | null = null;
+let ssoCallbackTask: Promise<boolean> | null = null;
+let seresBootReadyTask: Promise<void> | null = null;
 const mediaObjectUrls = new Set<string>();
 const mediaNodes = new Map<string, HTMLElement>();
 
@@ -129,26 +133,66 @@ function clearCallbackFromAddress() {
   history.replaceState({}, document.title, url.pathname + url.search + url.hash);
 }
 
+function isSeresAppShell(): boolean {
+  return !!document.getElementById("my-username-display");
+}
+
+function isSeresBootComplete(): boolean {
+  return !isSeresAppShell() || !!document.querySelector('.rail-nav[data-rail-view][aria-current="page"]');
+}
+
+function waitForSeresBoot(): Promise<void> {
+  if (isSeresBootComplete()) return Promise.resolve();
+  if (seresBootReadyTask) return seresBootReadyTask;
+  seresBootReadyTask = new Promise<void>((resolve) => {
+    let observer: MutationObserver | null = null;
+    const check = () => {
+      if (!isSeresBootComplete()) return false;
+      observer?.disconnect();
+      resolve();
+      return true;
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => { check(); }, { once: true });
+    }
+    const target = document.body || document.documentElement;
+    if (typeof MutationObserver !== "undefined" && target) {
+      observer = new MutationObserver(() => { check(); });
+      observer.observe(target, { subtree: true, attributes: true, attributeFilter: ["class", "aria-current"], childList: true });
+    }
+    check();
+  }).finally(() => { seresBootReadyTask = null; });
+  return seresBootReadyTask;
+}
+
 async function handleSsoCallback(): Promise<boolean> {
+  if (ssoCallbackTask) return ssoCallbackTask;
   const query = new URLSearchParams(location.search);
   const token = query.get("loginToken");
   if (!token) return false;
-  const expected = sessionStorage.getItem(SSO_STATE_KEY);
-  const received = query.get("state") || query.get("matrix_sso");
-  const baseUrl = sessionStorage.getItem("seres.matrix.sso.server");
-  sessionStorage.removeItem(SSO_STATE_KEY);
-  sessionStorage.removeItem("seres.matrix.sso.server");
-  clearCallbackFromAddress();
-  if (!expected || !received || expected !== received || !baseUrl) {
-    throw new Error("Matrix SSO callback did not match the sign-in request. Please try again.");
-  }
-  const authClient = sdk.createClient({ baseUrl });
-  const response = await authClient.loginRequest({
-    type: "m.login.token", token,
-    initial_device_display_name: "SereS web",
-  });
-  await finishLogin(baseUrl, response);
-  return true;
+  ssoCallbackTask = (async () => {
+    await waitForSeresBoot();
+    const currentQuery = new URLSearchParams(location.search);
+    const currentToken = currentQuery.get("loginToken");
+    if (!currentToken) return false;
+    const expected = sessionStorage.getItem(SSO_STATE_KEY);
+    const received = currentQuery.get("state") || currentQuery.get("matrix_sso");
+    const baseUrl = sessionStorage.getItem(SSO_SERVER_KEY);
+    sessionStorage.removeItem(SSO_STATE_KEY);
+    sessionStorage.removeItem(SSO_SERVER_KEY);
+    clearCallbackFromAddress();
+    if (!expected || !received || expected !== received || !baseUrl) {
+      throw new Error("Matrix SSO callback did not match the sign-in request. Please try again.");
+    }
+    const authClient = sdk.createClient({ baseUrl });
+    const response = await authClient.loginRequest({
+      type: "m.login.token", token: currentToken,
+      initial_device_display_name: "SereS web",
+    });
+    await finishLogin(baseUrl, response);
+    return true;
+  })().finally(() => { ssoCallbackTask = null; });
+  return ssoCallbackTask;
 }
 
 function startClient(session: MatrixSession): sdk.MatrixClient {
@@ -276,9 +320,14 @@ function notifyMatrixMessage(event: sdk.MatrixEvent, room: sdk.Room) {
   const relation = event.getContent()?.["m.relates_to"];
   const replyThreadId = relation?.rel_type === "m.thread" ? relation.event_id || "" : "";
   if (active && selectedRoomId === room.roomId && threadRootId === replyThreadId && document.visibilityState === "visible") return;
+  const roomEncrypted = !!client.isRoomEncrypted?.(room.roomId);
+  const unencryptedInEncryptedRoom = roomEncrypted && !event.isEncrypted?.();
+  const body = unencryptedInEncryptedRoom
+    ? "Unencrypted message in encrypted room"
+    : (event.getContent().body || "New Matrix message");
   window.dispatchEvent(new CustomEvent("seres:notification", { detail: {
     title: `${room.name || room.roomId}${replyThreadId ? " · Thread" : ""}`,
-    body: event.getContent().body || "New Matrix message",
+    body,
     tag: `matrix:${event.getId() || `${room.roomId}:${Date.now()}`}`,
     onClick: () => {
       selectedRoomId = room.roomId;
@@ -377,7 +426,7 @@ function renderRoomList() {
     const button = h("button", `matrix-room-button${selectedRoomId === room.roomId ? " selected" : ""}`);
     button.type = "button";
     button.append(h("span", "matrix-room-name", room.name || room.roomId));
-    if (room.hasEncryptionStateEvent()) {
+    if (matrix.isRoomEncrypted?.(room.roomId)) {
       button.append(symbol("lock"));
       button.setAttribute("aria-label", `${room.name || room.roomId}, end-to-end encrypted`);
     }
@@ -589,8 +638,9 @@ function renderRoom() {
 
   const header = h("header", "matrix-room-header");
   const title = h("div", "matrix-room-heading");
+  const roomEncrypted = !!matrix.isRoomEncrypted?.(room.roomId);
   title.append(h("strong", "", threadRootId ? "Thread" : room.name || room.roomId));
-  title.append(h("span", "matrix-room-subtitle", `${room.getJoinedMemberCount()} members | ${room.hasEncryptionStateEvent() ? "End-to-end encrypted" : "Not encrypted"}`));
+  title.append(h("span", "matrix-room-subtitle", `${room.getJoinedMemberCount()} members | ${roomEncrypted ? "End-to-end encrypted" : "Not encrypted"}`));
   header.append(mobileRoomsButton(), title);
   const actions = h("div", "matrix-header-actions");
   if (threadRootId) {
@@ -623,21 +673,28 @@ function renderRoom() {
     : events.filter((event) => !event.getContent()?.["m.relates_to"]?.rel_type);
 
   for (const event of filtered.slice(-150)) {
-    if (event.getType() !== sdk.EventType.RoomMessage && !event.isEncrypted()) continue;
+    if (event.getType() !== sdk.EventType.RoomMessage && !event.isEncrypted?.()) continue;
     const content = event.getContent();
-    const row = h("article", `matrix-message${threadRootId && event.getId() === threadRootId ? " matrix-thread-root" : ""}`);
+    const isEncryptedEvent = !!event.isEncrypted?.();
+    const unencryptedInEncryptedRoom = roomEncrypted && !isEncryptedEvent;
+    const row = h("article", `matrix-message${threadRootId && event.getId() === threadRootId ? " matrix-thread-root" : ""}${unencryptedInEncryptedRoom ? " matrix-message-unencrypted" : ""}`);
     row.dataset.eventId = event.getId() || "";
     const senderName = matrixSenderName(event, room);
     const time = matrixTimestamp(event.getDate());
     const replies = !threadRootId && event.getId() ? threadSummary(room, event.getId()!, events) : null;
-    row.dataset.signature = JSON.stringify([event.getType(), content, senderName, time, replies]);
+    row.dataset.signature = JSON.stringify([event.getType(), content, senderName, time, replies, unencryptedInEncryptedRoom]);
     const sender = h("strong", "matrix-message-sender", senderName);
     sender.title = event.getSender() || "";
     const stamp = h("time", "matrix-message-time", time.label);
     stamp.dateTime = time.iso;
     stamp.title = time.title;
     row.append(sender, stamp);
-    row.append(h("div", "matrix-message-body", content.body || (event.isEncrypted() ? "Encrypted message could not be decrypted yet." : "Unsupported message")));
+    if (unencryptedInEncryptedRoom) {
+      const warning = h("div", "matrix-unencrypted-warning", "Warning: Unencrypted message in an encrypted room");
+      warning.setAttribute("role", "note");
+      row.append(warning);
+    }
+    row.append(h("div", "matrix-message-body", content.body || (isEncryptedEvent ? "Encrypted message could not be decrypted yet." : "Unsupported message")));
     appendAttachment(row, content, matrix);
     if (!threadRootId && event.getId()) {
       const label = replies?.count
@@ -1265,20 +1322,81 @@ function renderLogin(error = "") {
   void handleSsoCallback().then((handled) => { if (handled) renderWorkspace(); }).catch((reason) => renderLogin(safeError(reason)));
 }
 
+function deleteIndexedDatabase(name: string): Promise<void> {
+  if (typeof indexedDB === "undefined" || typeof indexedDB.deleteDatabase !== "function") return Promise.resolve();
+  return new Promise((resolve) => {
+    try {
+      const request = indexedDB.deleteDatabase(name);
+      request.onsuccess = () => resolve();
+      request.onerror = () => resolve();
+      request.onblocked = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+function knownCryptoStorePrefixes(): Set<string> {
+  const prefixes = new Set<string>();
+  for (const raw of [sessionStorage.getItem(TOKEN_KEY), localStorage.getItem(SESSION_KEY)]) {
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.baseUrl && parsed?.userId && parsed?.deviceId) {
+        prefixes.add(cryptoStoreName(parsed as MatrixSession));
+      }
+    } catch { /* ignore */ }
+  }
+  return prefixes;
+}
+
 async function logout() {
-  try { await client?.logout(true); } catch { /* The homeserver may already have revoked this session. */ }
+  const activeClient = client;
+  const prefixes = knownCryptoStorePrefixes();
+  const [primaryPrefix] = prefixes;
+  try { await activeClient?.logout(true); } catch { /* The homeserver may already have revoked this session. */ }
   await stop();
+  try {
+    await activeClient?.clearStores?.(primaryPrefix ? { cryptoDatabasePrefix: primaryPrefix } : undefined);
+  } catch { /* ignore */ }
+
+  const dbNames = new Set<string>();
+  for (const prefix of prefixes) {
+    dbNames.add(`${prefix}::matrix-sdk-crypto`);
+    dbNames.add(`${prefix}::matrix-sdk-crypto-meta`);
+    dbNames.add(prefix);
+  }
+  if (typeof indexedDB !== "undefined" && typeof indexedDB.databases === "function") {
+    try {
+      const databases = await indexedDB.databases();
+      for (const info of databases) {
+        if (typeof info.name === "string" && info.name.startsWith("seres-matrix:")) {
+          dbNames.add(info.name);
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  await Promise.all(Array.from(dbNames, (name) => deleteIndexedDatabase(name)));
+
   localStorage.removeItem(SESSION_KEY);
   sessionStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(SSO_STATE_KEY);
+  sessionStorage.removeItem(SSO_SERVER_KEY);
+  localStorage.removeItem(SERVER_KEY);
+  loginBaseUrl = "";
+  loginFlows = [];
   selectedRoomId = ""; selectedSpaceId = ""; threadRootId = "";
   drafts.clear();
   pendingSends.clear();
-  renderLogin();
+  if (document.getElementById(LIST_ID) && document.getElementById(ROOT_ID)) renderLogin();
 }
 
 function activate() {
   active = true;
-  if (new URLSearchParams(location.search).has("loginToken")) { renderLogin(); return; }
+  if (new URLSearchParams(location.search).has("loginToken")) {
+    if (!client && !connectionTask) renderLogin();
+    return;
+  }
   const session = savedSession();
   if (!session) { renderLogin(); return; }
   if (connectionTask) return;
@@ -1287,10 +1405,14 @@ function activate() {
 }
 function deactivate() { active = false; cancelInputDialog?.(); }
 
-window.SeresMatrix = { activate, deactivate };
+window.SeresMatrix = { activate, deactivate, logout };
 document.addEventListener("visibilitychange", () => {
   if (active && client && document.visibilityState === "visible") renderRoom();
 });
 if (new URLSearchParams(location.search).has("loginToken")) {
-  window.dispatchEvent(new Event("seres:open-matrix"));
+  void waitForSeresBoot().then(() => {
+    if (new URLSearchParams(location.search).has("loginToken")) {
+      window.dispatchEvent(new Event("seres:open-matrix"));
+    }
+  });
 }

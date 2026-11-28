@@ -874,3 +874,202 @@ test('Jitsi opens validated HTTPS URLs in a new tab without an iframe and reject
     assert.equal(e.w.document.querySelector('iframe'), null);
   } finally { e.close(); }
 });
+
+test('SeresMatrix.logout clears client stores, all seres-matrix:* IndexedDB stores, and all Matrix storage keys', async () => {
+  const e = environment();
+  try {
+    assert.equal(typeof e.w.SeresMatrix.logout, 'function');
+    let loggedOut = 0;
+    let clearedArgs = null;
+    e.matrix.logout = async () => { loggedOut++; };
+    e.matrix.clearStores = async (args) => { clearedArgs = args || {}; };
+
+    const account = { baseUrl: 'https://hs.example', userId: '@me:example.org', deviceId: 'DEV1', accessToken: 'secret-token' };
+    e.api.saveSession(account);
+    e.w.sessionStorage.setItem('seres.matrix.sso.state.v1', 'sso-state');
+    e.w.sessionStorage.setItem('seres.matrix.sso.server', 'https://hs.example');
+    e.w.localStorage.setItem('seres.matrix.server', 'https://hs.example');
+
+    const deletedDbs = [];
+    e.w.indexedDB = {
+      databases: async () => [
+        { name: `${e.api.cryptoStoreName(account)}::matrix-sdk-crypto`, version: 1 },
+        { name: 'seres-matrix:legacy-store::matrix-sdk-crypto-meta', version: 1 },
+        { name: 'unrelated-app-db', version: 1 },
+      ],
+      deleteDatabase: (name) => {
+        deletedDbs.push(name);
+        const req = {};
+        setImmediate(() => req.onsuccess?.({}));
+        return req;
+      },
+    };
+
+    await e.w.SeresMatrix.logout();
+    assert.equal(loggedOut, 1);
+    assert.ok(clearedArgs !== null, 'clearStores should be called on logout');
+    assert.ok(deletedDbs.includes(`${e.api.cryptoStoreName(account)}::matrix-sdk-crypto`));
+    assert.ok(deletedDbs.includes('seres-matrix:legacy-store::matrix-sdk-crypto-meta'));
+    assert.equal(deletedDbs.includes('unrelated-app-db'), false);
+    assert.equal(e.w.sessionStorage.getItem('seres.matrix.token.v1'), null);
+    assert.equal(e.w.localStorage.getItem('seres.matrix.session.v1'), null);
+    assert.equal(e.w.sessionStorage.getItem('seres.matrix.sso.state.v1'), null);
+    assert.equal(e.w.sessionStorage.getItem('seres.matrix.sso.server'), null);
+    assert.equal(e.w.localStorage.getItem('seres.matrix.server'), null);
+  } finally { e.close(); }
+});
+
+test('encryption indicators use matrix.isRoomEncrypted instead of room.hasEncryptionStateEvent', () => {
+  const e = environment();
+  try {
+    const roomA = e.rooms.get('!a:example.org');
+    const roomB = e.rooms.get('!b:example.org');
+    roomA.hasEncryptionStateEvent = () => false;
+    roomB.hasEncryptionStateEvent = () => true;
+    e.matrix.isRoomEncrypted = (roomId) => roomId === '!a:example.org';
+
+    e.api.renderRoomList();
+    const buttons = Array.from(e.w.document.querySelectorAll('.matrix-room-button'));
+    const btnA = buttons.find((b) => b.textContent.includes('!a:example.org'));
+    const btnB = buttons.find((b) => b.textContent.includes('!b:example.org'));
+    assert.match(btnA.getAttribute('aria-label') || '', /end-to-end encrypted/i);
+    assert.equal(btnB.getAttribute('aria-label'), null);
+
+    e.api.select('!a:example.org');
+    e.api.renderRoom();
+    assert.match(e.w.document.querySelector('.matrix-room-subtitle').textContent, /End-to-end encrypted/);
+    e.api.select('!b:example.org');
+    e.api.renderRoom();
+    assert.match(e.w.document.querySelector('.matrix-room-subtitle').textContent, /Not encrypted/);
+  } finally { e.close(); }
+});
+
+test('encrypted rooms mark unencrypted events with a warning and suppress plaintext notification previews', async () => {
+  const e = environment();
+  try {
+    const matrix = connectable(e);
+    matrix.isRoomEncrypted = (roomId) => roomId === '!b:example.org';
+    await e.api.connect(account);
+
+    const room = e.rooms.get('!b:example.org');
+    const plainInEncrypted = {
+      getId: () => '$plain-in-e2ee',
+      getType: () => 'm.room.message',
+      isEncrypted: () => false,
+      getContent: () => ({ body: 'secret plaintext leak' }),
+      getSender: () => '@other:example.org',
+      getDate: () => null,
+    };
+    const encryptedOk = {
+      getId: () => '$enc-in-e2ee',
+      getType: () => 'm.room.message',
+      isEncrypted: () => true,
+      getContent: () => ({ body: 'properly encrypted text' }),
+      getSender: () => '@other:example.org',
+      getDate: () => null,
+    };
+    room.getLiveTimeline = () => ({ getEvents: () => [plainInEncrypted, encryptedOk] });
+    e.api.select('!b:example.org');
+    e.api.renderRoom();
+
+    const plainRow = e.w.document.querySelector('[data-event-id="$plain-in-e2ee"]');
+    const encRow = e.w.document.querySelector('[data-event-id="$enc-in-e2ee"]');
+    assert.ok(plainRow.classList.contains('matrix-message-unencrypted'));
+    const warning = plainRow.querySelector('.matrix-unencrypted-warning');
+    assert.ok(warning, 'unencrypted event in encrypted room must display a warning banner/badge');
+    assert.match(warning.textContent, /not encrypted|unencrypted/i);
+    assert.equal(encRow.querySelector('.matrix-unencrypted-warning'), null);
+
+    const notifications = [];
+    e.w.addEventListener('seres:notification', (ev) => notifications.push(ev.detail));
+    e.api.select('!a:example.org');
+    matrix.emit('timeline', plainInEncrypted, room, false);
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0].body.includes('secret plaintext leak'), false);
+    assert.match(notifications[0].body, /unencrypted/i);
+
+    await e.api.stop();
+  } finally { e.close(); }
+});
+
+test('SSO loginToken callback waits for SereS boot/auth and deduplicates concurrent renderLogin calls without discarding state', async () => {
+  const html = readFileSync(resolve(__dirname, '../public/index.html'), 'utf8');
+  const dom = new JSDOM(html, {
+    url: 'https://seres.example/index.html?loginToken=sso-secret-token&matrix_sso=expected-state',
+    runScripts: 'outside-only',
+  });
+  const w = dom.window;
+  try {
+    w.sessionStorage.setItem('seres.matrix.sso.state.v1', 'expected-state');
+    w.sessionStorage.setItem('seres.matrix.sso.server', 'https://hs.example');
+    w.URL.revokeObjectURL = () => {};
+    Object.defineProperty(w.navigator, 'locks', {
+      value: { request: async (_name, _opts, cb) => cb({}) },
+      configurable: true,
+    });
+    const loginRequests = [];
+    let resolveLogin;
+    const mockClient = Object.assign(new EventEmitter(), {
+      getRoom: () => null,
+      getRooms: () => [],
+      getUserId: () => '@me:example.org',
+      isRoomEncrypted: () => false,
+      stopClient() {},
+      removeAllListeners() {},
+      initRustCrypto: async () => {},
+      startClient: async () => { mockClient.emit('sync', 'prepared'); },
+      loginRequest: async (payload) => {
+        loginRequests.push(payload);
+        return new Promise((resolve) => { resolveLogin = resolve; });
+      },
+    });
+    w.sdk = {
+      EventType: { RoomMessage: 'm.room.message' },
+      KnownMembership: { Join: 'join', Invite: 'invite' },
+      NotificationCountType: { Total: 'total' },
+      CallEvent: { FeedsChanged: 'feeds', State: 'state', Hangup: 'hangup', Error: 'error' },
+      MatrixEventEvent: { Decrypted: 'decrypted' },
+      RoomMemberEvent: { Name: 'memberName' },
+      UserEvent: { DisplayName: 'displayName' },
+      RoomEvent: { Timeline: 'timeline', Name: 'name', MyMembership: 'membership', LocalEchoUpdated: 'Room.localEchoUpdated', UnreadNotifications: 'Room.UnreadNotifications' },
+      ClientEvent: { Sync: 'sync', Room: 'room' },
+      SyncState: { Prepared: 'prepared' },
+      ThreadEvent: { Update: 'Thread.update', NewReply: 'Thread.newReply' },
+      createClient: () => mockClient,
+    };
+
+    let openedEvents = 0;
+    w.addEventListener('seres:open-matrix', () => { openedEvents++; });
+
+    w.eval(compiled);
+    await tick();
+
+    // Before SereS boot finishes (no .rail-nav.active yet), SSO state and loginToken must NOT be discarded!
+    assert.equal(loginRequests.length, 0, 'must not exchange loginToken before SereS boot succeeds');
+    assert.equal(w.sessionStorage.getItem('seres.matrix.sso.state.v1'), 'expected-state');
+    assert.equal(w.sessionStorage.getItem('seres.matrix.sso.server'), 'https://hs.example');
+    assert.equal(new w.URLSearchParams(w.location.search).get('loginToken'), 'sso-secret-token');
+    assert.equal(openedEvents, 0, 'must not dispatch seres:open-matrix before SereS boot');
+
+    // Simulate SereS boot completing (/api/me succeeded, switchView('chats') activated nav)
+    const chatsNav = w.document.querySelector('.rail-nav[data-rail-view="chats"]');
+    chatsNav.classList.add('active');
+    chatsNav.setAttribute('aria-current', 'page');
+    await tick();
+    await tick();
+
+    assert.equal(openedEvents, 1);
+    w.SeresMatrix.activate();
+    w.SeresMatrix.activate();
+    await tick();
+    assert.equal(loginRequests.length, 1, 'concurrent activate/renderLogin must only consume loginToken once');
+    assert.equal(loginRequests[0].token, 'sso-secret-token');
+
+    resolveLogin({ user_id: '@me:example.org', device_id: 'DEV', access_token: 'tok' });
+    await tick();
+    await tick();
+    await w.SeresMatrix.logout();
+  } finally {
+    w.close();
+  }
+});
