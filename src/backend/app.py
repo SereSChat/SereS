@@ -210,7 +210,7 @@ def security_headers(response):
     response.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' blob: data:; media-src 'self' blob:; object-src 'self'; "
+        "img-src 'self' blob: data: https://tile.openstreetmap.org; media-src 'self' blob:; object-src 'self'; "
         # Matrix accounts can use any HTTPS homeserver, including discovered hosts.
         # Plain HTTP is supported only for local development homeservers.
         "frame-src 'self'; connect-src 'self' https: wss: http://localhost:* "

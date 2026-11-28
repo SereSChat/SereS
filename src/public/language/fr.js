@@ -506,7 +506,7 @@ window.SeresLang.fr = {
   "link.confirmTitle": "Associer un nouvel appareil",
   "link.confirmText": "{device} veut être associé à ton compte. Il pourra lire tes discussions.",
   "link.checkCompare": "Code de contrôle : {code} – autorise seulement si le nouvel appareil affiche le même code.",
-  "link.needPassword": "Saisis ton mot de passe une fois pour associer des appareils depuis cet appareil.",
+  "link.needPassword": "Saisis ton mot de passe pour associer cet appareil. Il n'est pas enregistré sur cet appareil.",
   "link.done": "L'appareil est associé.",
   "call.reconnecting": "reconnexion…",
   "call.routeRelay": "via relais",
@@ -599,4 +599,6 @@ window.SeresLang.fr = {
   "location.unsupported": "Ce navigateur ne peut pas déterminer la position.",
   "location.denied": "L'accès à la position est bloqué. Autorise-le pour ce site dans les réglages du navigateur.",
   "location.failed": "La position n'a pas pu être déterminée. Réessaie dehors ou avec le Wi-Fi activé.",
+  "link.keyMismatch": "L'appareil de ce lien ne correspond pas à son QR code. Il n'a pas été associé ; recommence sur le nouvel appareil.",
+  "msg.untrustedKey": "⚠️ Envoyé avec une nouvelle clé de cette personne. Compare et accepte le nouveau code de sécurité dans les infos du chat pour le lire.",
 };

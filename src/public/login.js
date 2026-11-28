@@ -342,11 +342,14 @@
         }
         const session = { token: res.data.token, stop: false };
         linking = session;
-        const url = `${window.location.origin}/?link=${encodeURIComponent(session.token)}`;
+        // k = hash of this device's key: the main device checks it, so the server
+        // can't hand it another key that only matches the six-digit check code.
+        const keyHash = await SeresCrypto.linkKeyHash(keys.pub);
+        const url = `${window.location.origin}/?link=${encodeURIComponent(session.token)}&k=${keyHash}`;
         // The QR code uses the app's own link (seres://), so the iPhone camera
         // opens the SereS app directly; the app's scanner reads it as well.
         // The https link below is for copying to a main device in the browser.
-        el("link-qr").appendChild(SeresQR.toSvg(`seres://link?link=${encodeURIComponent(session.token)}`));
+        el("link-qr").appendChild(SeresQR.toSvg(`seres://link?link=${encodeURIComponent(session.token)}&k=${keyHash}`));
         el("link-url").value = url;
         const code = String(res.data.code);
         el("link-code").textContent = code.slice(0, 4) + "-" + code.slice(4);

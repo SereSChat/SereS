@@ -195,7 +195,7 @@ async fn store(
     session: &str,
     subscription: &Subscription,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("DELETE FROM apns_tokens WHERE session_hash=? AND kind=? AND token!=?")
         .bind(session)
         .bind(subscription.kind)

@@ -139,6 +139,11 @@ const SeresCrypto = (() => {
         return { privateKey: pair.privateKey, pub: toB64(await subtle.exportKey("spki", pair.publicKey)) };
     }
     /** Six digits both devices show, made from the new device's public key. */
+    /** A hash of the new device's key for the QR code, so the server can't swap the key. */
+    async function linkKeyHash(publicB64) {
+        const digest = new Uint8Array(await subtle.digest("SHA-256", encoder.encode("seres-link-key-v1|" + publicB64)));
+        return toB64(digest).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
     async function linkCheckCode(publicB64) {
         const digest = new Uint8Array(await subtle.digest("SHA-256", encoder.encode("seres-link-check-v1|" + publicB64)));
         const value = ((digest[0] << 16) | (digest[1] << 8) | digest[2]) % 1000000;
@@ -490,6 +495,7 @@ const SeresCrypto = (() => {
         unlockIdentity,
         newLinkKeyPair,
         linkCheckCode,
+        linkKeyHash,
         sealPrivateKeys,
         openSealedIdentity,
         rewrapPrivateKeys,

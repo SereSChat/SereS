@@ -13,7 +13,7 @@ use sqlx::Row;
 use std::io::Cursor;
 
 const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
-const MAX_AVATAR_PIXELS: u64 = 40_000_000;
+const MAX_AVATAR_PIXELS: u64 = 16_000_000;
 const MAX_AVATAR_DIMENSION: u32 = 16_384;
 const MAX_AVATAR_DECODE_ALLOC: u64 = 200 * 1024 * 1024;
 
@@ -153,7 +153,7 @@ async fn upload_group_avatar(
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
     let updated = uuid::Uuid::new_v4().simple().to_string();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -182,7 +182,7 @@ async fn delete_group_avatar(
         Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
         Err(_) => return db_error(),
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -229,6 +229,12 @@ async fn parse_upload(mut multipart: Multipart) -> ApiResult<Vec<u8>> {
         }
     }
     let raw = raw.ok_or_else(|| ApiError::new("No selected file", StatusCode::BAD_REQUEST))?;
+    // Decoding a large picture takes a lot of memory: a few at a time.
+    static DECODES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+    let _permit = DECODES
+        .acquire()
+        .await
+        .map_err(|_| ApiError::new("Image processing failed", StatusCode::INTERNAL_SERVER_ERROR))?;
     tokio::task::spawn_blocking(move || process_avatar_bytes(&raw))
         .await
         .map_err(|_| ApiError::new("Image processing failed", StatusCode::INTERNAL_SERVER_ERROR))?

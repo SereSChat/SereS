@@ -108,7 +108,7 @@ async fn send_friend_request(state: &AppState, me: &str, other: &str) -> axum::r
     )
     .await
     {
-        let mut tx = match state.db.begin().await {
+        let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
             Ok(v) => v,
             Err(_) => return db_error(),
         };
@@ -339,7 +339,7 @@ async fn block_user(
         return error("Cannot block yourself", StatusCode::BAD_REQUEST);
     }
     let was_friend = are_friends(&state.db, &me, &other).await.unwrap_or(false) as i64;
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -622,7 +622,7 @@ async fn is_blocked(pool: &SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::E
     Ok(sqlx::query("SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)").bind(a).bind(b).bind(b).bind(a).fetch_optional(pool).await?.is_some())
 }
 async fn make_friends(pool: &SqlitePool, a: &str, b: &str) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let (x, y) = pair(a, b);
     sqlx::query("INSERT OR IGNORE INTO friendships(user_a,user_b,created_at) VALUES(?,?,?)")
         .bind(x)

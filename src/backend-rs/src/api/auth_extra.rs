@@ -163,7 +163,7 @@ async fn replace_recovery_codes(
         }
     }
     let created = now();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -227,11 +227,12 @@ fn recovery_limited(state: &AppState, headers: &HeaderMap, peer: SocketAddr, bod
         .unwrap_or("")
         .trim()
         .to_lowercase();
-    state.rate_limited(
-        format!("recovery-ip:{}", super::client_ip(headers, peer)),
-        20,
-        900,
-    ) || state.rate_limited(format!("recovery-account:{account}"), 10, 900)
+    let ip = super::client_ip(headers, peer);
+    // Per account per address, plus a looser limit per account, so strangers
+    // can't block the owner's way back in with backup codes.
+    state.rate_limited(format!("recovery-ip:{ip}"), 20, 900)
+        || state.rate_limited(format!("recovery-account:{account}:{ip}"), 10, 900)
+        || state.rate_limited(format!("recovery-account:{account}"), 60, 3600)
 }
 async fn recovery_prelogin(
     State(state): State<AppState>,
@@ -335,7 +336,7 @@ async fn recovery_reset(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -362,6 +363,11 @@ async fn recovery_reset(
         .await
         .is_err()
         || sqlx::query("DELETE FROM user_sessions WHERE user_id=?")
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        || sqlx::query("DELETE FROM device_links WHERE user_id=?")
             .bind(&user_id)
             .execute(&mut *tx)
             .await
@@ -723,7 +729,7 @@ async fn passkey_register(
         })
         .unwrap_or_default();
     let transports = serde_json::to_string(&transports).unwrap_or_else(|_| "[]".into());
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -860,6 +866,13 @@ async fn login_second_factor(
         Err(_) => return db_error(),
     };
     let user_id: String = pending.try_get("user_id").unwrap_or_default();
+    // Per account too, so guesses spread over many addresses stay rare.
+    if state.rate_limited(format!("login-2fa-user:{user_id}"), 20, 3600) {
+        return error(
+            "Too many attempts, please wait a few minutes",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     let user = match sqlx::query("SELECT * FROM users WHERE id=?")
         .bind(&user_id)
         .fetch_optional(&state.db)
@@ -954,7 +967,7 @@ async fn login_second_factor(
     if !valid {
         return invalid_second_factor(&state, &pending).await;
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };

@@ -66,6 +66,22 @@
         if (untrustedHistory) {
             return { pub_ecdh: null, pub_sign: null, untrustedHistory: true };
         }
+        // The current key must be the one remembered for this person (trust on
+        // first use); a key the server swapped in is not trusted for messages.
+        if (user.id !== me.id && user.pub_ecdh && user.pub_sign) {
+            const fp = await SeresCrypto.fingerprint(user.pub_ecdh, user.pub_sign);
+            const pins = readStore("pins");
+            if (pins[user.id] && pins[user.id] !== fp) {
+                return { pub_ecdh: null, pub_sign: null, keyChanged: true };
+            }
+            if (!pins[user.id]) {
+                pins[user.id] = fp;
+                writeStore("pins", pins);
+                const pinKeys = readJsonStore("pin-keys", {});
+                pinKeys[user.id] = { fp, pub_ecdh: user.pub_ecdh, pub_sign: user.pub_sign };
+                writeJsonStore("pin-keys", pinKeys);
+            }
+        }
         return { pub_ecdh: user.pub_ecdh, pub_sign: user.pub_sign };
     }
     const shownCache = new Map();
@@ -116,6 +132,9 @@
         const linkToken = new URLSearchParams(window.location.search).get("link");
         if (linkToken)
             params.set("link", linkToken);
+        const linkKey = new URLSearchParams(window.location.search).get("k");
+        if (linkKey)
+            params.set("k", linkKey);
         const query = params.toString();
         window.location.href = "login.html" + (query ? "?" + query : "");
     }
@@ -402,6 +421,15 @@
                 return "";
         }
     }
+    /** A file reference from a message: all fields there and of the right type. */
+    function validFileRef(file) {
+        const f = file;
+        return (!!f &&
+            typeof f === "object" &&
+            ["id", "key", "iv", "name", "mime", "kind"].every((k) => typeof f[k] === "string") &&
+            typeof f.size === "number" &&
+            Number.isFinite(f.size));
+    }
     function showMessage(chatId, message) {
         const cacheKey = message.id + ":" + message.rev + (message.share ? ":shared" : "");
         let shown = shownCache.get(cacheKey);
@@ -417,6 +445,10 @@
                     await ensureUserKeys([message.sender_id]);
                     const known = userKeys.get(message.sender_id);
                     const sender = known ? { id: known.id, ...(await keysAt(known, message.created_at)) } : null;
+                    if (sender?.keyChanged) {
+                        // Shown again normally once the new security code is accepted.
+                        return { type: "error", text: t("msg.untrustedKey") };
+                    }
                     if (sender?.untrustedHistory) {
                         console.warn("Refused untrusted historical key for message", message.id);
                         return { type: "error", text: t("msg.untrustedHistoricalKey") };
@@ -425,6 +457,8 @@
                         throw new Error("unknown sender");
                     const content = await SeresCrypto.decryptMessage(identity, chatId, message.id, { id: sender.id, pub_ecdh: sender.pub_ecdh, pub_sign: sender.pub_sign }, message.payload, message.share);
                     const parsed = content && typeof content === "object" ? content : {};
+                    if (parsed.file && !validFileRef(parsed.file))
+                        delete parsed.file;
                     return { type: "text", text: String(parsed.text ?? ""), content: parsed };
                 }
                 catch (error) {
@@ -1644,7 +1678,8 @@
                         perSender.set(message.sender_id, { choices, seq: message.seq });
                     votes.set(content.target, perSender);
                 }
-                if (content && content.type === "location" && content.target && message.sender_id) {
+                // Only the person sharing may move or stop their live location.
+                if (content && content.type === "location" && content.target && message.sender_id && opened.messages.get(content.target)?.sender_id === message.sender_id) {
                     const previous = liveUpdates.get(content.target);
                     if (!previous || previous.seq < message.seq) {
                         liveUpdates.set(content.target, {
@@ -1695,7 +1730,14 @@
             const compact = previous !== null &&
                 previous.sender_id === message.sender_id &&
                 date.getTime() - parseTime(previous.created_at).getTime() < 5 * 60 * 1000;
-            fragment.appendChild(messageRow(opened, message, view, compact, reactions.get(message.id), votes.get(message.id), liveUpdates.get(message.id)));
+            try {
+                fragment.appendChild(messageRow(opened, message, view, compact, reactions.get(message.id), votes.get(message.id), liveUpdates.get(message.id)));
+            }
+            catch (error) {
+                // One broken message must not hide the whole chat.
+                console.warn("Could not show message", message.id, error);
+                fragment.appendChild(h("div", { className: "system-message" }, [h("span", { text: t("msg.decryptError") })]));
+            }
             previous = message;
         });
         container.textContent = "";
@@ -1712,7 +1754,7 @@
     }
     function messageRow(opened, message, view, compact, reactions, votes, liveUpdate) {
         const own = message.sender_id === me.id;
-        const sender = message.sender_display || message.sender || t("msg.unknown");
+        const sender = memberName(opened, message.sender_id) || message.sender_display || message.sender || t("msg.unknown");
         const content = view.content || {};
         const row = h("div", {
             className: "message-row" + (own ? " message-own" : "") + (compact ? " message-compact" : ""),
@@ -1767,7 +1809,7 @@
             if (formatted.mentioned && !own)
                 row.classList.add("mentioned");
         }
-        if (content.preview && view.type === "text" && linkPreviewsOn()) {
+        if (content.preview && view.type === "text" && linkPreviewsOn() && previewMatches(content.preview, view.text)) {
             const card = previewCard(content.preview);
             if (card)
                 bubble.insertBefore(card, bubble.querySelector(".message-body"));
@@ -1817,10 +1859,19 @@
             : original
                 ? original.sender_display || original.sender || ""
                 : memberName(opened, reply.sender_id);
-        const quote = h("div", { className: "reply-quote" }, [
-            h("strong", { text: author }),
-            h("span", { text: reply.preview }),
-        ]);
+        // The quote shows what the original really says once it is loaded, so a
+        // reply can't put words into someone else's mouth.
+        const text = h("span", { text: String(reply.preview ?? "") });
+        const name = h("strong", { text: author });
+        if (original) {
+            name.textContent = original.sender_id === me.id ? t("msg.you") : memberName(opened, original.sender_id) || original.sender_display || original.sender || "";
+            showMessage(opened.id, original)
+                .then((view) => {
+                text.textContent = view.type === "text" || view.type === "legacy" ? contentPreview(view).slice(0, 120) || "…" : view.text;
+            })
+                .catch(() => { });
+        }
+        const quote = h("div", { className: "reply-quote" }, [name, text]);
         quote.addEventListener("click", (event) => {
             event.stopPropagation();
             jumpToMessage(reply.id);
@@ -1933,7 +1984,8 @@
             pending = (async () => {
                 try {
                     const data = await api(`/api/link-preview?url=${encodeURIComponent(url)}`);
-                    const href = safeUrl(data.url) || url;
+                    // The card links to what the sender typed, never to an address the server returns.
+                    const href = url;
                     const image = typeof data.image === "string" && data.image.startsWith("data:image/") ? await shrinkImage(data.image) : null;
                     return {
                         url: href,
@@ -2000,6 +2052,21 @@
                 content.appendChild(card);
         }
     }
+    /** The card belongs to the first link in the text (same address), otherwise it isn't shown. */
+    function previewMatches(preview, text) {
+        const shown = firstUrl(text);
+        const target = safeUrl(preview?.url);
+        if (!shown || !target)
+            return false;
+        try {
+            const a = new URL(shown);
+            const b = new URL(target);
+            return a.origin === b.origin && a.pathname === b.pathname;
+        }
+        catch {
+            return false;
+        }
+    }
     function previewCard(preview, clickable = true) {
         const url = safeUrl(preview?.url);
         if (!url || !preview.title)
@@ -2015,7 +2082,7 @@
         const card = h(clickable ? "a" : "div", { className: "link-preview" + (image ? "" : " no-image") }, [
             image ? h("img", { className: "link-preview-image", attrs: { src: image, alt: "", loading: "lazy" } }) : null,
             h("div", { className: "link-preview-text" }, [
-                h("span", { className: "link-preview-site", text: String(preview.site || host) }),
+                h("span", { className: "link-preview-site", text: host }),
                 h("strong", { className: "link-preview-title", text: String(preview.title) }),
                 preview.description ? h("span", { className: "link-preview-desc", text: String(preview.description) }) : null,
             ]),
@@ -2035,7 +2102,8 @@
     const LIVE_DURATIONS = [15 * 60, 60 * 60, 8 * 60 * 60];
     const liveShares = new Map();
     function validCoords(lat, lng) {
-        return typeof lat === "number" && typeof lng === "number" && Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+        // The map (Web Mercator) only goes to ±85.05°; beyond that it can't be drawn.
+        return typeof lat === "number" && typeof lng === "number" && Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 85.05 && Math.abs(lng) <= 180;
     }
     function round(value, digits = 6) {
         const f = 10 ** digits;
@@ -2058,8 +2126,10 @@
         const top = py - height / 2;
         const map = h("div", { className: "location-map", attrs: { style: `width:${width}px;height:${height}px` } });
         const max = 2 ** zoom;
-        for (let tx = Math.floor(left / 256); tx <= Math.floor((left + width) / 256); tx++) {
-            for (let ty = Math.floor(top / 256); ty <= Math.floor((top + height) / 256); ty++) {
+        if (!Number.isFinite(left) || !Number.isFinite(top))
+            return map;
+        for (let tx = Math.floor(left / 256), nx = 0; tx <= Math.floor((left + width) / 256) && nx < 4; tx++, nx++) {
+            for (let ty = Math.floor(top / 256), ny = 0; ty <= Math.floor((top + height) / 256) && ny < 4; ty++, ny++) {
                 if (ty < 0 || ty >= max)
                     continue;
                 const x = ((tx % max) + max) % max;
@@ -2309,7 +2379,7 @@
         const counts = options.map(() => []);
         let voters = 0;
         perSender?.forEach((vote, senderId) => {
-            const valid = vote.choices.filter((n) => n < options.length);
+            const valid = [...new Set(vote.choices)].filter((n) => n < options.length);
             if (!valid.length)
                 return;
             voters++;
@@ -2776,7 +2846,13 @@
             if (edit) {
                 if (!text && !edit.content.file)
                     return;
-                await sendContent(opened, { ...edit.content, text }, { editId: edit.message.id });
+                const edited = { ...edit.content, text };
+                // The old link preview may belong to a link that is gone now.
+                delete edited.preview;
+                const preview = await previewFor(text);
+                if (preview)
+                    edited.preview = preview;
+                await sendContent(opened, edited, { editId: edit.message.id });
                 cancelEdit();
             }
             else {
@@ -5045,7 +5121,8 @@
         if (deviceDialogOpen)
             return;
         const state = await loadDevices().catch(() => null);
-        if (!state)
+        // Another dialog (e.g. linking) may have opened meanwhile.
+        if (!state || deviceDialogOpen)
             return;
         if (!state.hasMain) {
             await chooseFirstMainDevice(state);
@@ -5069,7 +5146,7 @@
      * The main device links a new device: from the QR code / link (token) or
      * the typed code. The account keys go sealed for the new device.
      */
-    async function linkDevice(query) {
+    async function linkDevice(query, keyHash) {
         try {
             const state = devicesState || (await loadDevices());
             if (!state.isMain) {
@@ -5077,6 +5154,12 @@
                 return;
             }
             const found = await post("/api/link/find", query);
+            // From the QR code / link: the key must be exactly the one the new device showed.
+            if (keyHash && (await SeresCrypto.linkKeyHash(found.pub)) !== keyHash) {
+                showAlert(t("link.keyMismatch"), 10000);
+                await post("/api/link/deny", { id: found.id }).catch(() => { });
+                return;
+            }
             const check = await SeresCrypto.linkCheckCode(found.pub);
             const allow = await askAboutDevice({
                 icon: "qr_code_2",
@@ -5211,9 +5294,10 @@
         // Opened from the QR code / link of a new device: link it.
         const linkToken = new URLSearchParams(window.location.search).get("link");
         if (linkToken) {
+            const keyHash = new URLSearchParams(window.location.search).get("k") || undefined;
             window.history.replaceState({}, document.title, window.location.pathname);
             await loadDevices().catch(() => { });
-            await linkDevice({ token: linkToken });
+            await linkDevice({ token: linkToken }, keyHash);
         }
         checkDevices().catch(() => { });
         window.setInterval(() => {

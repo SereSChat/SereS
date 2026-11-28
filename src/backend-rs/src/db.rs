@@ -122,6 +122,10 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     sqlx::query("CREATE TABLE IF NOT EXISTS file_blobs (id TEXT PRIMARY KEY, data BLOB NOT NULL)")
         .execute(&pool)
         .await?;
+    // People the owner removed from a group: they can't come back through the
+    // invite link, and only the owner can add them again.
+    sqlx::query("CREATE TABLE IF NOT EXISTS group_bans (chat_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (chat_id, user_id))")
+        .execute(&pool).await?;
     // Linking a new device by QR code, link or code (see api/devices.rs).
     sqlx::query("CREATE TABLE IF NOT EXISTS device_links (token_hash TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, pub TEXT NOT NULL, user_agent TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, user_id TEXT, sealed TEXT, state TEXT NOT NULL DEFAULT 'waiting')")
         .execute(&pool).await?;

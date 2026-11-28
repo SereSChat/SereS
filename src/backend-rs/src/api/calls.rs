@@ -97,7 +97,7 @@ async fn call_chat(
             StatusCode::TOO_MANY_REQUESTS,
         );
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return err_db(),
     };
@@ -159,7 +159,7 @@ async fn answer_call(
     {
         return error("This call has ended", StatusCode::NOT_FOUND);
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return err_db(),
     };
@@ -200,7 +200,7 @@ async fn decline_call(
     {
         return error("This call has ended", StatusCode::NOT_FOUND);
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return err_db(),
     };
@@ -230,7 +230,7 @@ async fn leave_call(
     {
         return error("This call has ended", StatusCode::NOT_FOUND);
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return err_db(),
     };
@@ -257,7 +257,7 @@ async fn my_calls(
         .get("after")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return err_db(),
     };
@@ -415,6 +415,15 @@ async fn add_to_call(
                 StatusCode::BAD_REQUEST,
             );
         }
+        // Everyone ends up in one group: nobody who blocked someone else there.
+        for other in joined.iter().chain(added.iter()) {
+            if other != &id && blocked(&state.db, other, &id).await.unwrap_or(true) {
+                return error(
+                    format!("{text} can't be added to this call"),
+                    StatusCode::BAD_REQUEST,
+                );
+            }
+        }
         if id != me.id && !joined.contains(&id) && !added.iter().any(|v| v == &id) {
             added.push(id)
         }
@@ -456,7 +465,7 @@ async fn add_to_call(
             .to_string()
             + "…"
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return err_db(),
     };
@@ -935,7 +944,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let mut tx = pool.begin().await.unwrap();
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
         let call_id = start_call(&mut tx, "g1", "alice").await.unwrap();
         set_state(&mut tx, &call_id, "bob", "joined").await.unwrap();
         tx.commit().await.unwrap();
@@ -958,7 +967,7 @@ mod tests {
         );
 
         // remove_user_from_chat_calls marks carol 'left' and notes apns_call_ends, keeping call active for alice+bob
-        let mut tx = pool.begin().await.unwrap();
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
         remove_user_from_chat_calls(&mut tx, "g1", "carol")
             .await
             .unwrap();
@@ -991,7 +1000,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let mut tx = pool.begin().await.unwrap();
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
         remove_user_from_chat_calls(&mut tx, "g1", "bob")
             .await
             .unwrap();
