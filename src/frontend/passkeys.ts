@@ -30,11 +30,12 @@ const SeresPasskeys = (() => {
 
   /** Creates a new passkey from the server's registration options. */
   async function create(options: any) {
+    const opts = options?.publicKey ?? options;
     const publicKey: PublicKeyCredentialCreationOptions = {
-      ...options,
-      challenge: fromB64url(options.challenge),
-      user: { ...options.user, id: fromB64url(options.user.id) },
-      excludeCredentials: descriptors(options.excludeCredentials),
+      ...opts,
+      challenge: fromB64url(opts.challenge),
+      user: { ...opts.user, id: fromB64url(opts.user.id) },
+      excludeCredentials: descriptors(opts.excludeCredentials),
     };
     const credential = (await navigator.credentials.create({ publicKey })) as PublicKeyCredential | null;
     if (!credential) throw new Error("cancelled");
@@ -54,10 +55,11 @@ const SeresPasskeys = (() => {
 
   /** Signs the server's login challenge with one of the user's passkeys. */
   async function get(options: any) {
+    const opts = options?.publicKey ?? options;
     const publicKey: PublicKeyCredentialRequestOptions = {
-      ...options,
-      challenge: fromB64url(options.challenge),
-      allowCredentials: descriptors(options.allowCredentials),
+      ...opts,
+      challenge: fromB64url(opts.challenge),
+      allowCredentials: descriptors(opts.allowCredentials),
     };
     const credential = (await navigator.credentials.get({ publicKey })) as PublicKeyCredential | null;
     if (!credential) throw new Error("cancelled");

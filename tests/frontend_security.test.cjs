@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
+const { types: utilTypes } = require("node:util");
 
 const PUBLIC_DIR = path.resolve(__dirname, "..", "src", "public");
 
@@ -224,6 +225,12 @@ function createDomEnv(options = {}) {
   function matchSimpleSelector(el, sel) {
     sel = sel.trim();
     if (!sel) return false;
+    let pseudoChecked = false;
+    if (sel.endsWith(":checked")) {
+      pseudoChecked = true;
+      sel = sel.slice(0, -8);
+    }
+    if (pseudoChecked && !el.checked) return false;
     if (sel.startsWith(".")) {
       const parts = sel.split(/(?=\[)/);
       const cls = parts[0].slice(1);
@@ -234,11 +241,12 @@ function createDomEnv(options = {}) {
       return true;
     }
     if (sel.startsWith("#")) return el.id === sel.slice(1);
-    const attrMatch = /^([a-zA-Z0-9_-]+)?\[([^=\]]+)(?:="([^"]*)")?\]$/.exec(sel);
+    const attrMatch = /^([a-zA-Z0-9_-]+)?\[([^=\]]+)(?:=(?:"([^"]*)"|([^\]]*)))?\]$/.exec(sel);
     if (attrMatch) {
       if (attrMatch[1] && el.tagName.toLowerCase() !== attrMatch[1].toLowerCase()) return false;
       const actual = el.getAttribute(attrMatch[2]);
-      if (attrMatch[3] !== undefined) return actual === attrMatch[3];
+      const expected = attrMatch[3] !== undefined ? attrMatch[3] : attrMatch[4];
+      if (expected !== undefined) return actual === expected;
       return actual !== null;
     }
     if (/^[a-zA-Z0-9_-]+$/.test(sel)) {
@@ -312,6 +320,7 @@ function createDomEnv(options = {}) {
       if (k === "class") this.className = String(v);
       if (k === "src") this.src = String(v);
       if (k === "href") this.href = String(v);
+      if (k === "value") this.value = String(v);
       if (k.startsWith("data-")) {
         const camel = k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
         this.dataset[camel] = String(v);
@@ -391,6 +400,12 @@ function createDomEnv(options = {}) {
     const el = new FakeElement("div");
     el.className = className;
     body.appendChild(el);
+  }
+  for (const view of ["chats", "friends", "requests", "matrix"]) {
+    const btn = new FakeElement("button");
+    btn.className = "rail-nav";
+    btn.setAttribute("data-rail-view", view);
+    body.appendChild(btn);
   }
   // Ensure list-search has a parentElement
   const listSearchWrap = new FakeElement("div");
@@ -518,7 +533,9 @@ function createDomEnv(options = {}) {
     sessionStorage,
     indexedDB,
     URL: FakeURL,
+    URLSearchParams,
     Blob: FakeBlob,
+    FormData,
     TextEncoder,
     TextDecoder,
     atob: (s) => Buffer.from(s, "base64").toString("binary"),
@@ -532,8 +549,16 @@ function createDomEnv(options = {}) {
     prompt: options.prompt || (() => null),
     matchMedia: () => ({ matches: false }),
     getComputedStyle: () => ({ getPropertyValue: () => "" }),
-    requestAnimationFrame: (fn) => setTimeout(fn, 0),
-    setTimeout,
+    requestAnimationFrame: (fn) => {
+      const id = setTimeout(fn, 0);
+      id.unref?.();
+      return id;
+    },
+    setTimeout: (fn, ms, ...args) => {
+      const id = setTimeout(fn, ms, ...args);
+      id.unref?.();
+      return id;
+    },
     clearTimeout,
     setInterval: () => 1,
     clearInterval: () => {},
@@ -648,14 +673,33 @@ test("#64: identityFromRaw derives SPKI locally and rejects pubEcdh/pubSign mism
   const alice = await makeUserAccount(SeresCrypto, "u-alice", "correct-horse-battery");
   const bob = await makeUserAccount(SeresCrypto, "u-bob", "correct-horse-battery");
 
+  // On v2 bundle, AAD check rejects mismatched pub_ecdh / pub_sign
+  await assert.rejects(() =>
+    SeresCrypto.unlockIdentity("u-alice", alice.bundle.enc_private, alice.wrapKey, bob.bundle.pub_ecdh, alice.bundle.pub_sign),
+  );
+  await assert.rejects(() =>
+    SeresCrypto.unlockIdentity("u-alice", alice.bundle.enc_private, alice.wrapKey, alice.bundle.pub_ecdh, bob.bundle.pub_sign),
+  );
+
+  // Direct identityFromRaw SPKI derivation mismatch check
+  const ecdh = await webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const sign = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const ecdhPrivBytes = new Uint8Array(await webcrypto.subtle.exportKey("pkcs8", ecdh.privateKey));
+  const signPrivBytes = new Uint8Array(await webcrypto.subtle.exportKey("pkcs8", sign.privateKey));
+  const ecdhPub = Buffer.from(await webcrypto.subtle.exportKey("spki", ecdh.publicKey)).toString("base64");
+  const signPub = Buffer.from(await webcrypto.subtle.exportKey("spki", sign.publicKey)).toString("base64");
+
   await assert.rejects(
-    () => SeresCrypto.unlockIdentity("u-alice", alice.bundle.enc_private, alice.wrapKey, bob.bundle.pub_ecdh, alice.bundle.pub_sign),
-    /mismatch|public key|invalid/i,
+    () => SeresCrypto.identityFromRaw("u-alice", { ecdh: new Uint8Array(ecdhPrivBytes), sign: new Uint8Array(signPrivBytes) }, bob.bundle.pub_ecdh, signPub),
+    /do not match|mismatch|public key/i,
   );
   await assert.rejects(
-    () => SeresCrypto.unlockIdentity("u-alice", alice.bundle.enc_private, alice.wrapKey, alice.bundle.pub_ecdh, bob.bundle.pub_sign),
-    /mismatch|public key|invalid/i,
+    () => SeresCrypto.identityFromRaw("u-alice", { ecdh: new Uint8Array(ecdhPrivBytes), sign: new Uint8Array(signPrivBytes) }, ecdhPub, bob.bundle.pub_sign),
+    /do not match|mismatch|public key/i,
   );
+  const ok = await SeresCrypto.identityFromRaw("u-alice", { ecdh: ecdhPrivBytes, sign: signPrivBytes }, ecdhPub, signPub);
+  assert.equal(ok.pubEcdh, ecdhPub);
+  assert.equal(ok.pubSign, signPub);
 });
 
 test("#64: encryptPrivateKeys uses seres-identity-v2 binding userId/pubEcdh/pubSign while supporting v1 fallback", async () => {
@@ -840,7 +884,9 @@ test("#65: linkDevice aborts and calls /api/link/deny on #k= hash mismatch", asy
   };
 
   await env.fireDomContentLoaded();
-  await new Promise((r) => setTimeout(r, 30));
+  for (let i = 0; i < 40 && deniedIds.length === 0; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
 
   assert.deepEqual(deniedIds, ["link-row-1"], "linkDevice must call /api/link/deny on #k= mismatch");
   assert.equal(askedAboutDevice, false, "linkDevice must abort before asking user on #k= mismatch");
@@ -974,14 +1020,14 @@ test("#67: SeresPasskeys create() and get() handle both wrapped and unwrapped pu
   await PK.create({ publicKey: { challenge, user: { id: userId, name: "alice" }, excludeCredentials: [{ id: "AQID", type: "public-key" }] } });
 
   assert.equal(seenCreate.length, 2);
-  assert.ok(seenCreate[0].publicKey.challenge instanceof ArrayBuffer);
-  assert.ok(seenCreate[1].publicKey.challenge instanceof ArrayBuffer);
+  assert.ok(utilTypes.isArrayBuffer(seenCreate[0].publicKey.challenge));
+  assert.ok(utilTypes.isArrayBuffer(seenCreate[1].publicKey.challenge));
 
   await PK.get({ challenge, allowCredentials: [{ id: "AQID", type: "public-key" }] });
   await PK.get({ publicKey: { challenge, allowCredentials: [{ id: "AQID", type: "public-key" }] } });
   assert.equal(seenGet.length, 2);
-  assert.ok(seenGet[0].publicKey.challenge instanceof ArrayBuffer);
-  assert.ok(seenGet[1].publicKey.challenge instanceof ArrayBuffer);
+  assert.ok(utilTypes.isArrayBuffer(seenGet[0].publicKey.challenge));
+  assert.ok(utilTypes.isArrayBuffer(seenGet[1].publicKey.challenge));
 });
 
 // =========================================================================
@@ -1734,9 +1780,13 @@ test("#74 index.js: logout() and forced-logout paths await SeresMatrix.logout() 
   });
   await envMain.window.SeresCrypto.saveIdentity(alice.identity);
   await envMain.fireDomContentLoaded();
-  await new Promise((r) => setTimeout(r, 30));
+  for (let i = 0; i < 40 && !envMain.getById("device-choice-list").querySelector("input[name=device-choice]:checked"); i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
   envMain.getById("device-choice-confirm").click();
-  await new Promise((r) => setTimeout(r, 40));
+  for (let i = 0; i < 40 && envMain.navigations.length === 0; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
   assert.equal(chooseMainLogout, 1, "chooseFirstMainDevice forced-logout must await SeresMatrix.logout()");
   assert.ok(envMain.navigations.some((u) => u.endsWith("/login.html")));
 });
@@ -1761,4 +1811,5 @@ test("#74 index.js: boot() preserves Matrix view when ?loginToken= is present", 
 
   assert.ok(!matrixEvents.includes("deactivate"), "boot() must NOT deactivate Matrix view during ?loginToken= callback");
   assert.equal(env.document.querySelector(".main-chat").classList.contains("matrix-open"), true, "Matrix view must remain open when ?loginToken= is present");
+  assert.equal(env.document.querySelector('.rail-nav[data-rail-view="matrix"]').getAttribute("aria-current"), "page", "Matrix rail-nav must have aria-current='page' for matrix.ts waitForSeresBoot()");
 });

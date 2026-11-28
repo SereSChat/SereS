@@ -40,6 +40,9 @@ window.SeresLang.de = {
   "login.registerFailed": "Bei der Registrierung ist ein Fehler aufgetreten.",
   "login.created": "Konto erstellt, du wirst angemeldet...",
   "login.reloginKeys": "Bitte melde dich auf diesem Gerät erneut an.",
+  "login.legacyBlocked": "Die unverschlüsselte Legacy-Anmeldung ist blockiert, da auf diesem Browser bereits Ende-zu-Ende-Verschlüsselung verwendet wurde.",
+  "login.legacyConfirm": "Dieses ältere Konto hat noch keine Ende-zu-Ende-Schlüssel. Zur Umstellung wird dein Passwort einmalig übertragen. Fortfahren?",
+  "login.legacyCancelled": "Umstellung der Anmeldung abgebrochen.",
 
   "app.addFriend": "Freund hinzufügen",
   "app.welcome": "Willkommen",
@@ -508,6 +511,7 @@ window.SeresLang.de = {
   "link.checkCompare": "Prüfcode: {code} – erlaube es nur, wenn das neue Gerät denselben Code zeigt.",
   "link.needPassword": "Gib einmal dein Passwort ein, um von diesem Gerät aus Geräte zu koppeln.",
   "link.done": "Das Gerät ist gekoppelt.",
+  "link.keyMismatch": "Der Kopplungsschlüssel des Geräts stimmt nicht mit dem gescannten Link überein. Das Koppeln wurde abgebrochen und abgelehnt.",
   "call.reconnecting": "verbindet neu…",
   "call.routeRelay": "über Relay",
   "call.routeTcp": "über Relay (TCP), kann ruckeln",
