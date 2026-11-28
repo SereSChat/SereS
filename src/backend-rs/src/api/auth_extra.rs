@@ -1560,4 +1560,588 @@ mod tests {
         state.db.close().await;
         let _ = std::fs::remove_file(path);
     }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 65_536)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn cose_es256_key(signing_key: &p256::ecdsa::SigningKey) -> Vec<u8> {
+        use serde_cbor_2::Value as Cbor;
+        use std::collections::BTreeMap;
+        let point = signing_key.verifying_key().to_encoded_point(false);
+        let mut map = BTreeMap::new();
+        map.insert(Cbor::Integer(1), Cbor::Integer(2)); // kty: EC2
+        map.insert(Cbor::Integer(3), Cbor::Integer(-7)); // alg: ES256
+        map.insert(Cbor::Integer(-1), Cbor::Integer(1)); // crv: P-256
+        map.insert(
+            Cbor::Integer(-2),
+            Cbor::Bytes(point.x().unwrap().as_slice().to_vec()),
+        );
+        map.insert(
+            Cbor::Integer(-3),
+            Cbor::Bytes(point.y().unwrap().as_slice().to_vec()),
+        );
+        serde_cbor_2::to_vec(&Cbor::Map(map)).unwrap()
+    }
+
+    fn software_register_credential(
+        challenge_b64: &str,
+        cred_id: &[u8],
+        signing_key: &p256::ecdsa::SigningKey,
+        sign_count: u32,
+        wire_id: &str,
+    ) -> Value {
+        use serde_cbor_2::Value as Cbor;
+        use sha2::{Digest, Sha256};
+        use std::collections::BTreeMap;
+
+        let client_data = json!({
+            "type": "webauthn.create",
+            "challenge": challenge_b64,
+            "origin": "http://localhost",
+            "crossOrigin": false
+        })
+        .to_string();
+
+        let cose = cose_es256_key(signing_key);
+        let mut auth_data = Vec::new();
+        auth_data.extend_from_slice(&Sha256::digest(b"localhost"));
+        auth_data.push(0x45); // UP | UV | AT
+        auth_data.extend_from_slice(&sign_count.to_be_bytes());
+        auth_data.extend_from_slice(&[0u8; 16]); // AAGUID
+        auth_data.extend_from_slice(&(cred_id.len() as u16).to_be_bytes());
+        auth_data.extend_from_slice(cred_id);
+        auth_data.extend_from_slice(&cose);
+
+        let mut att_map = BTreeMap::new();
+        att_map.insert(Cbor::Text("fmt".into()), Cbor::Text("none".into()));
+        att_map.insert(Cbor::Text("attStmt".into()), Cbor::Map(BTreeMap::new()));
+        att_map.insert(Cbor::Text("authData".into()), Cbor::Bytes(auth_data));
+        let att_obj = serde_cbor_2::to_vec(&Cbor::Map(att_map)).unwrap();
+
+        json!({
+            "id": wire_id,
+            "rawId": URL_SAFE_NO_PAD.encode(cred_id),
+            "type": "public-key",
+            "response": {
+                "clientDataJSON": URL_SAFE_NO_PAD.encode(client_data.as_bytes()),
+                "attestationObject": URL_SAFE_NO_PAD.encode(&att_obj),
+                "transports": ["internal"]
+            }
+        })
+    }
+
+    fn software_auth_credential(
+        challenge_b64: &str,
+        cred_id: &[u8],
+        signing_key: &p256::ecdsa::SigningKey,
+        sign_count: u32,
+        wire_id: &str,
+    ) -> Value {
+        use p256::ecdsa::{DerSignature, signature::Signer};
+        use sha2::{Digest, Sha256};
+
+        let client_data = json!({
+            "type": "webauthn.get",
+            "challenge": challenge_b64,
+            "origin": "http://localhost",
+            "crossOrigin": false
+        })
+        .to_string();
+        let client_hash = Sha256::digest(client_data.as_bytes());
+
+        let mut auth_data = Vec::new();
+        auth_data.extend_from_slice(&Sha256::digest(b"localhost"));
+        auth_data.push(0x05); // UP | UV
+        auth_data.extend_from_slice(&sign_count.to_be_bytes());
+
+        let mut signed = Vec::with_capacity(auth_data.len() + client_hash.len());
+        signed.extend_from_slice(&auth_data);
+        signed.extend_from_slice(&client_hash);
+        let sig: DerSignature = signing_key.sign(&signed);
+
+        json!({
+            "id": wire_id,
+            "rawId": URL_SAFE_NO_PAD.encode(cred_id),
+            "type": "public-key",
+            "response": {
+                "clientDataJSON": URL_SAFE_NO_PAD.encode(client_data.as_bytes()),
+                "authenticatorData": URL_SAFE_NO_PAD.encode(&auth_data),
+                "signature": URL_SAFE_NO_PAD.encode(sig.as_bytes())
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn recovery_limited_rejects_overlong_nameomail() {
+        let (state, path) = test_state().await;
+        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let long_name = "a".repeat(1000);
+        let resp = recovery_prelogin(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({ "nameomail": long_name, "slot": "ABCD" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn passkey_options_serialize_public_key_directly_exclude_legacy_and_rate_limit() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        let auth_hash = STANDARD.encode([1u8; 32]);
+        let pw_hash = auth::hash_password(&auth_hash).unwrap();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version) VALUES(?,?,?,?,1)")
+            .bind(&user_id)
+            .bind("pkopt@example.com")
+            .bind("pkopt")
+            .bind(pw_hash)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let sess = "sess-pkopt";
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,?,'2099-01-01T00:00:00Z',?,1)")
+            .bind(auth::hash_token(sess))
+            .bind(&user_id)
+            .bind(now())
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let signing_key = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let legacy_id = URL_SAFE_NO_PAD.encode(b"legacy-cred-id-123456");
+        let legacy_cose = URL_SAFE_NO_PAD.encode(cose_es256_key(&signing_key));
+        sqlx::query("INSERT INTO passkeys(id,user_id,public_key,sign_count,name,created_at) VALUES(?,?,?,1,'Legacy',?)")
+            .bind(&legacy_id)
+            .bind(&user_id)
+            .bind(&legacy_cose)
+            .bind(now())
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("sessioncookie={sess}").parse().unwrap(),
+        );
+        let reg_resp = passkey_register_options(
+            State(state.clone()),
+            headers,
+            Json(json!({"old_auth_hash": auth_hash})),
+        )
+        .await;
+        assert_eq!(reg_resp.status(), StatusCode::OK);
+        let reg_body = response_json(reg_resp).await;
+        assert!(
+            reg_body["options"].get("publicKey").is_none(),
+            "options must serialize public_key directly without publicKey wrapper"
+        );
+        assert!(reg_body["options"].get("rp").is_some());
+        assert_eq!(
+            reg_body["options"]["excludeCredentials"]
+                .as_array()
+                .map(|a| a.len()),
+            Some(1),
+            "legacy passkey should be included in excludeCredentials via load_passkey"
+        );
+
+        let login_tok = "login-2fa-tok";
+        sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,?,'login','c',0,'2099-01-01T00:00:00Z')")
+            .bind(auth::hash_token(login_tok))
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = super::super::router().with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let req_body = serde_json::to_vec(&json!({"token": login_tok})).unwrap();
+        let opt_res = client
+            .post(format!("http://{addr}/api/login/2fa/options"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(req_body.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(opt_res.status(), reqwest::StatusCode::OK);
+        let opt_bytes = opt_res.bytes().await.unwrap();
+        let opt_body: Value = serde_json::from_slice(&opt_bytes).unwrap();
+        assert!(
+            opt_body["options"].get("publicKey").is_none(),
+            "login options must serialize public_key directly without publicKey wrapper"
+        );
+        assert!(opt_body["options"].get("challenge").is_some());
+
+        let mut hit_429 = false;
+        for _ in 0..40 {
+            let r = client
+                .post(format!("http://{addr}/api/login/2fa/options"))
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(req_body.clone())
+                .send()
+                .await
+                .unwrap();
+            if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                hit_429 = true;
+                break;
+            }
+        }
+        assert!(hit_429, "/api/login/2fa/options must be rate-limited");
+        server.abort();
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn passkey_register_derives_id_and_counter_and_login_updates_by_cred_id() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        let auth_hash = STANDARD.encode([2u8; 32]);
+        let pw_hash = auth::hash_password(&auth_hash).unwrap();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version) VALUES(?,?,?,?,1)")
+            .bind(&user_id)
+            .bind("pkreg@example.com")
+            .bind("pkreg")
+            .bind(pw_hash)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let sess = "sess-pkreg";
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,?,'2099-01-01T00:00:00Z',?,1)")
+            .bind(auth::hash_token(sess))
+            .bind(&user_id)
+            .bind(now())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("sessioncookie={sess}").parse().unwrap(),
+        );
+
+        let opt_resp = passkey_register_options(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({"old_auth_hash": auth_hash})),
+        )
+        .await;
+        assert_eq!(opt_resp.status(), StatusCode::OK);
+        let opt_body = response_json(opt_resp).await;
+        let reg_tok = opt_body["token"].as_str().unwrap().to_owned();
+        let pk_opts = opt_body["options"]
+            .get("publicKey")
+            .unwrap_or(&opt_body["options"]);
+        let challenge = pk_opts["challenge"].as_str().unwrap().to_owned();
+
+        let cred_id = b"verified-cred-id-00000000000001";
+        let expected_id = URL_SAFE_NO_PAD.encode(cred_id);
+        let signing_key = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let reg_cred =
+            software_register_credential(&challenge, cred_id, &signing_key, 5, "spoofed-client-id");
+
+        let reg_resp = passkey_register(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({
+                "token": reg_tok,
+                "name": "My Key",
+                "credential": reg_cred
+            })),
+        )
+        .await;
+        assert_eq!(reg_resp.status(), StatusCode::OK);
+
+        let row = sqlx::query("SELECT id, sign_count FROM passkeys WHERE user_id=?")
+            .bind(&user_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.try_get::<String, _>("id").unwrap(),
+            expected_id,
+            "stored passkey id must come from verified passkey.cred_id(), not untrusted JSON id"
+        );
+        assert_eq!(
+            row.try_get::<i64, _>("sign_count").unwrap(),
+            5,
+            "stored sign_count must come from passkey.counter()"
+        );
+
+        // Now verify login_second_factor works via result.cred_id() even with mismatched wire id,
+        // and updates sign_count to 6.
+        let login_tok = "login-pk-tok";
+        sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,?,'login','c',0,'2099-01-01T00:00:00Z')")
+            .bind(auth::hash_token(login_tok))
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let login_opt_resp = login_passkey_options(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(json!({"token": login_tok})),
+        )
+        .await;
+        assert_eq!(login_opt_resp.status(), StatusCode::OK);
+        let login_opt_body = response_json(login_opt_resp).await;
+        let auth_opts = login_opt_body["options"]
+            .get("publicKey")
+            .unwrap_or(&login_opt_body["options"]);
+        let auth_challenge = auth_opts["challenge"].as_str().unwrap().to_owned();
+        let auth_cred = software_auth_credential(
+            &auth_challenge,
+            cred_id,
+            &signing_key,
+            6,
+            "mismatched-wire-id",
+        );
+
+        let login_resp = login_second_factor(
+            State(state.clone()),
+            HeaderMap::new(),
+            ConnectInfo(peer),
+            Json(json!({
+                "token": login_tok,
+                "method": "passkey",
+                "credential": auth_cred
+            })),
+        )
+        .await;
+        assert_eq!(login_resp.status(), StatusCode::OK);
+        let updated_count: i64 = sqlx::query_scalar("SELECT sign_count FROM passkeys WHERE id=?")
+            .bind(&expected_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(updated_count, 6);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn totp_setup_enable_disable_and_passkey_delete_hardening() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        let auth_hash = STANDARD.encode([3u8; 32]);
+        let pw_hash = auth::hash_password(&auth_hash).unwrap();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version) VALUES(?,?,?,?,1)")
+            .bind(&user_id)
+            .bind("totp@example.com")
+            .bind("totpuser")
+            .bind(pw_hash)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let main_sess = "totp-main-sess";
+        let other_sess = "totp-other-sess";
+        for tok in [main_sess, other_sess] {
+            sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,?,'2099-01-01T00:00:00Z',?,1)")
+                .bind(auth::hash_token(tok))
+                .bind(&user_id)
+                .bind(now())
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE users SET main_session=? WHERE id=?")
+            .bind(auth::hash_token(main_sess))
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO passkeys(id,user_id,public_key,sign_count,name,created_at) VALUES('pk-del',?,'{}',0,'Key',?)")
+            .bind(&user_id)
+            .bind(now())
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let mut main_headers = HeaderMap::new();
+        main_headers.insert(
+            axum::http::header::COOKIE,
+            format!("sessioncookie={main_sess}").parse().unwrap(),
+        );
+        let mut other_headers = HeaderMap::new();
+        other_headers.insert(
+            axum::http::header::COOKIE,
+            format!("sessioncookie={other_sess}").parse().unwrap(),
+        );
+
+        // 1. Setup TOTP -> expire pending setup -> totp_enable must reject expired setup.
+        let setup_resp = totp_setup(
+            State(state.clone()),
+            main_headers.clone(),
+            Json(json!({"old_auth_hash": auth_hash})),
+        )
+        .await;
+        assert_eq!(setup_resp.status(), StatusCode::OK);
+        let setup_body = response_json(setup_resp).await;
+        let pending_secret = setup_body["secret"].as_str().unwrap().to_owned();
+        sqlx::query("UPDATE twofa_challenges SET expires_at='2000-01-01T00:00:00Z' WHERE user_id=? AND purpose='totp_setup'")
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let expired_enable = totp_enable(
+            State(state.clone()),
+            main_headers.clone(),
+            Json(json!({"code": current_totp_code(&pending_secret)})),
+        )
+        .await;
+        assert_ne!(
+            expired_enable.status(),
+            StatusCode::OK,
+            "expired pending TOTP setup must not be enabled"
+        );
+
+        // 2. Fresh setup + enable succeeds; overwriting active totp_secret without current 2FA fails.
+        let setup_resp2 = totp_setup(
+            State(state.clone()),
+            main_headers.clone(),
+            Json(json!({"old_auth_hash": auth_hash})),
+        )
+        .await;
+        assert_eq!(setup_resp2.status(), StatusCode::OK);
+        let active_secret = response_json(setup_resp2).await["secret"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let ok_enable = totp_enable(
+            State(state.clone()),
+            main_headers.clone(),
+            Json(json!({"code": current_totp_code(&active_secret)})),
+        )
+        .await;
+        assert_eq!(ok_enable.status(), StatusCode::OK);
+
+        let overwrite = totp_setup(
+            State(state.clone()),
+            main_headers.clone(),
+            Json(json!({"old_auth_hash": auth_hash})),
+        )
+        .await;
+        assert_ne!(
+            overwrite.status(),
+            StatusCode::OK,
+            "totp_setup must not overwrite active totp_secret without current 2FA"
+        );
+
+        // 3. Non-main session without 2FA cannot passkey_delete or totp_disable.
+        let del_forbidden = passkey_delete(
+            State(state.clone()),
+            other_headers.clone(),
+            Json(json!({"id": "pk-del", "old_auth_hash": auth_hash})),
+        )
+        .await;
+        assert_eq!(del_forbidden.status(), StatusCode::FORBIDDEN);
+        let dis_forbidden = totp_disable(
+            State(state.clone()),
+            other_headers,
+            Json(json!({"old_auth_hash": auth_hash})),
+        )
+        .await;
+        assert_eq!(dis_forbidden.status(), StatusCode::FORBIDDEN);
+
+        // Main session can passkey_delete and totp_disable.
+        let del_ok = passkey_delete(
+            State(state.clone()),
+            main_headers.clone(),
+            Json(json!({"id": "pk-del", "old_auth_hash": auth_hash})),
+        )
+        .await;
+        assert_eq!(del_ok.status(), StatusCode::OK);
+        let dis_ok = totp_disable(
+            State(state.clone()),
+            main_headers,
+            Json(json!({"old_auth_hash": auth_hash})),
+        )
+        .await;
+        assert_eq!(dis_ok.status(), StatusCode::OK);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn recovery_reset_clears_device_links() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        let code_auth = STANDARD.encode([4u8; 32]);
+        let code_hash = auth::hash_password(&code_auth).unwrap();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version) VALUES(?,?,?,?,1)")
+            .bind(&user_id)
+            .bind("rlink@example.com")
+            .bind("rlink")
+            .bind("hash")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO recovery_codes(user_id,slot,kdf_salt,auth_hash,enc_private,created_at) VALUES(?,?,?,?,?,?)")
+            .bind(&user_id)
+            .bind("ABCD")
+            .bind(STANDARD.encode([5u8; 16]))
+            .bind(code_hash)
+            .bind("{}")
+            .bind(now())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,user_id,state) VALUES('dl-rec','CODEREC1','pub',?,'2099-01-01T00:00:00Z',?,'approved')")
+            .bind(now())
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let resp = recovery_reset(
+            State(state.clone()),
+            HeaderMap::new(),
+            ConnectInfo(peer),
+            Json(json!({
+                "nameomail": "rlink",
+                "slot": "ABCD",
+                "auth_hash": code_auth,
+                "new_auth_hash": STANDARD.encode([6u8; 32]),
+                "kdf_salt": STANDARD.encode([7u8; 16]),
+                "kdf_iterations": 600_000,
+                "enc_private": "{}"
+            })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let links_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM device_links WHERE user_id=?")
+                .bind(&user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(links_left, 0);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
 }

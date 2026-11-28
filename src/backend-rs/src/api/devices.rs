@@ -690,4 +690,158 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS
         );
     }
+
+    #[tokio::test]
+    async fn link_approve_persists_only_epub_iv_ct() {
+        let (_fix, state) = Fixture::new().await;
+        sqlx::query("INSERT INTO users(id,username,enc_private) VALUES('u1','alice','enc')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let main_tok = "main-tok-link";
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1','2999-01-01T00:00:00Z',?,1)")
+            .bind(hash_token(main_tok))
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET main_session=? WHERE id='u1'")
+            .bind(hash_token(main_tok))
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,state) VALUES('dl-hash','CODE9999','pub',?,'2999-01-01T00:00:00Z','waiting')")
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("sessioncookie={main_tok}").parse().unwrap(),
+        );
+        let resp = link_approve(
+            State(state.clone()),
+            headers,
+            Json(json!({
+                "id": "dl-hash",
+                "sealed": {
+                    "epub": "epub-val",
+                    "iv": "iv-val",
+                    "ct": "ct-val",
+                    "extra": "should-be-stripped",
+                    "sig": "also-stripped"
+                }
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw_sealed: String =
+            sqlx::query_scalar("SELECT sealed FROM device_links WHERE token_hash='dl-hash'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        let parsed: Value = serde_json::from_str(&raw_sealed).unwrap();
+        assert_eq!(
+            parsed,
+            json!({"epub": "epub-val", "iv": "iv-val", "ct": "ct-val"})
+        );
+    }
+
+    #[tokio::test]
+    async fn set_main_clears_device_links_and_approve_validates_pending_window_and_extends_expiry()
+    {
+        let (_fix, state) = Fixture::new().await;
+        sqlx::query("INSERT INTO users(id,username,enc_private) VALUES('u1','alice','enc')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let s1 = "sess-1";
+        let s2 = "sess-2";
+        for tok in [s1, s2] {
+            sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1','2999-01-01T00:00:00Z',?,1)")
+                .bind(hash_token(tok))
+                .bind(now_iso())
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,user_id,state) VALUES('dl-u1','CODE7777','pub',?,'2999-01-01T00:00:00Z','u1','waiting')")
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let mut h1 = HeaderMap::new();
+        h1.insert(
+            header::COOKIE,
+            format!("sessioncookie={s1}").parse().unwrap(),
+        );
+        let resp = set_main(
+            State(state.clone()),
+            h1.clone(),
+            Json(json!({"id": hash_token(s1)})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let links_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM device_links WHERE user_id='u1'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(links_left, 0);
+
+        // Fresh pending session within 15-min window -> approved and extended to ~90 days.
+        let pend_ok = hash_token("pend-ok");
+        let short_exp = (chrono::Utc::now() + chrono::Duration::minutes(10))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1',?,?,0)")
+            .bind(&pend_ok)
+            .bind(&short_exp)
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let approve_ok = approve(
+            State(state.clone()),
+            h1.clone(),
+            Json(json!({"id": pend_ok, "allow": true})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(approve_ok.status(), StatusCode::OK);
+        let extended_exp: String =
+            sqlx::query_scalar("SELECT expires_at FROM user_sessions WHERE token_hash=?")
+                .bind(&pend_ok)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        let eighty_days = (chrono::Utc::now() + chrono::Duration::days(80))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        assert!(
+            extended_exp > eighty_days,
+            "approved session expires_at {extended_exp} should be extended to ~90 days"
+        );
+
+        // Expired pending session (created >15m ago) -> rejected.
+        let pend_old = hash_token("pend-old");
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1','2999-01-01T00:00:00Z',?,0)")
+            .bind(&pend_old)
+            .bind(iso_ago(PENDING_SECONDS + 60))
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let approve_old = approve(
+            State(state.clone()),
+            h1,
+            Json(json!({"id": pend_old, "allow": true})),
+        )
+        .await;
+        assert!(approve_old.is_err());
+    }
 }

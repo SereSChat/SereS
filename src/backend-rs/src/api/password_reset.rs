@@ -581,4 +581,193 @@ mod tests {
             Some("http://127.0.0.1:2222".into())
         );
     }
+
+    #[test]
+    fn valid_email_rejects_angle_brackets_commas_quotes_and_controls() {
+        assert!(valid_email("alice+tag@example.com"));
+        assert!(!valid_email("Alice <alice@example.com>"));
+        assert!(!valid_email("Alice<alice@example.com>"));
+        assert!(!valid_email("a@b.com,c@d.com"));
+        assert!(!valid_email("\"alice\"@example.com"));
+        assert!(!valid_email("alice\r\n@example.com"));
+    }
+
+    #[tokio::test]
+    async fn confirm_reset_clears_device_links_and_complete_reset_rechecks_two_factor() {
+        let dir = std::env::temp_dir().join(format!("seres-reset-test-{}", uuid::Uuid::new_v4()));
+        let pool = crate::db::connect(&dir.join("users.db")).await.unwrap();
+        let state = AppState::new(pool);
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version,pub_ecdh,pub_sign,enc_private) VALUES(?,?,?,?,1,'ecdh','sign','enc')")
+            .bind(&user_id)
+            .bind("reset@example.com")
+            .bind("resetuser")
+            .bind("oldhash")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let token = "reset-token-12345678901234567890";
+        sqlx::query(
+            "INSERT INTO password_resets(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
+        )
+        .bind(auth::hash_token(token))
+        .bind(&user_id)
+        .bind(auth::now_iso())
+        .bind("2099-01-01T00:00:00Z")
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,user_id,state) VALUES('dl-reset','CODE5678','pub',?,'2099-01-01T00:00:00Z',?,'approved')")
+            .bind(auth::now_iso())
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        use base64::Engine;
+        let resp = confirm_reset(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({
+                "token": token,
+                "auth_hash": base64::engine::general_purpose::STANDARD.encode([1u8; 32]),
+                "kdf_salt": base64::engine::general_purpose::STANDARD.encode([2u8; 16]),
+                "kdf_iterations": 600_000,
+                "keys": {
+                    "pub_ecdh": base64::engine::general_purpose::STANDARD.encode([3u8; 32]),
+                    "pub_sign": base64::engine::general_purpose::STANDARD.encode([4u8; 32]),
+                    "enc_private": "{}"
+                }
+            })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let links_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM device_links WHERE user_id=?")
+                .bind(&user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(links_left, 0);
+
+        // Also verify complete_reset refuses if 2FA was enabled in DB before tx commits.
+        let tok2 = "reset-token-2fa-race-1234567890";
+        sqlx::query(
+            "INSERT INTO password_resets(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
+        )
+        .bind(auth::hash_token(tok2))
+        .bind(&user_id)
+        .bind(auth::now_iso())
+        .bind("2099-01-01T00:00:00Z")
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE users SET totp_secret='JBSWY3DPEHPK3PXP' WHERE id=?")
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let user_row = sqlx::query("SELECT * FROM users WHERE id=?")
+            .bind(&user_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        let mut tx = state.db.begin().await.unwrap();
+        let res = complete_reset(
+            &mut tx,
+            ResetCredentials {
+                token: tok2,
+                user: &user_row,
+                user_id: &user_id,
+                auth_hash: "AAAA",
+                kdf_salt: "BBBB",
+                kdf_iterations: 600_000,
+                pub_ecdh: "CCCC",
+                pub_sign: "DDDD",
+                enc_private: "{}",
+            },
+        )
+        .await;
+        assert!(
+            !matches!(res, Ok(true)),
+            "complete_reset must refuse to reset password when 2FA is enabled in tx"
+        );
+
+        state.db.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn send_mail_filters_blank_mail_from_and_smtp_user() {
+        use std::io::{BufRead, BufReader, Write};
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_srv = stop.clone();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            if stop_srv.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let mut writer = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let _ = writer.write_all(b"220 localhost ESMTP\r\n");
+            let mut line = String::new();
+            let mut in_data = false;
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                if in_data {
+                    if line == ".\r\n" || line == ".\n" {
+                        in_data = false;
+                        let _ = writer.write_all(b"250 Ok\r\n");
+                    }
+                } else if line.starts_with("EHLO") || line.starts_with("HELO") {
+                    let _ = writer.write_all(b"250-localhost\r\n250 SIZE 1024000\r\n");
+                } else if line.starts_with("MAIL FROM") || line.starts_with("RCPT TO") {
+                    let _ = writer.write_all(b"250 Ok\r\n");
+                } else if line.starts_with("DATA") {
+                    in_data = true;
+                    let _ = writer.write_all(b"354 End data with <CR><LF>.<CR><LF>\r\n");
+                } else if line.starts_with("QUIT") {
+                    let _ = writer.write_all(b"221 Bye\r\n");
+                    break;
+                } else {
+                    let _ = writer.write_all(b"500 Unknown command\r\n");
+                }
+                line.clear();
+            }
+        });
+
+        unsafe {
+            std::env::remove_var("MAIL_DEBUG");
+            std::env::set_var("SMTP_HOST", "127.0.0.1");
+            std::env::set_var("SMTP_PORT", port.to_string());
+            std::env::set_var("SMTP_SECURITY", "none");
+            std::env::set_var("MAIL_FROM", "   ");
+            std::env::set_var("SMTP_USER", "   ");
+        }
+        let result = send_mail("user@example.com", "Subject", "Body");
+        unsafe {
+            std::env::remove_var("SMTP_HOST");
+            std::env::remove_var("SMTP_PORT");
+            std::env::remove_var("SMTP_SECURITY");
+            std::env::remove_var("MAIL_FROM");
+            std::env::remove_var("SMTP_USER");
+        }
+        if result.is_err() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        }
+        let _ = server.join();
+        assert!(
+            result.is_ok(),
+            "send_mail should filter blank MAIL_FROM and SMTP_USER and succeed: {:?}",
+            result.err()
+        );
+    }
 }

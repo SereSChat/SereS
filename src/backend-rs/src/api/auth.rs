@@ -1247,4 +1247,297 @@ mod tests {
         state.db.close().await;
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn cookie_value_supports_multiple_cookie_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::COOKIE, "first=one".parse().unwrap());
+        headers.append(
+            header::COOKIE,
+            "second=two; sessioncookie=tok-abc".parse().unwrap(),
+        );
+        assert_eq!(
+            cookie_value(&headers, SESSION_COOKIE).as_deref(),
+            Some("tok-abc")
+        );
+    }
+
+    #[test]
+    fn email_valid_rejects_header_injection_and_quotes() {
+        assert!(email_valid("alice+tag@example.com"));
+        assert!(!email_valid("Alice <alice@example.com>"));
+        assert!(!email_valid("Alice<alice@example.com>"));
+        assert!(!email_valid("a@b.com,c@d.com"));
+        assert!(!email_valid("\"alice\"@example.com"));
+        assert!(!email_valid("alice\r\n@example.com"));
+    }
+
+    #[tokio::test]
+    async fn create_session_gives_pending_15_min_expiry() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version) VALUES(?,?,?,?,1)")
+            .bind(&user_id)
+            .bind("pend@example.com")
+            .bind("penduser")
+            .bind("hash")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let main_hash = hash_token("main-tok");
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,?,?,?,1)")
+            .bind(&main_hash)
+            .bind(&user_id)
+            .bind(iso_after(3600))
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET main_session=? WHERE id=?")
+            .bind(&main_hash)
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let resp = create_session(&state, &user_id, &HeaderMap::new(), json!({}), false).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let expires_at: String = sqlx::query_scalar(
+            "SELECT expires_at FROM user_sessions WHERE user_id=? AND approved=0",
+        )
+        .bind(&user_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert!(
+            expires_at <= iso_after(16 * 60),
+            "pending session expires_at {expires_at} should be ~15 mins, not 90 days"
+        );
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn login_defers_legacy_upgrade_until_after_twofa_and_prunes_expired_challenges() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        let legacy_pw = "legacy-secret";
+        let legacy_hash = hash_password(legacy_pw).unwrap();
+        let new_auth = STANDARD.encode([8u8; 32]);
+        let secret = "JBSWY3DPEHPK3PXP";
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version,kdf_salt,kdf_iterations,totp_secret) VALUES(?,?,?,?,0,?,?,?)")
+            .bind(&user_id)
+            .bind("leg@example.com")
+            .bind("leguser")
+            .bind(&legacy_hash)
+            .bind(STANDARD.encode([2u8; 16]))
+            .bind(600_000_i64)
+            .bind(secret)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,'other','login','c',0,'2000-01-01T00:00:00Z')")
+            .bind("expired-login-chal")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let resp = login(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({
+                "nameomail": "leguser",
+                "passwd": legacy_pw,
+                "auth_hash": new_auth,
+                "keys": {
+                    "pub_ecdh": STANDARD.encode([1u8; 32]),
+                    "pub_sign": STANDARD.encode([2u8; 32]),
+                    "enc_private": "upgraded-enc"
+                }
+            })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+        assert!(body.get("two_factor").is_some());
+
+        let row = sqlx::query("SELECT auth_version, passwd, enc_private FROM users WHERE id=?")
+            .bind(&user_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(row.try_get::<i64, _>("auth_version").unwrap(), 0);
+        assert_eq!(row.try_get::<String, _>("passwd").unwrap(), legacy_hash);
+        assert!(
+            row.try_get::<Option<String>, _>("enc_private")
+                .unwrap()
+                .is_none()
+        );
+
+        let expired_left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM twofa_challenges WHERE token_hash='expired-login-chal'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(expired_left, 0);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn non_main_cannot_change_password_and_change_password_clears_device_links() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        let old_auth = STANDARD.encode([1u8; 32]);
+        let new_auth = STANDARD.encode([2u8; 32]);
+        let pw_hash = hash_password(&old_auth).unwrap();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version) VALUES(?,?,?,?,1)")
+            .bind(&user_id)
+            .bind("maincheck@example.com")
+            .bind("maincheck")
+            .bind(pw_hash)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let main_tok = "main-tok-1";
+        let other_tok = "other-tok-2";
+        for tok in [main_tok, other_tok] {
+            sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,?,?,?,1)")
+                .bind(hash_token(tok))
+                .bind(&user_id)
+                .bind(iso_after(3600))
+                .bind(now_iso())
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE users SET main_session=? WHERE id=?")
+            .bind(hash_token(main_tok))
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,user_id,state) VALUES('dl1','CODE1234','pub',?,?,'u','approved')")
+            .bind(now_iso())
+            .bind(iso_after(600))
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE device_links SET user_id=? WHERE token_hash='dl1'")
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let payload = json!({
+            "old_auth_hash": old_auth,
+            "auth_hash": new_auth,
+            "kdf_salt": STANDARD.encode([3u8; 16]),
+            "kdf_iterations": 600_000,
+            "enc_private": "{}"
+        });
+
+        let mut other_headers = HeaderMap::new();
+        other_headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={other_tok}").parse().unwrap(),
+        );
+        let resp =
+            change_password(State(state.clone()), other_headers, Json(payload.clone())).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let main_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE token_hash=?")
+                .bind(hash_token(main_tok))
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(main_exists, 1);
+
+        let mut main_headers = HeaderMap::new();
+        main_headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={main_tok}").parse().unwrap(),
+        );
+        let ok_resp = change_password(State(state.clone()), main_headers, Json(payload)).await;
+        assert_eq!(ok_resp.status(), StatusCode::OK);
+        let links_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM device_links WHERE user_id=?")
+                .bind(&user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(links_left, 0);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn logout_returns_conflict_for_main_while_other_approved_sessions_exist() {
+        let (state, path) = test_state().await;
+        let user_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version) VALUES(?,?,?,?,1)")
+            .bind(&user_id)
+            .bind("logout@example.com")
+            .bind("logoutuser")
+            .bind("hash")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let main_tok = "main-logout-1";
+        let other_tok = "other-logout-2";
+        for tok in [main_tok, other_tok] {
+            sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,?,?,?,1)")
+                .bind(hash_token(tok))
+                .bind(&user_id)
+                .bind(iso_after(3600))
+                .bind(now_iso())
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE users SET main_session=? WHERE id=?")
+            .bind(hash_token(main_tok))
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let mut main_headers = HeaderMap::new();
+        main_headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={main_tok}").parse().unwrap(),
+        );
+        let conflict = logout(State(state.clone()), main_headers.clone()).await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let main_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE token_hash=?")
+                .bind(hash_token(main_tok))
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(main_exists, 1);
+
+        let mut other_headers = HeaderMap::new();
+        other_headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={other_tok}").parse().unwrap(),
+        );
+        assert_eq!(
+            logout(State(state.clone()), other_headers).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            logout(State(state.clone()), main_headers).await.status(),
+            StatusCode::OK
+        );
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(path);
+    }
 }

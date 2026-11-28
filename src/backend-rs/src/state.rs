@@ -74,3 +74,43 @@ impl AppState {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn limiter_enforces_hard_cap_evicts_expired_by_window_and_hashes_long_keys() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let state = AppState::new(pool);
+
+        let long_a = format!("{}a", "x".repeat(10_000));
+        let long_b = format!("{}b", "x".repeat(10_000));
+        assert!(!state.rate_limited(long_a, 1, 60));
+        assert!(!state.rate_limited(long_b, 1, 60));
+        {
+            let map = state.limiter.lock().unwrap();
+            assert!(map.keys().all(|k| k.len() <= 256));
+        }
+
+        assert!(!state.rate_limited("short-win", 1, 1));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        for i in 0..55_000 {
+            let _ = state.rate_limited(format!("bulk:{i}"), 1, 60);
+        }
+
+        let map = state.limiter.lock().unwrap();
+        assert!(
+            map.len() <= 50_000,
+            "limiter map grew unboundedly to {} entries",
+            map.len()
+        );
+        assert!(
+            !map.contains_key("short-win"),
+            "expired 1-second window entry should be evicted"
+        );
+    }
+}

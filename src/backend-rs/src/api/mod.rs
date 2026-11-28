@@ -404,8 +404,18 @@ mod tests {
         );
         let ip = client_ip(&headers, peer);
         assert_eq!(ip.to_string(), "203.0.113.2");
+        // Client-supplied CF-Connecting-IP must NOT override the default header behind Nginx/Caddy.
         headers.insert("cf-connecting-ip", "203.0.113.3".parse().unwrap());
+        assert_eq!(client_ip(&headers, peer).to_string(), "203.0.113.2");
+
+        // Multi-header X-Forwarded-For uses the last appended header (next_back).
+        headers.append(
+            "x-forwarded-for",
+            "198.51.100.9, 203.0.113.4".parse().unwrap(),
+        );
         let other_ip = client_ip(&headers, peer);
+        assert_eq!(other_ip.to_string(), "203.0.113.4");
+
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .connect_lazy("sqlite::memory:")
             .unwrap();
