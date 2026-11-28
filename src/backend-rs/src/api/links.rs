@@ -22,14 +22,64 @@ use sqlx::Row;
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
+use tokio::sync::Semaphore;
 use url::Url;
 
 const MAX_HTML_BYTES: usize = 512 * 1024;
 const MAX_IMAGE_BYTES: usize = 1024 * 1024;
 const MAX_REDIRECTS: usize = 3;
+const DNS_TIMEOUT: Duration = Duration::from_secs(3);
+const PREVIEW_DEADLINE: Duration = Duration::from_secs(10);
+
+static PREVIEW_SEMAPHORE: Semaphore = Semaphore::const_new(8);
+
+static LINK_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        // A proxy would connect wherever the name points, past the check above.
+        .no_proxy()
+        .timeout(Duration::from_secs(6))
+        .connect_timeout(Duration::from_secs(4))
+        .dns_resolver(Arc::new(PublicDnsResolver))
+        .user_agent("Mozilla/5.0 (compatible; SereS link preview)")
+        .build()
+        .expect("build link preview HTTP client")
+});
+
+struct PublicDnsResolver;
+
+impl reqwest::dns::Resolve for PublicDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let lookup =
+                tokio::time::timeout(DNS_TIMEOUT, tokio::net::lookup_host((host.as_str(), 0)))
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::TimedOut, "DNS lookup timed out")
+                    })?
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            let addrs: Vec<SocketAddr> = lookup.collect();
+            let allow_private = std::env::var("SERES_LINK_ALLOW_PRIVATE").as_deref() == Ok("1");
+            if addrs.is_empty() || (!allow_private && !addrs.iter().all(|a| is_public(a.ip()))) {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Disallowed target IP",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+fn allowed_preview_url(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && matches!(url.port_or_known_default(), Some(80 | 443))
+}
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/link-preview", get(link_preview))
@@ -55,82 +105,73 @@ async fn link_preview(
         .get("url")
         .filter(|u| u.len() <= 2048)
         .and_then(|u| Url::parse(u).ok())
-        .filter(|u| matches!(u.scheme(), "http" | "https"))
+        .filter(allowed_preview_url)
     else {
         return error("Invalid link", StatusCode::BAD_REQUEST);
     };
-    let Ok((final_url, content_type, body)) = fetch(url, MAX_HTML_BYTES).await else {
-        return error("No preview for this link", StatusCode::NOT_FOUND);
-    };
-    if !content_type.starts_with("text/html") && !content_type.starts_with("application/xhtml") {
-        return error("No preview for this link", StatusCode::NOT_FOUND);
+    let result = tokio::time::timeout(PREVIEW_DEADLINE, async {
+        let _permit = PREVIEW_SEMAPHORE.acquire().await.map_err(|_| ())?;
+        let (final_url, content_type, body) = fetch(url, MAX_HTML_BYTES).await?;
+        if !content_type.starts_with("text/html") && !content_type.starts_with("application/xhtml")
+        {
+            return Err(());
+        }
+        let html = String::from_utf8_lossy(&body);
+        let page = parse(&html);
+        let title = page
+            .meta("og:title")
+            .or_else(|| page.meta("twitter:title"))
+            .or(page.title.clone())
+            .map(|t| clip(&t, 200));
+        let Some(title) = title.filter(|t| !t.is_empty()) else {
+            return Err(());
+        };
+        let description = page
+            .meta("og:description")
+            .or_else(|| page.meta("twitter:description"))
+            .or_else(|| page.meta("description"))
+            .map(|t| clip(&t, 300));
+        let site = page.meta("og:site_name").map(|t| clip(&t, 80));
+        let mut image = None;
+        if let Some(src) = page
+            .meta("og:image")
+            .or_else(|| page.meta("og:image:url"))
+            .or_else(|| page.meta("twitter:image"))
+            .and_then(|src| final_url.join(&src).ok())
+            .filter(allowed_preview_url)
+            && let Ok((_, kind, bytes)) = fetch(src, MAX_IMAGE_BYTES).await
+            && matches!(
+                kind.as_str(),
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            )
+        {
+            image = Some(format!(
+                "data:{kind};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            ));
+        }
+        Ok(json!({
+            "url": final_url.as_str(),
+            "title": title,
+            "description": description,
+            "site": site,
+            "image": image,
+        }))
+    })
+    .await;
+    match result {
+        Ok(Ok(payload)) => json_ok(payload),
+        _ => error("No preview for this link", StatusCode::NOT_FOUND),
     }
-    let html = String::from_utf8_lossy(&body);
-    let page = parse(&html);
-    let title = page
-        .meta("og:title")
-        .or_else(|| page.meta("twitter:title"))
-        .or(page.title.clone())
-        .map(|t| clip(&t, 200));
-    let Some(title) = title.filter(|t| !t.is_empty()) else {
-        return error("No preview for this link", StatusCode::NOT_FOUND);
-    };
-    let description = page
-        .meta("og:description")
-        .or_else(|| page.meta("twitter:description"))
-        .or_else(|| page.meta("description"))
-        .map(|t| clip(&t, 300));
-    let site = page.meta("og:site_name").map(|t| clip(&t, 80));
-    let mut image = None;
-    if let Some(src) = page
-        .meta("og:image")
-        .or_else(|| page.meta("og:image:url"))
-        .or_else(|| page.meta("twitter:image"))
-        .and_then(|src| final_url.join(&src).ok())
-        .filter(|u| matches!(u.scheme(), "http" | "https"))
-        && let Ok((_, kind, bytes)) = fetch(src, MAX_IMAGE_BYTES).await
-        && matches!(
-            kind.as_str(),
-            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-        )
-    {
-        image = Some(format!(
-            "data:{kind};base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(&bytes)
-        ));
-    }
-    json_ok(json!({
-        "url": final_url.as_str(),
-        "title": title,
-        "description": description,
-        "site": site,
-        "image": image,
-    }))
 }
 
 /// Fetches a public URL, following up to a few redirects, each one checked again.
 async fn fetch(mut url: Url, limit: usize) -> Result<(Url, String, Vec<u8>), ()> {
     for _ in 0..=MAX_REDIRECTS {
-        let host = url
-            .host_str()
-            .ok_or(())?
-            .trim_matches(|c| c == '[' || c == ']')
-            .to_string();
-        let port = url.port_or_known_default().ok_or(())?;
-        let addr = public_address(&host, port).await.ok_or(())?;
-        // The checked address is used for the connection, so a second DNS
-        // answer can not point somewhere else.
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            // A proxy would connect wherever the name points, past the check above.
-            .no_proxy()
-            .timeout(Duration::from_secs(6))
-            .connect_timeout(Duration::from_secs(4))
-            .resolve(&host, addr)
-            .user_agent("Mozilla/5.0 (compatible; SereS link preview)")
-            .build()
-            .map_err(|_| ())?;
-        let mut response = client
+        if !allowed_preview_url(&url) || url.host_str().is_none() {
+            return Err(());
+        }
+        let mut response = LINK_CLIENT
             .get(url.clone())
             .header("Accept", "text/html,application/xhtml+xml,image/*;q=0.8")
             .send()
@@ -142,7 +183,7 @@ async fn fetch(mut url: Url, limit: usize) -> Result<(Url, String, Vec<u8>), ()>
                 .get(reqwest::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|l| url.join(l).ok())
-                .filter(|u| matches!(u.scheme(), "http" | "https"))
+                .filter(allowed_preview_url)
                 .ok_or(())?;
             url = next;
             continue;
@@ -160,37 +201,37 @@ async fn fetch(mut url: Url, limit: usize) -> Result<(Url, String, Vec<u8>), ()>
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase();
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
-            let room = limit.saturating_sub(body.len());
-            body.extend_from_slice(&chunk[..chunk.len().min(room)]);
-            if body.len() >= limit {
-                // Pages: the head is enough. Pictures: too big, no picture.
-                if content_type.starts_with("image/") {
-                    return Err(());
-                }
-                break;
-            }
-        }
+        let is_image = content_type.starts_with("image/");
+        let body = read_body_limited(&mut response, is_image, limit).await?;
         return Ok((url, content_type, body));
     }
     Err(())
 }
 
-/// Resolves the host and returns an address only if all of them are public.
-async fn public_address(host: &str, port: u16) -> Option<SocketAddr> {
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await.ok()?.collect();
-    let allow_private = std::env::var("SERES_LINK_ALLOW_PRIVATE").as_deref() == Ok("1");
-    if addrs.is_empty() || (!allow_private && !addrs.iter().all(|a| is_public(a.ip()))) {
-        return None;
+async fn read_body_limited(
+    response: &mut reqwest::Response,
+    is_image: bool,
+    limit: usize,
+) -> Result<Vec<u8>, ()> {
+    let cap = if is_image { limit + 1 } else { limit };
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
+        let room = cap.saturating_sub(body.len());
+        body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        if body.len() >= cap {
+            break;
+        }
     }
-    addrs.first().copied()
+    if is_image && body.len() > limit {
+        return Err(());
+    }
+    Ok(body)
 }
 
 fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            let [a, b, ..] = v4.octets();
+            let [a, b, c, _] = v4.octets();
             !(v4.is_private()
                 || v4.is_loopback()
                 || v4.is_link_local()
@@ -200,6 +241,8 @@ fn is_public(ip: IpAddr) -> bool {
                 || v4.is_multicast()
                 || a == 0
                 || (a == 100 && (64..128).contains(&b)) // carrier-grade NAT
+                || (a == 192 && b == 0 && c == 0) // IETF protocol assignments
+                || (a == 192 && b == 88 && c == 99) // deprecated 6to4 relay anycast
                 || (a == 198 && (b == 18 || b == 19)) // benchmarking
                 || a >= 240)
         }
@@ -433,5 +476,35 @@ mod tests {
         let resp = link_preview(State(state), headers, Query(query)).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn image_body_allows_exact_limit_and_rejects_oversized() {
+        let app = Router::new()
+            .route("/exact", get(|| async { vec![b'a'; 16] }))
+            .route("/over", get(|| async { vec![b'a'; 17] }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let mut exact_resp = client
+            .get(format!("http://{addr}/exact"))
+            .send()
+            .await
+            .unwrap();
+        let exact = read_body_limited(&mut exact_resp, true, 16).await.unwrap();
+        assert_eq!(exact.len(), 16);
+
+        let mut over_resp = client
+            .get(format!("http://{addr}/over"))
+            .send()
+            .await
+            .unwrap();
+        assert!(read_body_limited(&mut over_resp, true, 16).await.is_err());
+
+        server.abort();
     }
 }
