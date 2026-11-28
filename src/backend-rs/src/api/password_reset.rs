@@ -70,9 +70,9 @@ async fn request_reset(
     }
 
     let lookup = if nameomail.contains('@') {
-        sqlx::query("SELECT * FROM users WHERE lower(email)=lower(?) LIMIT 1")
+        sqlx::query("SELECT * FROM users WHERE email=? COLLATE NOCASE LIMIT 1")
     } else {
-        sqlx::query("SELECT * FROM users WHERE lower(username)=lower(?) LIMIT 1")
+        sqlx::query("SELECT * FROM users WHERE username=? COLLATE NOCASE LIMIT 1")
     };
     let user = match lookup.bind(&nameomail).fetch_optional(&state.db).await {
         Ok(v) => v,
@@ -215,17 +215,21 @@ async fn confirm_reset(
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
     let user_id: String = user.try_get("id").unwrap_or_default();
-    let mut tx = match state.db.begin().await {
+    let password_hash = match auth::hash_password(auth_hash) {
+        Ok(v) => v,
+        Err(e) => return axum::response::IntoResponse::into_response(e),
+    };
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
-    let completed = match complete_reset(
+    let outcome = match complete_reset(
         &mut tx,
         ResetCredentials {
             token,
             user: &user,
             user_id: &user_id,
-            auth_hash,
+            password_hash: &password_hash,
             kdf_salt: &kdf_salt,
             kdf_iterations,
             pub_ecdh: &pub_ecdh,
@@ -238,8 +242,16 @@ async fn confirm_reset(
         Ok(v) => v,
         Err(_) => return db_error(),
     };
-    if !completed {
-        return invalid_link();
+    match outcome {
+        ResetOutcome::Completed => {}
+        ResetOutcome::InvalidLink => {
+            let _ = tx.rollback().await;
+            return invalid_link();
+        }
+        ResetOutcome::TwoFactorBlocked => {
+            let _ = tx.rollback().await;
+            return two_factor_blocks_reset();
+        }
     }
     if tx.commit().await.is_err() {
         return db_error();
@@ -247,11 +259,17 @@ async fn confirm_reset(
     auth::login_response(&state, &user_id, &headers).await
 }
 
+enum ResetOutcome {
+    Completed,
+    InvalidLink,
+    TwoFactorBlocked,
+}
+
 struct ResetCredentials<'a> {
     token: &'a str,
     user: &'a sqlx::sqlite::SqliteRow,
     user_id: &'a str,
-    auth_hash: &'a str,
+    password_hash: &'a str,
     kdf_salt: &'a str,
     kdf_iterations: i64,
     pub_ecdh: &'a str,
@@ -262,18 +280,31 @@ struct ResetCredentials<'a> {
 async fn complete_reset(
     tx: &mut Transaction<'_, Sqlite>,
     credentials: ResetCredentials<'_>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<ResetOutcome, sqlx::Error> {
     let ResetCredentials {
         token,
         user,
         user_id,
-        auth_hash,
+        password_hash,
         kdf_salt,
         kdf_iterations,
         pub_ecdh,
         pub_sign,
         enc_private,
     } = credentials;
+    let current_totp: Option<String> =
+        sqlx::query_scalar("SELECT totp_secret FROM users WHERE id=?")
+            .bind(user_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .flatten();
+    let passkeys: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM passkeys WHERE user_id=?")
+        .bind(user_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    if current_totp.is_some() || passkeys != 0 {
+        return Ok(ResetOutcome::TwoFactorBlocked);
+    }
     let used = sqlx::query("UPDATE password_resets SET used_at=? WHERE token_hash=? AND used_at IS NULL AND expires_at>?")
         .bind(auth::now_iso())
         .bind(auth::hash_token(token))
@@ -281,7 +312,7 @@ async fn complete_reset(
         .execute(&mut **tx)
         .await?;
     if used.rows_affected() == 0 {
-        return Ok(false);
+        return Ok(ResetOutcome::InvalidLink);
     }
     if let (Some(old_ecdh), Some(old_sign)) = (
         user.try_get::<Option<String>, _>("pub_ecdh").ok().flatten(),
@@ -297,8 +328,6 @@ async fn complete_reset(
         .execute(&mut **tx)
         .await?;
     }
-    let password_hash = auth::hash_password(auth_hash)
-        .map_err(|_| sqlx::Error::Protocol("password hashing failed".into()))?;
     sqlx::query("UPDATE users SET passwd=?,auth_version=1,kdf_salt=?,kdf_iterations=?,pub_ecdh=?,pub_sign=?,enc_private=? WHERE id=?")
         .bind(password_hash)
         .bind(kdf_salt)
@@ -314,6 +343,14 @@ async fn complete_reset(
         .execute(&mut **tx)
         .await?;
     sqlx::query("DELETE FROM user_sessions WHERE user_id=?")
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM device_links WHERE user_id=?")
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM twofa_challenges WHERE user_id=?")
         .bind(user_id)
         .execute(&mut **tx)
         .await?;
@@ -362,7 +399,7 @@ async fn complete_reset(
             .unwrap_or_default();
         super::chats::system_message(tx, &chat_id, "keys_reset", json!({"actor":actor})).await?;
     }
-    Ok(true)
+    Ok(ResetOutcome::Completed)
 }
 
 async fn find_reset_user(
@@ -429,15 +466,7 @@ fn random_token() -> String {
 }
 
 fn valid_email(value: &str) -> bool {
-    let Some((local, domain)) = value.split_once('@') else {
-        return false;
-    };
-    !local.is_empty()
-        && !local.chars().any(char::is_whitespace)
-        && domain.contains('.')
-        && !domain.starts_with('.')
-        && !domain.ends_with('.')
-        && !domain.chars().any(char::is_whitespace)
+    auth::parse_email_address(value).is_some()
 }
 
 fn mail_configured() -> bool {
@@ -456,11 +485,16 @@ fn send_mail(to: &str, subject: &str, text: &str) -> anyhow::Result<()> {
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(587);
     let from = std::env::var("MAIL_FROM")
-        .unwrap_or_else(|_| "SereS <no-reply@localhost>".to_owned())
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "SereS <no-reply@localhost>".to_owned())
         .parse::<Mailbox>()?;
+    let to_addr =
+        auth::parse_email_address(to).ok_or_else(|| anyhow::anyhow!("Invalid recipient email"))?;
     let message = Message::builder()
         .from(from)
-        .to(to.parse::<Mailbox>()?)
+        .to(Mailbox::new(None, to_addr))
         .subject(subject)
         .body(text.to_owned())?;
     let security = std::env::var("SMTP_SECURITY").unwrap_or_else(|_| "starttls".to_owned());
@@ -469,7 +503,11 @@ fn send_mail(to: &str, subject: &str, text: &str) -> anyhow::Result<()> {
         "none" => SmtpTransport::builder_dangerous(&host).port(port),
         _ => SmtpTransport::starttls_relay(&host)?.port(port),
     };
-    if let Ok(username) = std::env::var("SMTP_USER") {
+    if let Some(username) = std::env::var("SMTP_USER")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+    {
         builder = builder.credentials(Credentials::new(
             username,
             std::env::var("SMTP_PASSWORD").unwrap_or_default(),
@@ -579,6 +617,195 @@ mod tests {
         assert_eq!(
             public_base_url_with(&local_headers, None, None),
             Some("http://127.0.0.1:2222".into())
+        );
+    }
+
+    #[test]
+    fn valid_email_rejects_angle_brackets_commas_quotes_and_controls() {
+        assert!(valid_email("alice+tag@example.com"));
+        assert!(!valid_email("Alice <alice@example.com>"));
+        assert!(!valid_email("Alice<alice@example.com>"));
+        assert!(!valid_email("a@b.com,c@d.com"));
+        assert!(!valid_email("\"alice\"@example.com"));
+        assert!(!valid_email("alice\r\n@example.com"));
+    }
+
+    #[tokio::test]
+    async fn confirm_reset_clears_device_links_and_complete_reset_rechecks_two_factor() {
+        let dir = std::env::temp_dir().join(format!("seres-reset-test-{}", uuid::Uuid::new_v4()));
+        let pool = crate::db::connect(&dir.join("users.db")).await.unwrap();
+        let state = AppState::new(pool);
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id,email,username,passwd,auth_version,pub_ecdh,pub_sign,enc_private) VALUES(?,?,?,?,1,'ecdh','sign','enc')")
+            .bind(&user_id)
+            .bind("reset@example.com")
+            .bind("resetuser")
+            .bind("oldhash")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let token = "reset-token-12345678901234567890";
+        sqlx::query(
+            "INSERT INTO password_resets(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
+        )
+        .bind(auth::hash_token(token))
+        .bind(&user_id)
+        .bind(auth::now_iso())
+        .bind("2099-01-01T00:00:00Z")
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,user_id,state) VALUES('dl-reset','CODE5678','pub',?,'2099-01-01T00:00:00Z',?,'approved')")
+            .bind(auth::now_iso())
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        use base64::Engine;
+        let resp = confirm_reset(
+            State(state.clone()),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(json!({
+                "token": token,
+                "auth_hash": base64::engine::general_purpose::STANDARD.encode([1u8; 32]),
+                "kdf_salt": base64::engine::general_purpose::STANDARD.encode([2u8; 16]),
+                "kdf_iterations": 600_000,
+                "keys": {
+                    "pub_ecdh": base64::engine::general_purpose::STANDARD.encode([3u8; 32]),
+                    "pub_sign": base64::engine::general_purpose::STANDARD.encode([4u8; 32]),
+                    "enc_private": "{}"
+                }
+            })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let links_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM device_links WHERE user_id=?")
+                .bind(&user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(links_left, 0);
+
+        // Also verify complete_reset refuses if 2FA was enabled in DB before tx commits.
+        let tok2 = "reset-token-2fa-race-1234567890";
+        sqlx::query(
+            "INSERT INTO password_resets(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
+        )
+        .bind(auth::hash_token(tok2))
+        .bind(&user_id)
+        .bind(auth::now_iso())
+        .bind("2099-01-01T00:00:00Z")
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE users SET totp_secret='JBSWY3DPEHPK3PXP' WHERE id=?")
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let user_row = sqlx::query("SELECT * FROM users WHERE id=?")
+            .bind(&user_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        let mut tx = state.db.begin().await.unwrap();
+        let res = complete_reset(
+            &mut tx,
+            ResetCredentials {
+                token: tok2,
+                user: &user_row,
+                user_id: &user_id,
+                password_hash: "hashed-pw",
+                kdf_salt: "BBBB",
+                kdf_iterations: 600_000,
+                pub_ecdh: "CCCC",
+                pub_sign: "DDDD",
+                enc_private: "{}",
+            },
+        )
+        .await;
+        assert!(
+            matches!(res, Ok(ResetOutcome::TwoFactorBlocked)),
+            "complete_reset must refuse to reset password when 2FA is enabled in tx"
+        );
+
+        state.db.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn send_mail_filters_blank_mail_from_and_smtp_user() {
+        use std::io::{BufRead, BufReader, Write};
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_srv = stop.clone();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            if stop_srv.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let mut writer = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let _ = writer.write_all(b"220 localhost ESMTP\r\n");
+            let mut line = String::new();
+            let mut in_data = false;
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                if in_data {
+                    if line == ".\r\n" || line == ".\n" {
+                        in_data = false;
+                        let _ = writer.write_all(b"250 Ok\r\n");
+                    }
+                } else if line.starts_with("EHLO") || line.starts_with("HELO") {
+                    let _ = writer.write_all(b"250-localhost\r\n250 SIZE 1024000\r\n");
+                } else if line.starts_with("MAIL FROM") || line.starts_with("RCPT TO") {
+                    let _ = writer.write_all(b"250 Ok\r\n");
+                } else if line.starts_with("DATA") {
+                    in_data = true;
+                    let _ = writer.write_all(b"354 End data with <CR><LF>.<CR><LF>\r\n");
+                } else if line.starts_with("QUIT") {
+                    let _ = writer.write_all(b"221 Bye\r\n");
+                    break;
+                } else {
+                    let _ = writer.write_all(b"500 Unknown command\r\n");
+                }
+                line.clear();
+            }
+        });
+
+        unsafe {
+            std::env::remove_var("MAIL_DEBUG");
+            std::env::set_var("SMTP_HOST", "127.0.0.1");
+            std::env::set_var("SMTP_PORT", port.to_string());
+            std::env::set_var("SMTP_SECURITY", "none");
+            std::env::set_var("MAIL_FROM", "   ");
+            std::env::set_var("SMTP_USER", "   ");
+        }
+        let result = send_mail("user@example.com", "Subject", "Body");
+        unsafe {
+            std::env::remove_var("SMTP_HOST");
+            std::env::remove_var("SMTP_PORT");
+            std::env::remove_var("SMTP_SECURITY");
+            std::env::remove_var("MAIL_FROM");
+            std::env::remove_var("SMTP_USER");
+        }
+        if result.is_err() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        }
+        let _ = server.join();
+        assert!(
+            result.is_ok(),
+            "send_mail should filter blank MAIL_FROM and SMTP_USER and succeed: {:?}",
+            result.err()
         );
     }
 }

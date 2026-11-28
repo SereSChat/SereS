@@ -27,7 +27,7 @@ use sqlx::{Row, SqlitePool};
 use std::net::SocketAddr;
 
 /// A new login waits this long for the main device.
-const PENDING_SECONDS: i64 = 15 * 60;
+pub(crate) const PENDING_SECONDS: i64 = 15 * 60;
 /// A QR code / link / code can be used this long.
 const LINK_SECONDS: i64 = 10 * 60;
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -172,42 +172,116 @@ async fn set_main(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> ApiResult<Response> {
-    let me = me(&state, &headers).await?;
+    let user = require_user(&state, &headers).await?;
+    let user_id: String = user.try_get("id").unwrap_or_default();
+    let session = session_hash(&headers)
+        .ok_or_else(|| ApiError::new("Not logged in", StatusCode::UNAUTHORIZED))?;
     let target = str_field(&body, "id", 128)?;
-    let first_choice = me.main.is_none();
-    if !first_choice && !me.is_main() {
+    let now = now_iso();
+
+    let mut tx = state
+        .db
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| db_error())?;
+
+    let caller_active = sqlx::query(
+        "SELECT 1 FROM user_sessions WHERE token_hash=? AND user_id=? AND approved=1 AND expires_at>?",
+    )
+    .bind(&session)
+    .bind(&user_id)
+    .bind(&now)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| db_error())?;
+    if caller_active.is_none() {
+        return Err(ApiError::new("Not logged in", StatusCode::UNAUTHORIZED));
+    }
+
+    let mut current_main = sqlx::query_scalar::<_, String>(
+        "SELECT u.main_session FROM users u JOIN user_sessions s ON s.token_hash=u.main_session
+         WHERE u.id=? AND s.expires_at>? AND s.approved=1",
+    )
+    .bind(&user_id)
+    .bind(&now)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| db_error())?;
+
+    if current_main.is_none() {
+        let sessions: Vec<String> = sqlx::query_scalar(
+            "SELECT token_hash FROM user_sessions WHERE user_id=? AND expires_at>? AND approved=1",
+        )
+        .bind(&user_id)
+        .bind(&now)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| db_error())?;
+        if let [only] = sessions.as_slice() {
+            sqlx::query("UPDATE users SET main_session=? WHERE id=?")
+                .bind(only)
+                .bind(&user_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| db_error())?;
+            current_main = Some(only.clone());
+        }
+    }
+
+    let first_choice = current_main.is_none();
+    if !first_choice && current_main.as_deref() != Some(session.as_str()) {
         return Err(main_only());
     }
+
     let exists = sqlx::query(
         "SELECT 1 FROM user_sessions WHERE token_hash=? AND user_id=? AND approved=1 AND expires_at>?",
     )
     .bind(target)
-    .bind(&me.id)
-    .bind(now_iso())
-    .fetch_optional(&state.db)
+    .bind(&user_id)
+    .bind(&now)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|_| db_error())?;
     if exists.is_none() {
         return Err(ApiError::new("Device not found", StatusCode::NOT_FOUND));
     }
-    let mut tx = state.db.begin().await.map_err(|_| db_error())?;
-    sqlx::query("UPDATE users SET main_session=? WHERE id=?")
-        .bind(target)
-        .bind(&me.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| db_error())?;
+
+    let updated = if let Some(prev) = &current_main {
+        sqlx::query("UPDATE users SET main_session=? WHERE id=? AND main_session=?")
+            .bind(target)
+            .bind(&user_id)
+            .bind(prev)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| db_error())?
+    } else {
+        sqlx::query("UPDATE users SET main_session=? WHERE id=?")
+            .bind(target)
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| db_error())?
+    };
+    if updated.rows_affected() != 1 {
+        return Err(main_only());
+    }
+
     if first_choice {
         sqlx::query("DELETE FROM user_sessions WHERE user_id=? AND token_hash!=?")
-            .bind(&me.id)
+            .bind(&user_id)
             .bind(target)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| db_error())?;
+        sqlx::query("DELETE FROM device_links WHERE user_id=?")
+            .bind(&user_id)
             .execute(&mut *tx)
             .await
             .map_err(|_| db_error())?;
     }
     tx.commit().await.map_err(|_| db_error())?;
     Ok(json_ok(
-        json!({"logged_out": first_choice && target != me.session}),
+        json!({"logged_out": first_choice && target != session}),
     ))
 }
 
@@ -250,17 +324,29 @@ async fn approve(
     }
     let target = str_field(&body, "id", 128)?;
     let allow = body.get("allow").and_then(Value::as_bool) == Some(true);
-    let query = if allow {
-        "UPDATE user_sessions SET approved=1 WHERE token_hash=? AND user_id=? AND approved=0"
-    } else {
-        "DELETE FROM user_sessions WHERE token_hash=? AND user_id=? AND approved=0"
-    };
-    let done = sqlx::query(query)
+    let now = now_iso();
+    let cutoff = iso_ago(PENDING_SECONDS);
+    let done = if allow {
+        let extended = super::auth::iso_after(super::auth::SESSION_DAYS * 24 * 60 * 60);
+        sqlx::query(
+            "UPDATE user_sessions SET approved=1, expires_at=? WHERE token_hash=? AND user_id=? AND approved=0 AND created_at>=? AND expires_at>?",
+        )
+        .bind(&extended)
         .bind(target)
         .bind(&me.id)
+        .bind(&cutoff)
+        .bind(&now)
         .execute(&state.db)
         .await
-        .map_err(|_| db_error())?;
+        .map_err(|_| db_error())?
+    } else {
+        sqlx::query("DELETE FROM user_sessions WHERE token_hash=? AND user_id=? AND approved=0")
+            .bind(target)
+            .bind(&me.id)
+            .execute(&state.db)
+            .await
+            .map_err(|_| db_error())?
+    };
     if done.rows_affected() == 0 {
         return Err(ApiError::new(
             "This login is no longer waiting",
@@ -493,20 +579,31 @@ async fn link_approve(
     let id = str_field(&body, "id", 128)?;
     let bad = || ApiError::new("Invalid keys", StatusCode::BAD_REQUEST);
     let sealed = body.get("sealed").ok_or_else(bad)?;
-    for (field, max) in [("epub", 200), ("iv", 40), ("ct", 8000)] {
-        let ok = sealed
-            .get(field)
-            .and_then(Value::as_str)
-            .is_some_and(|v| !v.is_empty() && v.len() <= max);
-        if !ok {
-            return Err(bad());
-        }
-    }
+    let epub = sealed
+        .get("epub")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty() && v.len() <= 200)
+        .ok_or_else(bad)?;
+    let iv = sealed
+        .get("iv")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty() && v.len() <= 40)
+        .ok_or_else(bad)?;
+    let ct = sealed
+        .get("ct")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty() && v.len() <= 8000)
+        .ok_or_else(bad)?;
+    let sanitized_sealed = json!({
+        "epub": epub,
+        "iv": iv,
+        "ct": ct,
+    });
     let done = sqlx::query(
         "UPDATE device_links SET state='approved', user_id=?, sealed=? WHERE token_hash=? AND state='waiting' AND expires_at>?",
     )
     .bind(&me.id)
-    .bind(sealed.to_string())
+    .bind(sanitized_sealed.to_string())
     .bind(id)
     .bind(now_iso())
     .execute(&state.db)
@@ -689,5 +786,208 @@ mod tests {
             axum::response::IntoResponse::into_response(err).status(),
             StatusCode::TOO_MANY_REQUESTS
         );
+    }
+
+    #[tokio::test]
+    async fn link_approve_persists_only_epub_iv_ct() {
+        let (_fix, state) = Fixture::new().await;
+        sqlx::query("INSERT INTO users(id,username,enc_private) VALUES('u1','alice','enc')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let main_tok = "main-tok-link";
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1','2999-01-01T00:00:00Z',?,1)")
+            .bind(hash_token(main_tok))
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET main_session=? WHERE id='u1'")
+            .bind(hash_token(main_tok))
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,state) VALUES('dl-hash','CODE9999','pub',?,'2999-01-01T00:00:00Z','waiting')")
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("sessioncookie={main_tok}").parse().unwrap(),
+        );
+        let resp = link_approve(
+            State(state.clone()),
+            headers,
+            Json(json!({
+                "id": "dl-hash",
+                "sealed": {
+                    "epub": "epub-val",
+                    "iv": "iv-val",
+                    "ct": "ct-val",
+                    "extra": "should-be-stripped",
+                    "sig": "also-stripped"
+                }
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw_sealed: String =
+            sqlx::query_scalar("SELECT sealed FROM device_links WHERE token_hash='dl-hash'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        let parsed: Value = serde_json::from_str(&raw_sealed).unwrap();
+        assert_eq!(
+            parsed,
+            json!({"epub": "epub-val", "iv": "iv-val", "ct": "ct-val"})
+        );
+    }
+
+    #[tokio::test]
+    async fn set_main_clears_device_links_and_approve_validates_pending_window_and_extends_expiry()
+    {
+        let (_fix, state) = Fixture::new().await;
+        sqlx::query("INSERT INTO users(id,username,enc_private) VALUES('u1','alice','enc')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let s1 = "sess-1";
+        let s2 = "sess-2";
+        for tok in [s1, s2] {
+            sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1','2999-01-01T00:00:00Z',?,1)")
+                .bind(hash_token(tok))
+                .bind(now_iso())
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO device_links(token_hash,code,pub,created_at,expires_at,user_id,state) VALUES('dl-u1','CODE7777','pub',?,'2999-01-01T00:00:00Z','u1','waiting')")
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let mut h1 = HeaderMap::new();
+        h1.insert(
+            header::COOKIE,
+            format!("sessioncookie={s1}").parse().unwrap(),
+        );
+        let resp = set_main(
+            State(state.clone()),
+            h1.clone(),
+            Json(json!({"id": hash_token(s1)})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let links_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM device_links WHERE user_id='u1'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(links_left, 0);
+
+        // Fresh pending session within 15-min window -> approved and extended to ~90 days.
+        let pend_ok = hash_token("pend-ok");
+        let short_exp = (chrono::Utc::now() + chrono::Duration::minutes(10))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1',?,?,0)")
+            .bind(&pend_ok)
+            .bind(&short_exp)
+            .bind(now_iso())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let approve_ok = approve(
+            State(state.clone()),
+            h1.clone(),
+            Json(json!({"id": pend_ok, "allow": true})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(approve_ok.status(), StatusCode::OK);
+        let extended_exp: String =
+            sqlx::query_scalar("SELECT expires_at FROM user_sessions WHERE token_hash=?")
+                .bind(&pend_ok)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        let eighty_days = (chrono::Utc::now() + chrono::Duration::days(80))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        assert!(
+            extended_exp > eighty_days,
+            "approved session expires_at {extended_exp} should be extended to ~90 days"
+        );
+
+        // Expired pending session (created >15m ago) -> rejected.
+        let pend_old = hash_token("pend-old");
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1','2999-01-01T00:00:00Z',?,0)")
+            .bind(&pend_old)
+            .bind(iso_ago(PENDING_SECONDS + 60))
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let approve_old = approve(
+            State(state.clone()),
+            h1,
+            Json(json!({"id": pend_old, "allow": true})),
+        )
+        .await;
+        assert!(approve_old.is_err());
+
+        // Concurrent set_main first-choice race on a separate user leaves exactly 1 main_session.
+        sqlx::query("INSERT INTO users(id,username,enc_private) VALUES('u2','bob','enc')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let b1 = "bob-s1";
+        let b2 = "bob-s2";
+        for tok in [b1, b2] {
+            sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u2','2999-01-01T00:00:00Z',?,1)")
+                .bind(hash_token(tok))
+                .bind(now_iso())
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        let mut hb1 = HeaderMap::new();
+        hb1.insert(
+            header::COOKIE,
+            format!("sessioncookie={b1}").parse().unwrap(),
+        );
+        let mut hb2 = HeaderMap::new();
+        hb2.insert(
+            header::COOKIE,
+            format!("sessioncookie={b2}").parse().unwrap(),
+        );
+        let (r1, r2) = tokio::join!(
+            set_main(
+                State(state.clone()),
+                hb1,
+                Json(json!({"id": hash_token(b1)}))
+            ),
+            set_main(
+                State(state.clone()),
+                hb2,
+                Json(json!({"id": hash_token(b2)}))
+            ),
+        );
+        assert_ne!(
+            r1.is_ok(),
+            r2.is_ok(),
+            "exactly one concurrent first-choice set_main may win"
+        );
+        let remaining_bob: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE user_id='u2'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(remaining_bob, 1);
     }
 }
