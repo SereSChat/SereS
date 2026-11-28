@@ -40,6 +40,9 @@ window.SeresLang.en = {
   "login.registerFailed": "An error occurred during registration.",
   "login.created": "Account created, logging in...",
   "login.reloginKeys": "Please log in again on this device.",
+  "login.legacyBlocked": "Legacy plaintext login is blocked because end-to-end encryption has already been used on this browser.",
+  "login.legacyConfirm": "This legacy account does not have end-to-end encryption keys yet. Upgrading will send your password once to migrate your account. Continue?",
+  "login.legacyCancelled": "Legacy login upgrade cancelled.",
 
   "app.addFriend": "Add Friend",
   "app.welcome": "Welcome",
@@ -508,6 +511,7 @@ window.SeresLang.en = {
   "link.checkCompare": "Check code: {code} – only allow it if the new device shows the same code.",
   "link.needPassword": "Enter your password once to link devices from this device.",
   "link.done": "The device is linked.",
+  "link.keyMismatch": "The device's linking key does not match the scanned link. Linking was aborted and denied.",
   "call.reconnecting": "reconnecting…",
   "call.routeRelay": "via relay",
   "call.routeTcp": "via relay (TCP), may lag",

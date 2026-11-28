@@ -346,6 +346,19 @@ const SeresCalls = (() => {
   async function handleSignal(signal: CallSignal) {
     if (!active || signal.call_id !== active.call.id) return;
     const current = active;
+    const meId = deps.me().id;
+    const sender = current.call.participants.find((p) => p.id === signal.from);
+    if (!sender || sender.state !== "joined" || signal.from === meId) {
+      console.warn("Ignored a call signal from non-joined participant", signal.from);
+      return;
+    }
+    const validRole =
+      (signal.kind === "offer" && signal.from < meId) ||
+      (signal.kind === "answer" && meId < signal.from);
+    if (!validRole) {
+      console.warn("Ignored a call signal with invalid role", signal.kind, signal.from);
+      return;
+    }
     const key = await signKey(signal.from);
     if (!key) {
       const warnKey = `${signal.call_id}:${signal.from}`;
@@ -356,7 +369,6 @@ const SeresCalls = (() => {
       console.warn("Ignored a call signal from unpinned or key-changed peer", signal.from);
       return;
     }
-    const meId = deps.me().id;
     const valid = await SeresCrypto.verifyCall(key, signal.call_id, signal.from, meId, signal.kind, signal.data.sdp, signal.data.sig);
     if (!valid) {
       console.warn("Ignored a call signal with a wrong signature from", signal.from);
@@ -554,22 +566,30 @@ const SeresCalls = (() => {
   /** Calls everyone in the chat, or joins the call running there. */
   async function start(chatId: string) {
     if (active && active.call.chat_id === chatId) return;
+    let stream: MediaStream | undefined;
     try {
-      const stream = await microphone();
+      stream = await microphone();
       const data = await deps.post(`/api/chats/${encodeURIComponent(chatId)}/call`);
       await enter(data.call, stream);
     } catch (error) {
+      if (stream && active?.stream !== stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
       deps.showAlert(deps.errorText(error));
     }
   }
 
   async function answer(call: CallInfo) {
+    let stream: MediaStream | undefined;
     try {
-      const stream = await microphone();
+      stream = await microphone();
       const data = await deps.post(`/api/calls/${encodeURIComponent(call.id)}/answer`);
       await enter(data.call, stream);
       deps.openChat(call.chat_id);
     } catch (error) {
+      if (stream && active?.stream !== stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
       deps.showAlert(deps.errorText(error));
     }
   }

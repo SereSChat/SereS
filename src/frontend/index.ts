@@ -42,6 +42,7 @@
     expires_at?: string | null;
     // After a password reset by e-mail: the message key another member shared.
     share?: SeresSharedKey;
+    shares?: SeresSharedKey[];
   }
 
   /** An encrypted attachment; key and iv only exist inside the encrypted message. */
@@ -180,6 +181,8 @@
   const pendingInvite = new URLSearchParams(window.location.search).get("invite");
   // Group invite from a link like /?join=..., kept across the login redirect as well.
   const pendingJoin = new URLSearchParams(window.location.search).get("join");
+  // Matrix SSO callback token from /?loginToken=..., captured before Matrix clears the URL.
+  const pendingMatrixLogin = new URLSearchParams(window.location.search).has("loginToken");
   let joinToAccept: string | null = null;
   // Set by the login page after a password reset ("code" or "mail").
   const recoveredBy = new URLSearchParams(window.location.search).get("recovered");
@@ -194,8 +197,53 @@
   let showArchived = false;
   // Unread counts from the last refresh, to notice new messages for notifications.
   let lastUnread: Map<string, number> | null = null;
-  // Decrypted attachments as blob: URLs, by file id.
+  // Decrypted attachments as blob: URLs, by file id (LRU-capped).
+  const MAX_FILE_URLS = 64;
   const fileUrls = new Map<string, Promise<string>>();
+  let ownAvatarUrl: string | null = null;
+
+  function revokeBlobUrl(url: string | null | undefined) {
+    if (url && url.startsWith("blob:")) URL.revokeObjectURL(url);
+  }
+
+  function revokeOwnAvatar() {
+    revokeBlobUrl(ownAvatarUrl);
+    ownAvatarUrl = null;
+  }
+
+  function setFileUrl(fileId: string, promise: Promise<string>) {
+    const existing = fileUrls.get(fileId);
+    if (existing && existing !== promise) {
+      fileUrls.delete(fileId);
+      existing.then(revokeBlobUrl).catch(() => {});
+    }
+    fileUrls.set(fileId, promise);
+    promise.catch(() => {
+      if (fileUrls.get(fileId) === promise) fileUrls.delete(fileId);
+    });
+    while (fileUrls.size > MAX_FILE_URLS) {
+      const oldestKey = fileUrls.keys().next().value;
+      if (oldestKey === undefined) break;
+      const oldest = fileUrls.get(oldestKey);
+      fileUrls.delete(oldestKey);
+      oldest?.then(revokeBlobUrl).catch(() => {});
+    }
+  }
+
+  function clearFileUrls() {
+    for (const promise of fileUrls.values()) {
+      promise.then(revokeBlobUrl).catch(() => {});
+    }
+    fileUrls.clear();
+  }
+
+  async function logoutMatrix() {
+    try {
+      await (window as any).SeresMatrix?.logout?.();
+    } catch {
+      /* Matrix logout best-effort */
+    }
+  }
 
   interface KnownKeys {
     id: string;
@@ -206,12 +254,13 @@
     previous_keys?: { pub_ecdh: string; pub_sign: string; until: string }[];
   }
   const userKeys = new Map<string, KnownKeys>();
+  const unacceptedKeyChanges = new Map<string, KnownKeys>();
 
   /** The sender's keys that were valid when the message was written, verifying historical keys against local pins. */
   async function keysAt(
     user: KnownKeys,
     createdAt: string,
-  ): Promise<{ pub_ecdh: string | null; pub_sign: string | null; untrustedHistory?: boolean }> {
+  ): Promise<{ pub_ecdh: string | null; pub_sign: string | null; untrustedHistory?: boolean; fromHistory?: boolean }> {
     const createdMs = Date.parse(createdAt);
     const history = readJsonStore<Record<string, PinHistoryEntry[]>>("pin-history", {})[user.id] || [];
     let untrustedHistory = false;
@@ -230,7 +279,7 @@
         untrustedHistory = true;
         continue;
       }
-      return { pub_ecdh: old.pub_ecdh, pub_sign: old.pub_sign };
+      return { pub_ecdh: old.pub_ecdh, pub_sign: old.pub_sign, fromHistory: true };
     }
     if (untrustedHistory) {
       return { pub_ecdh: null, pub_sign: null, untrustedHistory: true };
@@ -299,6 +348,9 @@
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
     if (response.status === 401) {
+      clearFileUrls();
+      revokeOwnAvatar();
+      await logoutMatrix();
       goToLogin();
       throw new ApiError("Not logged in", 401);
     }
@@ -543,6 +595,7 @@
       pins[member.id] = fp;
       pinKeys[member.id] = { fp, pub_ecdh: member.pub_ecdh, pub_sign: member.pub_sign };
       userKeys.set(member.id, member);
+      unacceptedKeyChanges.delete(member.id);
       delete verified[member.id];
     }
     writeStore("pins", pins);
@@ -556,10 +609,34 @@
   }
 
   async function ensureUserKeys(ids: string[]) {
-    const missing = [...new Set(ids)].filter((id) => id && !userKeys.has(id));
+    const missing = [...new Set(ids)].filter(
+      (id) =>
+        id &&
+        ((id === me.id && (!userKeys.has(id) || userKeys.get(id)?.previous_keys === undefined)) ||
+          (id !== me.id && !userKeys.has(id) && !unacceptedKeyChanges.has(id))),
+    );
     if (!missing.length) return;
     const data = await api("/api/users/keys?ids=" + encodeURIComponent(missing.join(",")));
-    for (const user of data.users) userKeys.set(user.id, user);
+    for (const user of data.users as KnownKeys[]) {
+      if (user.id === me.id) {
+        if (user.pub_ecdh === identity.pubEcdh && user.pub_sign === identity.pubSign) {
+          userKeys.set(user.id, user);
+        }
+        continue;
+      }
+      const memberLike: Member = { ...user, role: "" };
+      const { changed } = await checkPins([memberLike]);
+      if (changed.length) {
+        unacceptedKeyChanges.set(user.id, user);
+        if (current && !current.changedKeys.some((m) => m.id === user.id)) {
+          current.changedKeys.push(memberLike);
+          renderKeyWarning();
+        }
+        continue;
+      }
+      unacceptedKeyChanges.delete(user.id);
+      userKeys.set(user.id, user);
+    }
   }
 
   function callLength(seconds: number) {
@@ -599,8 +676,16 @@
     }
   }
 
+  function messageShares(message: Message): SeresSharedKey | SeresSharedKey[] | undefined {
+    const list: SeresSharedKey[] = [];
+    if (Array.isArray(message.shares)) list.push(...message.shares);
+    if (message.share) list.push(message.share);
+    return list.length ? list : undefined;
+  }
+
   function showMessage(chatId: string, message: Message): Promise<Shown> {
-    const cacheKey = message.id + ":" + message.rev + (message.share ? ":shared" : "");
+    const hasShares = !!(message.share || (message.shares && message.shares.length));
+    const cacheKey = message.id + ":" + message.rev + (hasShares ? ":shared" : "");
     let shown = shownCache.get(cacheKey);
     if (!shown) {
       shown = (async (): Promise<Shown> => {
@@ -610,32 +695,68 @@
         try {
           await ensureUserKeys([message.sender_id!]);
           const known = userKeys.get(message.sender_id!);
+          if (!known && unacceptedKeyChanges.has(message.sender_id!)) {
+            return { type: "error", text: t("msg.keyChanged") };
+          }
           const sender = known ? { id: known.id, ...(await keysAt(known, message.created_at)) } : null;
           if (sender?.untrustedHistory) {
+            if (message.sender_id === me.id && !hasShares) {
+              const resets = userKeys.get(me.id)?.previous_keys || [];
+              const lastReset = resets.length ? resets[resets.length - 1].until : "";
+              if (lastReset && message.created_at <= lastReset) {
+                return { type: "error", text: t("history.notShared") };
+              }
+            }
             console.warn("Refused untrusted historical key for message", message.id);
             return { type: "error", text: t("msg.untrustedHistoricalKey") };
           }
           if (!sender || !sender.pub_ecdh || !sender.pub_sign) throw new Error("unknown sender");
+          if (!sender.fromHistory && sender.id !== me.id) {
+            const currentFp = await SeresCrypto.fingerprint(sender.pub_ecdh, sender.pub_sign);
+            const pins = readStore("pins");
+            if (!pins[sender.id]) {
+              await checkPins([{
+                id: sender.id,
+                username: known?.username || "",
+                pub_ecdh: sender.pub_ecdh,
+                pub_sign: sender.pub_sign,
+                role: "",
+              }]);
+            } else if (pins[sender.id] !== currentFp) {
+              return { type: "error", text: t("msg.keyChanged") };
+            }
+          }
           const content = await SeresCrypto.decryptMessage(
             identity,
             chatId,
             message.id,
             { id: sender.id, pub_ecdh: sender.pub_ecdh, pub_sign: sender.pub_sign },
             message.payload,
-            message.share,
+            messageShares(message),
           );
           const parsed: Content = content && typeof content === "object" ? content : {};
           return { type: "text", text: String(parsed.text ?? ""), content: parsed };
         } catch (error) {
           console.warn("Could not decrypt message", message.id, error);
+          if (message.sender_id && unacceptedKeyChanges.has(message.sender_id)) {
+            return { type: "error", text: t("msg.keyChanged") };
+          }
           // From before my own reset by e-mail and nobody shared it.
           const resets = userKeys.get(me.id)?.previous_keys || [];
           const lastReset = resets.length ? resets[resets.length - 1].until : "";
-          if (!message.share && message.created_at <= lastReset) return { type: "error", text: t("history.notShared") };
+          if (!hasShares && lastReset && message.created_at <= lastReset) return { type: "error", text: t("history.notShared") };
           return { type: "error", text: t("msg.decryptError") };
         }
       })();
       shownCache.set(cacheKey, shown);
+      shown.then(
+        (res) => {
+          if (res.type === "error" && shownCache.get(cacheKey) === shown) shownCache.delete(cacheKey);
+        },
+        () => {
+          if (shownCache.get(cacheKey) === shown) shownCache.delete(cacheKey);
+        },
+      );
     }
     return shown;
   }
@@ -797,6 +918,10 @@
   function contentPreview(shown: Shown) {
     const file = shown.content?.file;
     const text = SeresFormat.plain(shown.text);
+    if (shown.type === "legacy") {
+      const badge = `⚠ [${t("msg.notEncrypted")}]`;
+      return text ? `${badge} ${text}` : badge;
+    }
     const poll = shown.content?.poll;
     if (poll && validPoll(poll)) return "📊 " + String(poll.question);
     if (shown.content?.location) return "📍 " + t(shown.content.live ? "location.live" : "location.title");
@@ -1514,9 +1639,28 @@
     if (current !== opened) return;
     const details: ChatSummary = data.chat;
     opened.details = details;
-    for (const member of details.members || []) userKeys.set(member.id, member);
     const { changed, missing } = await checkPins(details.members || []);
+    const changedIds = new Set(changed.map((m) => m.id));
+    for (const member of details.members || []) {
+      if (member.id === me.id) {
+        if (member.pub_ecdh === identity.pubEcdh && member.pub_sign === identity.pubSign) {
+          userKeys.set(member.id, member);
+        }
+        continue;
+      }
+      if (changedIds.has(member.id)) {
+        unacceptedKeyChanges.set(member.id, member);
+      } else {
+        unacceptedKeyChanges.delete(member.id);
+        userKeys.set(member.id, member);
+      }
+    }
     opened.changedKeys = changed;
+    for (const [uid, changedUser] of unacceptedKeyChanges) {
+      if (!opened.changedKeys.some((m) => m.id === uid)) {
+        opened.changedKeys.push({ ...changedUser, role: "" });
+      }
+    }
     opened.missingKeys = missing;
     $("current-chat-name").textContent = details.name;
     $("call-btn")?.classList.toggle("modal-hidden", !!details.blocked);
@@ -1767,6 +1911,7 @@
             continue;
           }
           if (!sender || !sender.pub_ecdh || !sender.pub_sign) continue;
+          if (!message.payload.keys || !Object.prototype.hasOwnProperty.call(message.payload.keys, recipient.id)) continue;
           keys[message.id] = await SeresCrypto.shareMessageKey(
             identity,
             opened.id,
@@ -1774,7 +1919,7 @@
             { id: sender.id, pub_ecdh: sender.pub_ecdh, pub_sign: sender.pub_sign },
             message.payload,
             recipient,
-            message.share,
+            messageShares(message),
           );
           count++;
         } catch (error) {
@@ -1970,7 +2115,9 @@
         return;
       }
       const compact =
+        message.kind !== "legacy" &&
         previous !== null &&
+        previous.kind !== "legacy" &&
         previous.sender_id === message.sender_id &&
         date.getTime() - parseTime(previous.created_at).getTime() < 5 * 60 * 1000;
       fragment.appendChild(messageRow(opened, message, view, compact, reactions.get(message.id), votes.get(message.id), liveUpdates.get(message.id)));
@@ -2029,7 +2176,16 @@
       wrapper.appendChild(header);
     }
 
-    const bubble = h("div", { className: "message-text" });
+    const bubble = h("div", { className: "message-text" + (view.type === "legacy" ? " message-legacy" : "") });
+    if (view.type === "legacy") {
+      bubble.appendChild(
+        h("div", {
+          className: "message-flag message-unencrypted-badge",
+          text: "⚠ " + t("msg.notEncrypted"),
+          title: t("msg.notEncryptedHint"),
+        }),
+      );
+    }
     if (content.forwarded) bubble.appendChild(h("div", { className: "message-forwarded", text: t("msg.forwarded") }));
     if (content.reply) bubble.appendChild(replyQuote(opened, content.reply));
     if (content.file) bubble.appendChild(renderFile(opened, content.file));
@@ -2053,7 +2209,7 @@
     }
 
     if (content.preview && view.type === "text" && linkPreviewsOn()) {
-      const card = previewCard(content.preview);
+      const card = previewCard(content.preview, true, view.text);
       if (card) bubble.insertBefore(card, bubble.querySelector(".message-body"));
     }
 
@@ -2214,6 +2370,35 @@
     });
   }
 
+  const RASTER_DATA_IMAGE_RE = /^data:image\/(?:jpeg|png|webp|gif);base64,[A-Za-z0-9+/]+=*$/i;
+
+  function urlMatchesText(previewUrl: string, text: string): boolean {
+    let target: URL;
+    try {
+      target = new URL(previewUrl);
+    } catch {
+      return false;
+    }
+    const targetHost = target.hostname.replace(/^www\./, "").toLowerCase();
+    const re = new RegExp(URL_PATTERN.source, "gi");
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      const candidate = safeUrl(match[0].replace(/[.,;:!?]+$/, ""));
+      if (!candidate) continue;
+      try {
+        const parsed = new URL(candidate);
+        if (parsed.href === target.href) return true;
+        const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+        if (host === targetHost && parsed.pathname === target.pathname && parsed.search === target.search) {
+          return true;
+        }
+      } catch {
+        // ignore invalid URL
+      }
+    }
+    return false;
+  }
+
   function fetchPreview(url: string) {
     let pending = previewCache.get(url);
     if (!pending) {
@@ -2221,7 +2406,7 @@
         try {
           const data = await api(`/api/link-preview?url=${encodeURIComponent(url)}`);
           const href = safeUrl(data.url) || url;
-          const image = typeof data.image === "string" && data.image.startsWith("data:image/") ? await shrinkImage(data.image) : null;
+          const image = typeof data.image === "string" && RASTER_DATA_IMAGE_RE.test(data.image) ? await shrinkImage(data.image) : null;
           return {
             url: href,
             title: String(data.title || "").slice(0, 200),
@@ -2282,20 +2467,22 @@
     }
   }
 
-  function previewCard(preview: LinkPreview, clickable = true) {
+  function previewCard(preview: LinkPreview, clickable = true, messageText?: string) {
     const url = safeUrl(preview?.url);
     if (!url || !preview.title) return null;
-    const image = typeof preview.image === "string" && preview.image.startsWith("data:image/") ? preview.image : null;
+    if (messageText !== undefined && !urlMatchesText(url, messageText)) return null;
+    const image = typeof preview.image === "string" && RASTER_DATA_IMAGE_RE.test(preview.image) ? preview.image : null;
     let host = "";
     try {
       host = new URL(url).hostname.replace(/^www\./, "");
     } catch {
       // checked above
     }
+    if (!host) return null;
     const card = h(clickable ? "a" : "div", { className: "link-preview" + (image ? "" : " no-image") }, [
       image ? h("img", { className: "link-preview-image", attrs: { src: image, alt: "", loading: "lazy" } }) : null,
       h("div", { className: "link-preview-text" }, [
-        h("span", { className: "link-preview-site", text: String(preview.site || host) }),
+        h("span", { className: "link-preview-site", text: host }),
         h("strong", { className: "link-preview-title", text: String(preview.title) }),
         preview.description ? h("span", { className: "link-preview-desc", text: String(preview.description) }) : null,
       ]),
@@ -2614,7 +2801,7 @@
     const counts = options.map(() => [] as string[]);
     let voters = 0;
     perSender?.forEach((vote, senderId) => {
-      const valid = vote.choices.filter((n) => n < options.length);
+      const valid = [...new Set(vote.choices.filter((n) => Number.isInteger(n) && n >= 0 && n < options.length))];
       if (!valid.length) return;
       voters++;
       for (const n of poll.multi ? valid : valid.slice(0, 1)) counts[n].push(senderId);
@@ -2717,7 +2904,11 @@
   /** Downloads and decrypts an attachment once; returns a blob: URL. */
   function fileUrl(chatId: string, file: FileRef): Promise<string> {
     let url = fileUrls.get(file.id);
-    if (!url) {
+    if (url) {
+      // Refresh LRU recency.
+      fileUrls.delete(file.id);
+      fileUrls.set(file.id, url);
+    } else {
       url = (async () => {
         const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}/files/${encodeURIComponent(file.id)}`, {
           credentials: "same-origin",
@@ -2728,8 +2919,7 @@
         const media = IMAGE_TYPES.includes(file.mime) || VIDEO_TYPES.includes(file.mime) || file.mime.startsWith("audio/");
         return URL.createObjectURL(new Blob([plain], { type: media ? file.mime : "application/octet-stream" }));
       })();
-      fileUrls.set(file.id, url);
-      url.catch(() => fileUrls.delete(file.id));
+      setFileUrl(file.id, url);
     }
     return url;
   }
@@ -3189,7 +3379,7 @@
     }
     // Show own uploads right away without downloading them again.
     const media = kind !== "file";
-    fileUrls.set(ref.id, Promise.resolve(URL.createObjectURL(media ? blob : new Blob([blob], { type: "application/octet-stream" }))));
+    setFileUrl(ref.id, Promise.resolve(URL.createObjectURL(media ? blob : new Blob([blob], { type: "application/octet-stream" }))));
     return ref;
   }
 
@@ -4364,7 +4554,11 @@
       const newKeys = await SeresCrypto.deriveAccountKeys(newPw, salt, SeresCrypto.DEFAULT_ITERATIONS);
       let encPrivate: string;
       try {
-        encPrivate = await SeresCrypto.rewrapPrivateKeys(fresh.enc_private, oldKeys.wrapKey, newKeys.wrapKey);
+        encPrivate = await SeresCrypto.rewrapPrivateKeys(fresh.enc_private, oldKeys.wrapKey, newKeys.wrapKey, {
+          userId: me.id,
+          pubEcdh: fresh.pub_ecdh,
+          pubSign: fresh.pub_sign,
+        });
       } catch {
         throw new Error(t("settings.wrongPassword"));
       }
@@ -4771,7 +4965,11 @@
       const keys = await SeresCrypto.deriveAccountKeys(password, pre.kdf_salt, pre.kdf_iterations);
       let created: { codes: string[]; stored: object[] };
       try {
-        created = await SeresCrypto.createRecoveryCodes(fresh.enc_private, keys.wrapKey);
+        created = await SeresCrypto.createRecoveryCodes(fresh.enc_private, keys.wrapKey, {
+          userId: me.id,
+          pubEcdh: fresh.pub_ecdh,
+          pubSign: fresh.pub_sign,
+        });
       } catch {
         throw new Error(t("settings.codesWrongPassword"));
       }
@@ -4817,11 +5015,15 @@
         return response.blob();
       })
       .then((blob) => {
-        img.src = URL.createObjectURL(blob);
+        revokeOwnAvatar();
+        ownAvatarUrl = URL.createObjectURL(blob);
+        img.src = ownAvatarUrl;
         img.classList.remove("hidden-el");
         text.style.display = "none";
       })
       .catch(() => {
+        revokeOwnAvatar();
+        img.removeAttribute("src");
         img.classList.add("hidden-el");
         text.style.display = "block";
       });
@@ -4851,6 +5053,9 @@
       await unsubscribePush();
       await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
     } finally {
+      clearFileUrls();
+      revokeOwnAvatar();
+      await logoutMatrix();
       await SeresCrypto.clearIdentities();
       window.location.href = "login.html";
     }
@@ -5476,6 +5681,9 @@
       const result = await post("/api/devices/main", { id });
       if (result.logged_out) {
         // Another device is the main device now; this one was logged out.
+        clearFileUrls();
+        revokeOwnAvatar();
+        await logoutMatrix();
         await SeresCrypto.clearIdentities();
         window.location.href = "login.html";
         return;
@@ -5512,14 +5720,25 @@
    * The main device links a new device: from the QR code / link (token) or
    * the typed code. The account keys go sealed for the new device.
    */
-  async function linkDevice(query: { token?: string; code?: string }) {
+  async function linkDevice(query: { token?: string; code?: string; keyHash?: string }) {
     try {
       const state = devicesState || (await loadDevices());
       if (!state.isMain) {
         showAlert(t("link.mainOnly"));
         return;
       }
-      const found = await post("/api/link/find", query);
+      const found = await post("/api/link/find", {
+        ...(query.token ? { token: query.token } : {}),
+        ...(query.code ? { code: query.code } : {}),
+      });
+      if (query.keyHash) {
+        const actualHash = await SeresCrypto.linkPubHash(found.pub);
+        if (actualHash !== query.keyHash) {
+          await post("/api/link/deny", { id: found.id }).catch(() => {});
+          showAlert(t("link.keyMismatch"));
+          return;
+        }
+      }
       const check = await SeresCrypto.linkCheckCode(found.pub);
       const allow = await askAboutDevice({
         icon: "qr_code_2",
@@ -5539,7 +5758,7 @@
       const fresh = (await api("/api/me")).user;
       let sealed: SeresSealedIdentity;
       try {
-        sealed = await SeresCrypto.sealPrivateKeys(fresh.enc_private, keys.wrapKey, found.pub);
+        sealed = await SeresCrypto.sealPrivateKeys(fresh.enc_private, keys.wrapKey, found.pub, identity);
       } catch {
         showAlert(t("settings.wrongPassword"));
         return;
@@ -5605,6 +5824,12 @@
   }
 
   async function boot() {
+    const matrixLogin = pendingMatrixLogin || new URLSearchParams(window.location.search).has("loginToken");
+    const linkToken = new URLSearchParams(window.location.search).get("link");
+    const linkKeyHash =
+      new URLSearchParams(window.location.hash.replace(/^#/, "")).get("k") ||
+      new URLSearchParams(window.location.search).get("k") ||
+      undefined;
     SeresI18n.apply();
     $("my-username-display").textContent = t("common.loading");
     $("mobile-username").textContent = t("common.loading");
@@ -5615,19 +5840,29 @@
     try {
       me = (await api("/api/me")).user;
     } catch {
+      clearFileUrls();
+      revokeOwnAvatar();
+      await logoutMatrix();
       goToLogin();
       return;
     }
     const stored = await SeresCrypto.loadIdentity(me.id);
     if (!stored || stored.pubEcdh !== me.pub_ecdh || stored.pubSign !== me.pub_sign) {
       // No unlocked keys on this device (or they don't match the account): log in again.
+      clearFileUrls();
+      revokeOwnAvatar();
+      await logoutMatrix();
       await fetch("/api/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
       await SeresCrypto.clearIdentities();
       goToLogin("keys");
       return;
     }
     identity = stored;
-    userKeys.set(me.id, { id: me.id, username: me.username, pub_ecdh: me.pub_ecdh, pub_sign: me.pub_sign });
+    SeresCrypto.markE2eeUsed();
+    await ensureUserKeys([me.id]).catch(() => {});
+    if (!userKeys.has(me.id)) {
+      userKeys.set(me.id, { id: me.id, username: me.username, pub_ecdh: me.pub_ecdh, pub_sign: me.pub_sign });
+    }
     const meFp = await SeresCrypto.fingerprint(me.pub_ecdh, me.pub_sign);
     const pinKeys = readJsonStore<Record<string, PinKeyRecord>>("pin-keys", {});
     if (pinKeys[me.id] && pinKeys[me.id].fp !== meFp) {
@@ -5641,8 +5876,8 @@
     showOwnName();
     loadOwnAvatar();
     bindEvents();
-    switchView("chats");
-    if (window.innerWidth <= 768) document.querySelector(".sidebar")?.classList.add("open");
+    switchView(matrixLogin ? "matrix" : "chats");
+    if (!matrixLogin && window.innerWidth <= 768) document.querySelector(".sidebar")?.classList.add("open");
 
     await refreshAll();
     if (recoveredBy === "code") {
@@ -5653,11 +5888,10 @@
     }
     if (notificationsEnabled()) subscribePush().catch((error) => console.warn("Push not available", error));
     // Opened from the QR code / link of a new device: link it.
-    const linkToken = new URLSearchParams(window.location.search).get("link");
     if (linkToken) {
       window.history.replaceState({}, document.title, window.location.pathname);
       await loadDevices().catch(() => {});
-      await linkDevice({ token: linkToken });
+      await linkDevice({ token: linkToken, keyHash: linkKeyHash });
     }
     checkDevices().catch(() => {});
     window.setInterval(() => {

@@ -42,6 +42,12 @@
     );
     const body: Record<string, unknown> = { nameomail, auth_hash: authHash };
     if (pre.data.legacy) {
+      if (await SeresCrypto.hasUsedE2ee()) {
+        throw new Error(t("login.legacyBlocked"));
+      }
+      if (!window.confirm(t("login.legacyConfirm"))) {
+        throw new Error(t("login.legacyCancelled"));
+      }
       // Account from before end-to-end encryption: upgrade it on this login.
       body.passwd = password;
       body.keys = await SeresCrypto.createKeyBundle(wrapKey);
@@ -243,7 +249,10 @@
       // Like Discord: hand out the backup codes right away, shown only this once.
       // They are sent with the registration, which also starts the session, so
       // there is no second key derivation or login request.
-      const created = await SeresCrypto.createRecoveryCodes(keys.enc_private, wrapKey).catch(() => null);
+      const created = await SeresCrypto.createRecoveryCodes(keys.enc_private, wrapKey, {
+        pubEcdh: keys.pub_ecdh,
+        pubSign: keys.pub_sign,
+      }).catch(() => null);
       const res = await postJson("/api/register", {
         username,
         email,
@@ -376,11 +385,12 @@
     }
     const session = { token: res.data.token as string, stop: false };
     linking = session;
-    const url = `${window.location.origin}/?link=${encodeURIComponent(session.token)}`;
+    const pubHash = await SeresCrypto.linkPubHash(keys.pub);
+    const url = `${window.location.origin}/?link=${encodeURIComponent(session.token)}#k=${pubHash}`;
     // The QR code uses the app's own link (seres://), so the iPhone camera
     // opens the SereS app directly; the app's scanner reads it as well.
     // The https link below is for copying to a main device in the browser.
-    el("link-qr").appendChild(SeresQR.toSvg(`seres://link?link=${encodeURIComponent(session.token)}`));
+    el("link-qr").appendChild(SeresQR.toSvg(`seres://link?link=${encodeURIComponent(session.token)}&k=${pubHash}`));
     el<HTMLInputElement>("link-url").value = url;
     const code = String(res.data.code);
     el("link-code").textContent = code.slice(0, 4) + "-" + code.slice(4);
@@ -414,7 +424,14 @@
       if (data?.state === "approved") {
         try {
           const user = data.user;
-          const identity = await SeresCrypto.openSealedIdentity(user.id, keys.privateKey, data.sealed, user.pub_ecdh, user.pub_sign);
+          const identity = await SeresCrypto.openSealedIdentity(
+            user.id,
+            keys.privateKey,
+            data.sealed,
+            user.pub_ecdh,
+            user.pub_sign,
+            keys.pub,
+          );
           await SeresCrypto.clearIdentities();
           await SeresCrypto.saveIdentity(identity);
           openChats();
@@ -499,7 +516,10 @@
       const user = res.data.user;
       // The old backup codes belonged to the old keys: hand out new ones right away.
       try {
-        const created = await SeresCrypto.createRecoveryCodes(user.enc_private, wrapKey);
+        const created = await SeresCrypto.createRecoveryCodes(user.enc_private, wrapKey, {
+          pubEcdh: user.pub_ecdh,
+          pubSign: user.pub_sign,
+        });
         const saved = await postJson("/api/recovery/codes", { old_auth_hash: authHash, codes: created.stored });
         if (saved.ok) await new Promise<void>((resolve) => SeresCodes.show(created.codes, user.username, resolve));
       } catch {
@@ -562,7 +582,12 @@
       const newKeys = await SeresCrypto.deriveAccountKeys(password, salt, iterations);
       let encPrivate: string;
       try {
-        encPrivate = await SeresCrypto.rewrapPrivateKeys(unlocked.data.enc_private, codeKeys.wrapKey, newKeys.wrapKey);
+        encPrivate = await SeresCrypto.rewrapPrivateKeys(
+          unlocked.data.enc_private,
+          codeKeys.wrapKey,
+          newKeys.wrapKey,
+          { pubEcdh: unlocked.data.pub_ecdh, pubSign: unlocked.data.pub_sign },
+        );
       } catch {
         throw new Error(t("recover.failed"));
       }

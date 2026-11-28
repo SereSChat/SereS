@@ -24,6 +24,10 @@ const SeresCrypto = (() => {
     const ECDH = { name: "ECDH", namedCurve: "P-256" };
     const ECDSA = { name: "ECDSA", namedCurve: "P-256" };
     const DEFAULT_ITERATIONS = 600000;
+    const MIN_ITERATIONS = 100000;
+    const MAX_ITERATIONS = 5000000;
+    const MIN_SALT_BYTES = 16;
+    const E2EE_USED_KEY = "seres-e2ee-used";
     const DB_NAME = "seres-keys";
     const STORE = "identity";
     function toB64(data) {
@@ -32,6 +36,9 @@ const SeresCrypto = (() => {
         for (let i = 0; i < bytes.length; i++)
             binary += String.fromCharCode(bytes[i]);
         return btoa(binary);
+    }
+    function toB64url(data) {
+        return toB64(data).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     }
     function fromB64(value) {
         const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
@@ -48,8 +55,18 @@ const SeresCrypto = (() => {
     }
     // ---------------------------------------------------------------- account
     async function deriveAccountKeys(password, saltB64, iterations) {
+        if (!Number.isInteger(iterations) || iterations < MIN_ITERATIONS || iterations > MAX_ITERATIONS) {
+            throw new Error("Invalid KDF iterations");
+        }
+        if (typeof saltB64 !== "string" || !saltB64) {
+            throw new Error("Invalid KDF salt");
+        }
+        const salt = fromB64(saltB64);
+        if (salt.length < MIN_SALT_BYTES) {
+            throw new Error("Invalid KDF salt");
+        }
         const passwordKey = await subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-        const master = await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: fromB64(saltB64), iterations }, passwordKey, 256);
+        const master = await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, passwordKey, 256);
         const hkdf = await subtle.importKey("raw", master, "HKDF", false, [
             "deriveBits",
             "deriveKey",
@@ -68,18 +85,75 @@ const SeresCrypto = (() => {
         }, hkdf, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
         return { authHash: toB64(authBits), wrapKey };
     }
-    async function encryptPrivateKeys(ecdhPkcs8, signPkcs8, wrapKey) {
+    async function deriveSpkiFromPkcs8(pkcs8, algorithm, privUsages, pubUsages) {
+        const tmp = await subtle.importKey("pkcs8", pkcs8, algorithm, true, privUsages);
+        const jwk = await subtle.exportKey("jwk", tmp);
+        try {
+            const pub = await subtle.importKey("jwk", { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, ext: true }, algorithm, true, pubUsages);
+            return toB64(await subtle.exportKey("spki", pub));
+        }
+        finally {
+            jwk.d = "";
+        }
+    }
+    async function derivePublicSpki(ecdhPkcs8, signPkcs8) {
+        const [pubEcdh, pubSign] = await Promise.all([
+            deriveSpkiFromPkcs8(ecdhPkcs8, ECDH, ["deriveBits"], []),
+            deriveSpkiFromPkcs8(signPkcs8, ECDSA, ["sign"], ["verify"]),
+        ]);
+        return { pubEcdh, pubSign };
+    }
+    function identityAad(userId, pubEcdh, pubSign, unbound) {
+        return encoder.encode(["seres-identity-v2", unbound ? "unbound" : userId || "", pubEcdh, pubSign].join("|"));
+    }
+    async function encryptPrivateKeys(ecdhPkcs8, signPkcs8, wrapKey, context) {
+        const derived = await derivePublicSpki(ecdhPkcs8, signPkcs8);
+        if (context?.pubEcdh && context.pubEcdh !== derived.pubEcdh) {
+            throw new Error("ECDH private key does not match public key");
+        }
+        if (context?.pubSign && context.pubSign !== derived.pubSign) {
+            throw new Error("Signing private key does not match public key");
+        }
+        const unbound = !context?.userId;
         const iv = randomBytes(12);
         const plain = encoder.encode(JSON.stringify({ ecdh: toB64(ecdhPkcs8), sign: toB64(signPkcs8) }));
-        const ct = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: encoder.encode("seres-identity-v1") }, wrapKey, plain);
-        return JSON.stringify({ v: 1, iv: toB64(iv), ct: toB64(ct) });
+        try {
+            const ct = await subtle.encrypt({
+                name: "AES-GCM",
+                iv,
+                additionalData: identityAad(context?.userId, derived.pubEcdh, derived.pubSign, unbound),
+            }, wrapKey, plain);
+            return JSON.stringify(unbound
+                ? { v: 2, unbound: true, iv: toB64(iv), ct: toB64(ct) }
+                : { v: 2, iv: toB64(iv), ct: toB64(ct) });
+        }
+        finally {
+            plain.fill(0);
+        }
     }
-    async function decryptPrivateKeys(encPrivate, wrapKey) {
+    async function decryptPrivateKeys(encPrivate, wrapKey, context) {
         const blob = JSON.parse(encPrivate);
+        let additionalData;
+        if (blob?.v === 2) {
+            if (!context?.pubEcdh || !context?.pubSign) {
+                throw new Error("Missing public keys for identity decryption");
+            }
+            const unbound = blob.unbound === true;
+            if (!unbound && !context.userId) {
+                throw new Error("Missing userId for identity decryption");
+            }
+            additionalData = identityAad(context.userId, context.pubEcdh, context.pubSign, unbound);
+        }
+        else if (blob?.v === 1 || blob?.v === undefined) {
+            additionalData = encoder.encode("seres-identity-v1");
+        }
+        else {
+            throw new Error("Unsupported identity version");
+        }
         const plain = await subtle.decrypt({
             name: "AES-GCM",
             iv: fromB64(blob.iv),
-            additionalData: encoder.encode("seres-identity-v1"),
+            additionalData,
         }, wrapKey, fromB64(blob.ct));
         const plainBytes = new Uint8Array(plain);
         try {
@@ -91,7 +165,7 @@ const SeresCrypto = (() => {
         }
     }
     /** Creates a new identity and returns what the server stores for it. */
-    async function createKeyBundle(wrapKey) {
+    async function createKeyBundle(wrapKey, userId) {
         const ecdh = await subtle.generateKey(ECDH, true, ["deriveBits"]);
         const sign = await subtle.generateKey(ECDSA, true, ["sign", "verify"]);
         const [ecdhPub, signPub, ecdhPriv, signPriv] = await Promise.all([
@@ -100,23 +174,33 @@ const SeresCrypto = (() => {
             subtle.exportKey("pkcs8", ecdh.privateKey),
             subtle.exportKey("pkcs8", sign.privateKey),
         ]);
+        const pub_ecdh = toB64(ecdhPub);
+        const pub_sign = toB64(signPub);
         return {
-            pub_ecdh: toB64(ecdhPub),
-            pub_sign: toB64(signPub),
-            enc_private: await encryptPrivateKeys(ecdhPriv, signPriv, wrapKey),
+            pub_ecdh,
+            pub_sign,
+            enc_private: await encryptPrivateKeys(ecdhPriv, signPriv, wrapKey, {
+                userId,
+                pubEcdh: pub_ecdh,
+                pubSign: pub_sign,
+            }),
         };
     }
     /** Decrypts the private keys and imports them as non-extractable keys. */
     async function unlockIdentity(userId, encPrivate, wrapKey, pubEcdh, pubSign) {
-        const raw = await decryptPrivateKeys(encPrivate, wrapKey);
+        const raw = await decryptPrivateKeys(encPrivate, wrapKey, { userId, pubEcdh, pubSign });
         return identityFromRaw(userId, raw, pubEcdh, pubSign);
     }
     /** Imports the private keys as non-extractable keys without persisting raw key material. */
     async function identityFromRaw(userId, raw, pubEcdh, pubSign) {
         try {
+            const derived = await derivePublicSpki(raw.ecdh, raw.sign);
+            if (derived.pubEcdh !== pubEcdh || derived.pubSign !== pubSign) {
+                throw new Error("Decrypted private keys do not match public keys");
+            }
             const ecdhPriv = await subtle.importKey("pkcs8", raw.ecdh, ECDH, false, ["deriveBits"]);
             const signPriv = await subtle.importKey("pkcs8", raw.sign, ECDSA, false, ["sign"]);
-            return { userId, ecdhPriv, signPriv, pubEcdh, pubSign };
+            return { userId, ecdhPriv, signPriv, pubEcdh: derived.pubEcdh, pubSign: derived.pubSign };
         }
         finally {
             raw.ecdh.fill(0);
@@ -129,6 +213,7 @@ const SeresCrypto = (() => {
     // the account's private keys with it. Both devices show the same short
     // check code, made from that public key, so a swapped key is noticed.
     const LINK_INFO = encoder.encode("seres-link-v1");
+    const linkPubByPriv = new WeakMap();
     async function linkKey(privateKey, publicB64) {
         const shared = await subtle.deriveBits({ name: "ECDH", public: await importEcdhPublic(publicB64) }, privateKey, 256);
         const hkdf = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
@@ -136,7 +221,14 @@ const SeresCrypto = (() => {
     }
     async function newLinkKeyPair() {
         const pair = await subtle.generateKey(ECDH, false, ["deriveBits"]);
-        return { privateKey: pair.privateKey, pub: toB64(await subtle.exportKey("spki", pair.publicKey)) };
+        const pub = toB64(await subtle.exportKey("spki", pair.publicKey));
+        linkPubByPriv.set(pair.privateKey, pub);
+        return { privateKey: pair.privateKey, pub };
+    }
+    /** Full SHA-256 base64url digest of the new device's linking public key. */
+    async function linkPubHash(pubB64) {
+        const digest = new Uint8Array(await subtle.digest("SHA-256", encoder.encode(pubB64)));
+        return toB64url(digest);
     }
     /** Six digits both devices show, made from the new device's public key. */
     async function linkCheckCode(publicB64) {
@@ -145,17 +237,34 @@ const SeresCrypto = (() => {
         const digits = String(value).padStart(6, "0");
         return digits.slice(0, 3) + " " + digits.slice(3);
     }
-    /** Main device: decrypts encPrivate with wrapKey and seals the account keys for the new device. */
-    async function sealPrivateKeys(encPrivate, wrapKey, devicePub) {
-        const raw = await decryptPrivateKeys(encPrivate, wrapKey);
+    function linkAad(userId, devicePub, epub) {
+        return encoder.encode(["seres-link-v2", userId, devicePub, epub].join("|"));
+    }
+    function linkSigningInput(userId, devicePub, epub, ecdhB64, signB64) {
+        return encoder.encode(["seres-link-seal-v2", userId, devicePub, epub, ecdhB64, signB64].join("\n"));
+    }
+    /** Main device: decrypts encPrivate with wrapKey, signs, and seals the account keys for the new device. */
+    async function sealPrivateKeys(encPrivate, wrapKey, devicePub, identity) {
+        if (!identity?.userId || !identity?.signPriv) {
+            throw new Error("Missing identity for sealing keys");
+        }
+        const raw = await decryptPrivateKeys(encPrivate, wrapKey, {
+            userId: identity.userId,
+            pubEcdh: identity.pubEcdh,
+            pubSign: identity.pubSign,
+        });
         try {
             const ephemeral = await subtle.generateKey(ECDH, false, ["deriveBits"]);
+            const epub = toB64(await subtle.exportKey("spki", ephemeral.publicKey));
             const key = await linkKey(ephemeral.privateKey, devicePub);
             const iv = randomBytes(12);
-            const plain = encoder.encode(JSON.stringify({ ecdh: toB64(raw.ecdh), sign: toB64(raw.sign) }));
+            const ecdhB64 = toB64(raw.ecdh);
+            const signB64 = toB64(raw.sign);
+            const sigBytes = await subtle.sign({ name: "ECDSA", hash: "SHA-256" }, identity.signPriv, linkSigningInput(identity.userId, devicePub, epub, ecdhB64, signB64));
+            const plain = encoder.encode(JSON.stringify({ v: 2, ecdh: ecdhB64, sign: signB64, sig: toB64(sigBytes) }));
             try {
-                const ct = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: LINK_INFO }, key, plain);
-                return { epub: toB64(await subtle.exportKey("spki", ephemeral.publicKey)), iv: toB64(iv), ct: toB64(ct) };
+                const ct = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: linkAad(identity.userId, devicePub, epub) }, key, plain);
+                return { epub, iv: toB64(iv), ct: toB64(ct) };
             }
             finally {
                 plain.fill(0);
@@ -166,10 +275,19 @@ const SeresCrypto = (() => {
             raw.sign.fill(0);
         }
     }
-    /** New device: opens what the main device sealed for it. */
-    async function openSealedIdentity(userId, privateKey, sealed, pubEcdh, pubSign) {
+    /** New device: verifies AAD and signature, then opens what the main device sealed for it. */
+    async function openSealedIdentity(userId, privateKey, sealed, pubEcdh, pubSign, devicePubOrOpts) {
+        const devicePub = (typeof devicePubOrOpts === "string" ? devicePubOrOpts : devicePubOrOpts?.devicePub) ??
+            linkPubByPriv.get(privateKey);
+        if (!devicePub)
+            throw new Error("Missing device public key");
+        const signerPub = (typeof devicePubOrOpts === "object" && devicePubOrOpts?.signerPubSign) || pubSign;
         const key = await linkKey(privateKey, sealed.epub);
-        const plain = new Uint8Array(await subtle.decrypt({ name: "AES-GCM", iv: fromB64(sealed.iv), additionalData: LINK_INFO }, key, fromB64(sealed.ct)));
+        const plain = new Uint8Array(await subtle.decrypt({
+            name: "AES-GCM",
+            iv: fromB64(sealed.iv),
+            additionalData: linkAad(userId, devicePub, sealed.epub),
+        }, key, fromB64(sealed.ct)));
         let keys;
         try {
             keys = JSON.parse(decoder.decode(plain));
@@ -177,12 +295,18 @@ const SeresCrypto = (() => {
         finally {
             plain.fill(0);
         }
+        if (keys.v !== 2 || typeof keys.sig !== "string" || !keys.sig) {
+            throw new Error("Missing sealed identity signature");
+        }
+        const verified = await subtle.verify({ name: "ECDSA", hash: "SHA-256" }, await importSignPublic(signerPub), fromB64(keys.sig), linkSigningInput(userId, devicePub, sealed.epub, keys.ecdh, keys.sign));
+        if (!verified)
+            throw new Error("Invalid sealed identity signature");
         return identityFromRaw(userId, { ecdh: fromB64(keys.ecdh), sign: fromB64(keys.sign) }, pubEcdh, pubSign);
     }
-    async function rewrapPrivateKeys(encPrivate, oldWrapKey, newWrapKey) {
-        const raw = await decryptPrivateKeys(encPrivate, oldWrapKey);
+    async function rewrapPrivateKeys(encPrivate, oldWrapKey, newWrapKey, context) {
+        const raw = await decryptPrivateKeys(encPrivate, oldWrapKey, context);
         try {
-            return await encryptPrivateKeys(raw.ecdh, raw.sign, newWrapKey);
+            return await encryptPrivateKeys(raw.ecdh, raw.sign, newWrapKey, context);
         }
         finally {
             raw.ecdh.fill(0);
@@ -226,8 +350,36 @@ const SeresCrypto = (() => {
             pubSign: identity.pubSign,
         };
     }
+    function markE2eeUsed() {
+        try {
+            localStorage.setItem(E2EE_USED_KEY, "1");
+        }
+        catch {
+            /* storage unavailable */
+        }
+    }
+    async function hasUsedE2ee() {
+        try {
+            if (localStorage.getItem(E2EE_USED_KEY) === "1")
+                return true;
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key &&
+                    (key.startsWith("seres-pins:") ||
+                        key.startsWith("seres-pin-keys:") ||
+                        key.startsWith("seres-pin-history:"))) {
+                    return true;
+                }
+            }
+        }
+        catch {
+            /* storage unavailable */
+        }
+        return false;
+    }
     async function saveIdentity(identity) {
         await withStore("readwrite", (store) => store.put(stripTransfer(identity)));
+        markE2eeUsed();
     }
     async function loadIdentity(userId) {
         try {
@@ -355,15 +507,26 @@ const SeresCrypto = (() => {
         if (!verified)
             throw new Error("Invalid signature");
     }
-    /** The raw message key: from the envelope, or from a key someone shared. */
+    /** The raw message key: from a shared key (trying multiple if present), or from the envelope. */
     async function messageKeyBytes(identity, messageId, sender, envelope, share) {
-        if (share) {
-            return subtle.decrypt({ name: "AES-GCM", iv: fromB64(share.iv), additionalData: shareAad(messageId, identity.userId) }, await pairKey(identity, share.from_pub), fromB64(share.k));
+        const shares = Array.isArray(share) ? share : share ? [share] : [];
+        for (const entry of shares) {
+            if (!entry || !entry.from_pub || !entry.iv || !entry.k)
+                continue;
+            try {
+                return await subtle.decrypt({ name: "AES-GCM", iv: fromB64(entry.iv), additionalData: shareAad(messageId, identity.userId) }, await pairKey(identity, entry.from_pub), fromB64(entry.k));
+            }
+            catch {
+                // Ignore invalid/poisoned share and try the next share or envelope key.
+            }
         }
-        const mine = envelope.keys[identity.userId];
-        if (!mine)
-            throw new Error("Message was not encrypted for this account");
-        return subtle.decrypt({ name: "AES-GCM", iv: fromB64(mine.iv), additionalData: keyAad(messageId, identity.userId) }, await pairKey(identity, sender.pub_ecdh), fromB64(mine.k));
+        if (envelope.keys && Object.prototype.hasOwnProperty.call(envelope.keys, identity.userId)) {
+            const mine = envelope.keys[identity.userId];
+            if (mine) {
+                return subtle.decrypt({ name: "AES-GCM", iv: fromB64(mine.iv), additionalData: keyAad(messageId, identity.userId) }, await pairKey(identity, sender.pub_ecdh), fromB64(mine.k));
+            }
+        }
+        throw new Error("Message was not encrypted for this account");
     }
     async function decryptMessage(identity, chatId, messageId, sender, envelope, share) {
         await verifyEnvelope(chatId, messageId, sender, envelope);
@@ -378,6 +541,9 @@ const SeresCrypto = (() => {
     }
     /** Wraps the key of a message this account can read for someone who reset their keys. */
     async function shareMessageKey(identity, chatId, messageId, sender, envelope, recipient, ownShare) {
+        if (!envelope.keys || !Object.prototype.hasOwnProperty.call(envelope.keys, recipient.id)) {
+            throw new Error("Recipient is not in message envelope");
+        }
         // Never pass on a message whose signature doesn't hold.
         await verifyEnvelope(chatId, messageId, sender, envelope);
         const rawKey = new Uint8Array(await messageKeyBytes(identity, messageId, sender, envelope, ownShare));
@@ -433,8 +599,8 @@ const SeresCrypto = (() => {
      * Makes 10 new codes for the private keys in encPrivate (unlocked with wrapKey).
      * Returns the codes to show once and what the server stores for them.
      */
-    async function createRecoveryCodes(encPrivate, wrapKey) {
-        const raw = await decryptPrivateKeys(encPrivate, wrapKey);
+    async function createRecoveryCodes(encPrivate, wrapKey, context) {
+        const raw = await decryptPrivateKeys(encPrivate, wrapKey, context);
         try {
             const codes = [];
             const slots = new Set();
@@ -452,7 +618,10 @@ const SeresCrypto = (() => {
                     slot: code.slice(0, 4),
                     kdf_salt: salt,
                     auth_hash: keys.authHash,
-                    enc_private: await encryptPrivateKeys(raw.ecdh, raw.sign, keys.wrapKey),
+                    enc_private: await encryptPrivateKeys(raw.ecdh, raw.sign, keys.wrapKey, {
+                        pubEcdh: context?.pubEcdh,
+                        pubSign: context?.pubSign,
+                    }),
                 };
             }));
             return { codes, stored };
@@ -486,9 +655,13 @@ const SeresCrypto = (() => {
         decryptFile,
         newSalt,
         deriveAccountKeys,
+        encryptPrivateKeys,
+        decryptPrivateKeys,
+        identityFromRaw,
         createKeyBundle,
         unlockIdentity,
         newLinkKeyPair,
+        linkPubHash,
         linkCheckCode,
         sealPrivateKeys,
         openSealedIdentity,
@@ -496,6 +669,8 @@ const SeresCrypto = (() => {
         saveIdentity,
         loadIdentity,
         clearIdentities,
+        markE2eeUsed,
+        hasUsedE2ee,
         fingerprint,
         safetyNumber,
         encryptMessage,

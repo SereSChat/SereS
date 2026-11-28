@@ -40,6 +40,9 @@ window.SeresLang.fr = {
   "login.registerFailed": "Une erreur est survenue lors de l'inscription.",
   "login.created": "Compte créé, connexion en cours...",
   "login.reloginKeys": "Reconnecte-toi sur cet appareil.",
+  "login.legacyBlocked": "La connexion en clair héritée est bloquée car le chiffrement de bout en bout a déjà été utilisé sur ce navigateur.",
+  "login.legacyConfirm": "Ce compte ancien n'a pas encore de clés de chiffrement de bout en bout. La mise à niveau enverra ton mot de passe une fois pour migrer le compte. Continuer ?",
+  "login.legacyCancelled": "Mise à niveau de connexion annulée.",
 
   "app.addFriend": "Ajouter un ami",
   "app.welcome": "Bienvenue",
@@ -508,6 +511,7 @@ window.SeresLang.fr = {
   "link.checkCompare": "Code de contrôle : {code} – autorise seulement si le nouvel appareil affiche le même code.",
   "link.needPassword": "Saisis ton mot de passe une fois pour associer des appareils depuis cet appareil.",
   "link.done": "L'appareil est associé.",
+  "link.keyMismatch": "La clé d'association de l'appareil ne correspond pas au lien scanné. L'association a été annulée et refusée.",
   "call.reconnecting": "reconnexion…",
   "call.routeRelay": "via relais",
   "call.routeTcp": "via relais (TCP), peut saccader",
