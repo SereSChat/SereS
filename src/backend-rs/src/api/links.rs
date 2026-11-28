@@ -396,4 +396,42 @@ mod tests {
             assert!(is_public(ip.parse().unwrap()), "{ip}");
         }
     }
+
+    #[test]
+    fn blocks_reserved_192_0_0_and_192_88_99_addresses() {
+        for ip in ["192.0.0.1", "192.0.0.254", "192.88.99.1", "192.88.99.254"] {
+            assert!(!is_public(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[tokio::test]
+    async fn link_preview_rejects_non_80_443_ports() {
+        let dir = std::env::temp_dir().join(format!("seres-links-{}", uuid::Uuid::new_v4()));
+        let pool = crate::db::connect(&dir.join("users.db")).await.unwrap();
+        sqlx::query("INSERT INTO users(id,username) VALUES('u1','alice')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let token = "tok-links-1";
+        let hash = crate::api::auth::hash_token(token);
+        sqlx::query(
+            "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1','2999-01-01T00:00:00Z','now',1)",
+        )
+        .bind(hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = AppState::new(pool);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_str(&format!("sessioncookie={token}")).unwrap(),
+        );
+        let mut query = HashMap::new();
+        query.insert("url".into(), "http://example.com:8080/".into());
+        let resp = link_preview(State(state), headers, Query(query)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -2772,4 +2772,744 @@ mod tests {
             .unwrap();
         assert!(ended.is_some());
     }
+
+    async fn insert_user_with_keys(pool: &SqlitePool, id: &str) {
+        sqlx::query(
+            "INSERT INTO users(id,username,pub_ecdh,pub_sign,last_seen,show_last_seen) VALUES(?,?,?,?,?,1)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(format!("ecdh-{id}"))
+        .bind(format!("sign-{id}"))
+        .bind(now())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn befriend(pool: &SqlitePool, a: &str, b: &str) {
+        let (x, y) = pair(a, b);
+        sqlx::query("INSERT OR IGNORE INTO friendships(user_a,user_b,created_at) VALUES(?,?,?)")
+            .bind(x)
+            .bind(y)
+            .bind(now())
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_envelope_rejects_unknown_keys_inside_member_entry() {
+        let payload = json!({
+            "v": 1,
+            "iv": "AAAA",
+            "sig": "AAAA",
+            "ct": "AAAA",
+            "keys": {
+                "alice": {"iv": "AAAA", "k": "AAAA", "evil": "junk"}
+            }
+        });
+        assert!(validate_envelope(&payload, &["alice".to_string()]).is_some());
+    }
+
+    #[tokio::test]
+    async fn chats_router_enforces_tight_json_body_limit_outside_files() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        let _ = auth_headers(&state.db, "alice").await;
+        let app = router().with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let big = "a".repeat(1_500_000);
+        let body = format!(r#"{{"id":"{}","payload":{{"x":"{big}"}}}}"#, Uuid::new_v4());
+        let res = reqwest::Client::new()
+            .post(format!("http://{addr}/api/chats/c1/messages"))
+            .header("cookie", "sessioncookie=tok-alice")
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn create_chat_checks_group_size_before_loop_requires_keys_and_rate_limits() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        insert_user_with_keys(&state.db, "bob").await;
+        befriend(&state.db, "alice", "bob").await;
+
+        sqlx::query("INSERT INTO users(id,username) VALUES('nokeys','nokeys')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        befriend(&state.db, "alice", "nokeys").await;
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+
+        // Duplicate usernames exceeding MAX_GROUP_MEMBERS must be rejected before loop.
+        let too_many = vec!["bob"; MAX_GROUP_MEMBERS + 1];
+        let resp = create_chat(
+            State(state.clone()),
+            alice_headers.clone(),
+            Json(json!({"type": "group", "name": "Big", "usernames": too_many})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // User without E2EE keys cannot be added to a group.
+        let resp = create_chat(
+            State(state.clone()),
+            alice_headers.clone(),
+            Json(json!({"type": "group", "name": "NoKeys", "usernames": ["nokeys"]})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // create_chat must be rate-limited.
+        let mut saw_limited = false;
+        for _ in 0..40 {
+            let r = create_chat(
+                State(state.clone()),
+                alice_headers.clone(),
+                Json(json!({"type": "group", "name": "Spam", "usernames": ["bob"]})),
+            )
+            .await;
+            if r.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_limited = true;
+                break;
+            }
+        }
+        assert!(saw_limited);
+    }
+
+    #[tokio::test]
+    async fn empty_group_delete_cleans_shares_receipts_scheduled_and_calls() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        sqlx::query("INSERT INTO chats(id,type,name,owner_id,created_at,last_activity) VALUES('g1','group','Solo','alice','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,role,joined_at) VALUES('g1','alice','owner','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages(id,chat_id,sender_id,kind,payload,created_at,rev) VALUES('m1','g1','alice','e2e','{}','now',1)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO message_key_shares(message_id,recipient_id,sharer_id,sharer_pub_ecdh,iv,k,created_at) VALUES('m1','alice','alice','p','iv','k','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO receipts(chat_id,user_id,kind,seq,at) VALUES('g1','alice','read',1,'now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO scheduled_messages(id,chat_id,sender_id,payload,member_ids,sender_sign_key,send_at,created_at) VALUES('s1','g1','alice','{}','[\"alice\"]','sign-alice','2999-01-01T00:00:00Z','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO calls(id,chat_id,started_by,started_at) VALUES('c1','g1','alice','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO call_participants(call_id,user_id,state,updated_at,seen_at) VALUES('c1','alice','joined','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO call_signals(call_id,from_id,to_id,kind,data,created_at) VALUES('c1','alice','bob','offer','{}','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let resp = delete_chat(State(state.clone()), alice_headers, Path("g1".into())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        for table in [
+            "message_key_shares",
+            "receipts",
+            "scheduled_messages",
+            "calls",
+            "call_participants",
+            "call_signals",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "{table} should be empty");
+        }
+    }
+
+    #[tokio::test]
+    async fn share_history_hardening_and_edit_message_drops_shares() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        insert_user_with_keys(&state.db, "bob").await;
+        insert_user_with_keys(&state.db, "carol").await;
+        sqlx::query(
+            "INSERT INTO users(id,username,pub_ecdh,pub_sign) VALUES('nokey','nokey','','sign-nk')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // 1. DM blocked share_history rejected, plus empty pub_ecdh sharer rejected.
+        sqlx::query("INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO chat_members(chat_id,user_id,joined_at,reset_seq) VALUES('dm1',?,'now',1)")
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO messages(id,chat_id,sender_id,kind,payload,created_at,rev) VALUES('mdm','dm1','alice','e2e','{}','now',1)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('bob','alice','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let resp = share_history(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("dm1".into(), "bob".into())),
+            Json(json!({"keys": {"mdm": {"iv": "AAAA", "k": "AAAA"}}, "done": true})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 2. Group history sharing hardening
+        sqlx::query("INSERT INTO chats(id,type,name,owner_id,created_at,last_activity) VALUES('g1','group','Team','alice','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,role,joined_at,joined_seq) VALUES('g1','alice','owner','now',0)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,role,joined_at,joined_seq) VALUES('g1','nokey','member','now',0)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // Bob joined at seq 1 (so he cannot see seq 1, only >1)
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,role,joined_at,joined_seq) VALUES('g1','bob','member','now',1)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages(seq,id,chat_id,sender_id,kind,payload,created_at,rev) VALUES(1,'m1','g1','alice','e2e','{}','now',2)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages(seq,id,chat_id,sender_id,kind,payload,created_at,rev) VALUES(2,'m2','g1','alice','e2e','{}','now',3)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // Carol joined at 0 and reset at seq 2
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,role,joined_at,joined_seq,cleared_seq,reset_seq,reset_cleared_seq) VALUES('g1','carol','member','now',0,2,2,0)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let nokey_headers = auth_headers(&state.db, "nokey").await;
+        let bob_headers = auth_headers(&state.db, "bob").await;
+        let carol_headers = auth_headers(&state.db, "carol").await;
+
+        // Sharer with empty pub_ecdh rejected
+        let r_nk = share_history(
+            State(state.clone()),
+            nokey_headers,
+            Path(("g1".into(), "carol".into())),
+            Json(json!({"keys": {"m1": {"iv": "AAAA", "k": "AAAA"}}, "done": true})),
+        )
+        .await;
+        assert_eq!(r_nk.status(), StatusCode::BAD_REQUEST);
+
+        // Unilateral done:true with stored==0 must NOT clear reset_seq
+        let _ = share_history(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("g1".into(), "carol".into())),
+            Json(json!({"keys": {}, "done": true})),
+        )
+        .await;
+        let reset_after_empty: i64 = sqlx::query_scalar(
+            "SELECT reset_seq FROM chat_members WHERE chat_id='g1' AND user_id='carol'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(reset_after_empty, 2);
+
+        // Bob (joined_seq=1) shares m2 with done:true -> narrows reset_seq to 1 (NOT 0!)
+        let r_bob = share_history(
+            State(state.clone()),
+            bob_headers,
+            Path(("g1".into(), "carol".into())),
+            Json(json!({"keys": {"m2": {"iv": "BBBB", "k": "BBBB"}}, "done": true})),
+        )
+        .await;
+        assert_eq!(r_bob.status(), StatusCode::OK);
+        let reset_narrowed: i64 = sqlx::query_scalar(
+            "SELECT reset_seq FROM chat_members WHERE chat_id='g1' AND user_id='carol'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(reset_narrowed, 1);
+
+        // Multi-sharer: Alice ALSO shares m2 (so Carol gets both Bob's and Alice's shares!) and m1 with done:true
+        let r_alice = share_history(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("g1".into(), "carol".into())),
+            Json(json!({"keys": {"m1": {"iv": "AAAA", "k": "AAAA"}, "m2": {"iv": "CCCC", "k": "CCCC"}}, "done": true})),
+        )
+        .await;
+        assert_eq!(r_alice.status(), StatusCode::OK);
+        let share_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_key_shares WHERE message_id='m2' AND recipient_id='carol'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(share_count, 2);
+
+        // Carol sees `shares` array on m2 via get_chat_messages
+        let msgs_resp = get_chat_messages(
+            State(state.clone()),
+            carol_headers,
+            Path("g1".into()),
+            Query(HashMap::new()),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(msgs_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let m2 = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "m2")
+            .unwrap();
+        assert_eq!(m2["shares"].as_array().map(|a| a.len()), Some(2));
+
+        // 3. edit_message deletes stale message_key_shares
+        let r_edit = edit_message(
+            State(state.clone()),
+            alice_headers,
+            Path(("g1".into(), "m2".into())),
+            Json(json!({"payload": {
+                "v": 1, "iv": "AAAA", "sig": "AAAA", "ct": "AAAA",
+                "keys": {
+                    "alice": {"iv": "AAAA", "k": "AAAA"},
+                    "bob": {"iv": "AAAA", "k": "AAAA"},
+                    "carol": {"iv": "AAAA", "k": "AAAA"},
+                    "nokey": {"iv": "AAAA", "k": "AAAA"},
+                }
+            }})),
+        )
+        .await;
+        assert_eq!(r_edit.status(), StatusCode::OK);
+        let remaining_shares: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message_key_shares WHERE message_id='m2'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(remaining_shares, 0);
+    }
+
+    #[tokio::test]
+    async fn disappearing_filters_no_store_dm_reclaim_and_upload_quota() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        insert_user_with_keys(&state.db, "bob").await;
+        befriend(&state.db, "alice", "bob").await;
+
+        sqlx::query("INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO chat_members(chat_id,user_id,joined_at,reset_seq) VALUES('dm1',?,'now',10)")
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        // Expired message + attachment
+        sqlx::query("INSERT INTO messages(seq,id,chat_id,sender_id,kind,payload,created_at,rev,expires_at) VALUES(1,'mexp','dm1','alice','e2e','{}','now',1,'2000-01-01T00:00:00Z')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO file_blobs(id,data) VALUES('fexp',X'0102')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO files(id,chat_id,uploader_id,message_id,size,created_at) VALUES('fexp','dm1','alice','mexp',2,'now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // Active disappearing message + attachment
+        sqlx::query("INSERT INTO messages(seq,id,chat_id,sender_id,kind,payload,created_at,rev,expires_at) VALUES(2,'mact','dm1','alice','e2e','{}','now',2,'2999-01-01T00:00:00Z')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO file_blobs(id,data) VALUES('fact',X'0304')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO files(id,chat_id,uploader_id,message_id,size,created_at) VALUES('fact','dm1','alice','mact',2,'now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let bob_headers = auth_headers(&state.db, "bob").await;
+
+        assert_eq!(
+            single_message(
+                State(state.clone()),
+                bob_headers.clone(),
+                Path(("dm1".into(), "mexp".into())),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            message_info(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path(("dm1".into(), "mexp".into())),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            pin_message(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("dm1".into()),
+                Json(json!({"message_id": "mexp"})),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            edit_message(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path(("dm1".into(), "mexp".into())),
+                Json(json!({"payload": valid_dm_payload("alice", "bob")})),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            download_file(
+                State(state.clone()),
+                bob_headers.clone(),
+                Path(("dm1".into(), "fexp".into())),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        let share_exp = share_history(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("dm1".into(), "bob".into())),
+            Json(json!({"keys": {"mexp": {"iv": "AAAA", "k": "AAAA"}}})),
+        )
+        .await;
+        let share_body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(share_exp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(share_body["stored"], 0);
+
+        // Active disappearing attachment gets Cache-Control: no-store
+        let active_dl = download_file(
+            State(state.clone()),
+            bob_headers.clone(),
+            Path(("dm1".into(), "fact".into())),
+        )
+        .await;
+        assert_eq!(active_dl.status(), StatusCode::OK);
+        assert_eq!(
+            active_dl
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+
+        // Daily upload quota enforced (default 2048 MB)
+        sqlx::query("INSERT INTO files(id,chat_id,uploader_id,message_id,size,created_at) VALUES('fquota','dm1','alice',NULL,?,?)")
+            .bind(2048i64 * 1024 * 1024)
+            .bind(now())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let quota_resp = upload_file(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path("dm1".into()),
+            Bytes::from_static(b"x"),
+        )
+        .await;
+        assert_eq!(quota_resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        sqlx::query("DELETE FROM files WHERE id='fquota'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        // Mutually cleared DM reclaims messages & file_blobs
+        sqlx::query("UPDATE chat_members SET reset_seq=0 WHERE chat_id='dm1'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            delete_chat(State(state.clone()), alice_headers, Path("dm1".into()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            delete_chat(State(state.clone()), bob_headers, Path("dm1".into()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let msg_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id='dm1'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        let blob_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM file_blobs")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(msg_count, 0);
+        assert_eq!(blob_count, 0);
+    }
+
+    #[tokio::test]
+    async fn group_bans_blocks_keys_and_hidden_dm_presence_and_reopen() {
+        let (_fix, state) = Fixture::new().await;
+        for id in ["alice", "bob", "carol", "dave"] {
+            insert_user_with_keys(&state.db, id).await;
+        }
+        sqlx::query("INSERT INTO users(id,username) VALUES('nokeys','nokeys')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        befriend(&state.db, "alice", "bob").await;
+        befriend(&state.db, "alice", "carol").await;
+        befriend(&state.db, "carol", "bob").await;
+        befriend(&state.db, "alice", "nokeys").await;
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let bob_headers = auth_headers(&state.db, "bob").await;
+        let carol_headers = auth_headers(&state.db, "carol").await;
+        let dave_headers = auth_headers(&state.db, "dave").await;
+
+        sqlx::query("INSERT INTO chats(id,type,name,owner_id,invite_token,created_at,last_activity) VALUES('g1','group','Team','alice','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for (id, role) in [("alice", "owner"), ("bob", "member"), ("carol", "member")] {
+            sqlx::query(
+                "INSERT INTO chat_members(chat_id,user_id,role,joined_at) VALUES('g1',?,?,'now')",
+            )
+            .bind(id)
+            .bind(role)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+
+        // Owner removes bob -> banned from invite_join & non-owner re-add
+        assert_eq!(
+            remove_member_route(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("g1".into()),
+                Json(json!({"username": "bob"})),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            invite_join(
+                State(state.clone()),
+                bob_headers.clone(),
+                Path("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            add_member_route(
+                State(state.clone()),
+                carol_headers,
+                Path("g1".into()),
+                Json(json!({"username": "bob"})),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        // Owner can re-add bob, clearing ban
+        assert_eq!(
+            add_member_route(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("g1".into()),
+                Json(json!({"username": "bob"})),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+
+        // User without E2EE keys cannot be added via add_member_route
+        assert_eq!(
+            add_member_route(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("g1".into()),
+                Json(json!({"username": "nokeys"})),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        // Blocked user cannot join via invite_join (alice is owner, blocks dave)
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('alice','dave','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            invite_join(
+                State(state.clone()),
+                dave_headers,
+                Path("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // Hidden DM after unfriending cannot be reopened by open_dm and leaks no presence
+        sqlx::query("INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm2','dm','alice:bob','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,hidden,joined_at) VALUES('dm2','alice',1,'now'),('dm2','bob',0,'now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM friendships WHERE (user_a='alice' AND user_b='bob')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert!(presence(&state.db, "alice", "bob").await.unwrap().is_none());
+        let reopen = create_chat(
+            State(state.clone()),
+            alice_headers,
+            Json(json!({"type": "dm", "username": "bob"})),
+        )
+        .await;
+        assert_eq!(reopen.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn scheduled_message_checks_member_pub_ecdh_snapshot_at_delivery() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        insert_user_with_keys(&state.db, "bob").await;
+        sqlx::query("INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for id in ["alice", "bob"] {
+            sqlx::query(
+                "INSERT INTO chat_members(chat_id,user_id,joined_at) VALUES('dm1',?,'now')",
+            )
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let msg_id = Uuid::new_v4().to_string();
+        let send_at = (chrono::Utc::now() + chrono::Duration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let resp = schedule_message(
+            State(state.clone()),
+            alice_headers,
+            Path("dm1".into()),
+            Json(json!({
+                "id": msg_id,
+                "send_at": send_at,
+                "payload": valid_dm_payload("alice", "bob")
+            })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Bob rotates ECDH key before delivery; make message due now
+        sqlx::query("UPDATE users SET pub_ecdh='ecdh-bob-rotated' WHERE id='bob'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE scheduled_messages SET send_at='2000-01-01T00:00:00Z' WHERE id=?")
+            .bind(&msg_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        deliver_due_messages(&state.db).await.unwrap();
+
+        let delivered_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE id=?")
+            .bind(&msg_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(delivered_count, 0);
+    }
 }

@@ -714,4 +714,104 @@ mod tests {
         assert_eq!(remaining, vec!["https://fcm.googleapis.com/2"]);
         pool.close().await;
     }
+
+    #[tokio::test]
+    async fn username_constraints_preserve_existing_duplicates_but_block_new_claims() {
+        let fixture = Fixture::new();
+        let database = fixture.0.join("users.db");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&database)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0001_existing_schema.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql("INSERT INTO users(id,username) VALUES('a','Alice'),('b','ALICE');")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let pool = connect(&database).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(
+            sqlx::query("INSERT INTO users(id,username) VALUES('c','aLiCe')")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        sqlx::query("INSERT INTO users(id,username) VALUES('c','charlie')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query("UPDATE users SET username='alice' WHERE id='c'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE users SET username=username WHERE id='a'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn connect_creates_rev_index_group_bans_multi_sharer_pk_and_private_permissions() {
+        let fixture = Fixture::new();
+        let database = fixture.0.join("users.db");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(&database, b"").unwrap();
+            fs::set_permissions(&database, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let pool = connect(&database).await.unwrap();
+
+        let rev_idx: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_messages_rev'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rev_idx.as_deref(), Some("idx_messages_rev"));
+
+        sqlx::query("INSERT INTO group_bans(chat_id,user_id,banned_at) VALUES('g1','u1','now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Two distinct sharers must be able to store shares for the same (message_id, recipient_id).
+        sqlx::query("INSERT INTO message_key_shares(message_id,recipient_id,sharer_id,sharer_pub_ecdh,iv,k,created_at) VALUES('m1','u1','s1','p1','iv1','k1','now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO message_key_shares(message_id,recipient_id,sharer_id,sharer_pub_ecdh,iv,k,created_at) VALUES('m1','u1','s2','p2','iv2','k2','now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&database).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        pool.close().await;
+    }
 }
