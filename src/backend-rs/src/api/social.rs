@@ -68,6 +68,12 @@ async fn list_friends(
     }
 }
 
+async fn begin_immediate(
+    pool: &SqlitePool,
+) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>, sqlx::Error> {
+    pool.begin_with("BEGIN IMMEDIATE").await
+}
+
 async fn request_friend(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -77,68 +83,98 @@ async fn request_friend(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    let other = match target_user(&state, &body).await {
-        Ok(v) => v,
-        Err(e) => return axum::response::IntoResponse::into_response(e),
-    };
-    send_friend_request(&state, &me, &other).await
-}
-
-async fn send_friend_request(state: &AppState, me: &str, other: &str) -> axum::response::Response {
     if state.rate_limited(format!("friend-request:{me}"), 30, 600) {
         return error(
             "Too many friend requests, please wait",
             StatusCode::TOO_MANY_REQUESTS,
         );
     }
+    let other = match lookup_target_user(&state, &body).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return error("Friend request could not be sent", StatusCode::BAD_REQUEST);
+        }
+        Err(e) => return axum::response::IntoResponse::into_response(e),
+    };
+    send_friend_request(&state, &me, &other).await
+}
+
+async fn send_friend_request(state: &AppState, me: &str, other: &str) -> axum::response::Response {
     if me == other {
         return error("Cannot add yourself as a friend", StatusCode::BAD_REQUEST);
     }
-    if are_friends(&state.db, me, other).await.unwrap_or(false) {
-        return error("Already Friends", StatusCode::BAD_REQUEST);
+    let mut tx = match begin_immediate(&state.db).await {
+        Ok(v) => v,
+        Err(_) => return db_error(),
+    };
+    match are_friends_conn(&mut *tx, me, other).await {
+        Ok(true) => return error("Already Friends", StatusCode::BAD_REQUEST),
+        Ok(false) => {}
+        Err(_) => return db_error(),
     }
-    if is_blocked(&state.db, me, other).await.unwrap_or(true) {
-        return error("Friend request could not be sent", StatusCode::BAD_REQUEST);
+    match is_blocked_conn(&mut *tx, me, other).await {
+        Ok(false) => {}
+        _ => return error("Friend request could not be sent", StatusCode::BAD_REQUEST),
     }
-    if exists(
-        &state.db,
-        "SELECT 1 FROM friend_requests WHERE from_id=? AND to_id=?",
-        other,
-        me,
-    )
-    .await
-    {
-        let mut tx = match state.db.begin().await {
-            Ok(v) => v,
-            Err(_) => return db_error(),
-        };
-        let (a, b) = pair(me, other);
-        if sqlx::query("INSERT OR IGNORE INTO friendships(user_a,user_b,created_at) VALUES(?,?,?)").bind(a).bind(b).bind(now()).execute(&mut *tx).await.is_err()
-            || sqlx::query("DELETE FROM friend_requests WHERE (from_id=? AND to_id=?) OR (from_id=? AND to_id=?)").bind(me).bind(other).bind(other).bind(me).execute(&mut *tx).await.is_err()
-            || tx.commit().await.is_err(){return db_error()}
-        return json_ok(json!({"message":"Friend added successfully!","status":"friends"}))
-            .into_response();
+    let incoming = sqlx::query("SELECT 1 FROM friend_requests WHERE from_id=? AND to_id=?")
+        .bind(other)
+        .bind(me)
+        .fetch_optional(&mut *tx)
+        .await;
+    match incoming {
+        Ok(Some(_)) => {
+            let (a, b) = pair(me, other);
+            if sqlx::query(
+                "INSERT OR IGNORE INTO friendships(user_a,user_b,created_at) VALUES(?,?,?)",
+            )
+            .bind(a)
+            .bind(b)
+            .bind(now())
+            .execute(&mut *tx)
+            .await
+            .is_err()
+                || sqlx::query(
+                    "DELETE FROM friend_requests WHERE (from_id=? AND to_id=?) OR (from_id=? AND to_id=?)",
+                )
+                .bind(me)
+                .bind(other)
+                .bind(other)
+                .bind(me)
+                .execute(&mut *tx)
+                .await
+                .is_err()
+                || tx.commit().await.is_err()
+            {
+                return db_error();
+            }
+            return json_ok(json!({"message":"Friend added successfully!","status":"friends"}))
+                .into_response();
+        }
+        Ok(None) => {}
+        Err(_) => return db_error(),
     }
-    if exists(
-        &state.db,
-        "SELECT 1 FROM friend_requests WHERE from_id=? AND to_id=?",
-        me,
-        other,
-    )
-    .await
-    {
-        return error("Already pending request", StatusCode::BAD_REQUEST);
+    let outgoing = sqlx::query("SELECT 1 FROM friend_requests WHERE from_id=? AND to_id=?")
+        .bind(me)
+        .bind(other)
+        .fetch_optional(&mut *tx)
+        .await;
+    match outgoing {
+        Ok(Some(_)) => return error("Already pending request", StatusCode::BAD_REQUEST),
+        Ok(None) => {}
+        Err(_) => return db_error(),
     }
-    match sqlx::query("INSERT INTO friend_requests(from_id,to_id,created_at) VALUES(?,?,?)")
+    if sqlx::query("INSERT INTO friend_requests(from_id,to_id,created_at) VALUES(?,?,?)")
         .bind(me)
         .bind(other)
         .bind(now())
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
+        .is_err()
+        || tx.commit().await.is_err()
     {
-        Ok(_) => json_ok(json!({"message":"Request sent","status":"pending"})).into_response(),
-        Err(_) => db_error(),
+        return db_error();
     }
+    json_ok(json!({"message":"Request sent","status":"pending"})).into_response()
 }
 
 async fn my_invite(State(state): State<AppState>, headers: HeaderMap) -> axum::response::Response {
@@ -187,6 +223,12 @@ async fn show_invite(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
+    if state.rate_limited(format!("invite-show:{me}"), 30, 60) {
+        return error(
+            "Too many requests, please wait",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     let owner = match invite_owner(&state, &token).await {
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
@@ -209,6 +251,12 @@ async fn accept_invite(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
+    if state.rate_limited(format!("friend-request:{me}"), 30, 600) {
+        return error(
+            "Too many friend requests, please wait",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     let owner = match invite_owner(&state, &token).await {
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
@@ -234,20 +282,46 @@ async fn accept_friend(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    if !exists(
-        &state.db,
-        "SELECT 1 FROM friend_requests WHERE from_id=? AND to_id=?",
-        &other,
-        &me,
-    )
-    .await
-    {
-        return error("Request doesnt exist", StatusCode::BAD_REQUEST);
+    let mut tx = match begin_immediate(&state.db).await {
+        Ok(v) => v,
+        Err(_) => return db_error(),
+    };
+    match is_blocked_conn(&mut *tx, &me, &other).await {
+        Ok(false) => {}
+        Ok(true) => {
+            return error("Cannot accept friend request", StatusCode::FORBIDDEN);
+        }
+        Err(_) => return db_error(),
     }
-    make_friends(&state.db, &me, &other)
+    let deleted = sqlx::query("DELETE FROM friend_requests WHERE from_id=? AND to_id=?")
+        .bind(&other)
+        .bind(&me)
+        .execute(&mut *tx)
+        .await;
+    match deleted {
+        Ok(res) if res.rows_affected() == 1 => {}
+        Ok(_) => return error("Request doesnt exist", StatusCode::BAD_REQUEST),
+        Err(_) => return db_error(),
+    }
+    let (x, y) = pair(&me, &other);
+    if sqlx::query("DELETE FROM friend_requests WHERE from_id=? AND to_id=?")
+        .bind(&me)
+        .bind(&other)
+        .execute(&mut *tx)
         .await
-        .map(|_| json_ok(json!({"message":"Friend added successfully!"})).into_response())
-        .unwrap_or_else(|_| db_error())
+        .is_err()
+        || sqlx::query("INSERT OR IGNORE INTO friendships(user_a,user_b,created_at) VALUES(?,?,?)")
+            .bind(x)
+            .bind(y)
+            .bind(now())
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        || tx.commit().await.is_err()
+    {
+        return db_error();
+    }
+    json_ok(json!({"message":"Friend added successfully!"})).into_response()
 }
 async fn decline_friend(
     State(state): State<AppState>,
@@ -392,33 +466,21 @@ async fn unblock_user(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    let row = sqlx::query("SELECT was_friend FROM blocks WHERE blocker_id=? AND blocked_id=?")
-        .bind(&me)
-        .bind(&other)
-        .fetch_optional(&state.db)
-        .await;
-    let was_friend = match row {
-        Ok(v) => {
-            v.and_then(|r| r.try_get::<i64, _>("was_friend").ok())
-                .unwrap_or(0)
-                != 0
-        }
+    let mut tx = match begin_immediate(&state.db).await {
+        Ok(v) => v,
         Err(_) => return db_error(),
     };
     if sqlx::query("DELETE FROM blocks WHERE blocker_id=? AND blocked_id=?")
         .bind(&me)
         .bind(&other)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .is_err()
+        || tx.commit().await.is_err()
     {
         return db_error();
     }
-    let restored = was_friend && !is_blocked(&state.db, &me, &other).await.unwrap_or(true);
-    if restored && make_friends(&state.db, &me, &other).await.is_err() {
-        return db_error();
-    }
-    json_ok(json!({"message":"User unblocked","friends":restored})).into_response()
+    json_ok(json!({"message":"User unblocked","friends":false})).into_response()
 }
 async fn mute_user(
     State(state): State<AppState>,
@@ -510,7 +572,7 @@ async fn user_profile(
         && (friend
             || exists(
                 &state.db,
-                "SELECT 1 FROM chat_members a JOIN chat_members b ON a.chat_id=b.chat_id WHERE a.user_id=? AND b.user_id=? LIMIT 1",
+                "SELECT 1 FROM chat_members a JOIN chat_members b ON a.chat_id=b.chat_id WHERE a.user_id=? AND b.user_id=? AND a.hidden=0 LIMIT 1",
                 &me,
                 &oid,
             )
@@ -550,7 +612,7 @@ async fn user_id(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
     let row = require_user(state, headers).await?;
     Ok(row.try_get("id").unwrap_or_default())
 }
-async fn target_user(state: &AppState, body: &Value) -> ApiResult<String> {
+async fn lookup_target_user(state: &AppState, body: &Value) -> ApiResult<Option<String>> {
     let name = body
         .get("username")
         .or_else(|| body.get("friend_username"))
@@ -561,7 +623,11 @@ async fn target_user(state: &AppState, body: &Value) -> ApiResult<String> {
         .bind(name.trim())
         .fetch_optional(&state.db)
         .await
-        .map_err(|_| ApiError::new("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR))?
+        .map_err(|_| ApiError::new("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR))
+}
+async fn target_user(state: &AppState, body: &Value) -> ApiResult<String> {
+    lookup_target_user(state, body)
+        .await?
         .ok_or_else(|| ApiError::new("User not found", StatusCode::NOT_FOUND))
 }
 fn users(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<Value> {
@@ -607,39 +673,40 @@ async fn exists(pool: &SqlitePool, sql: &str, a: &str, b: &str) -> bool {
         .flatten()
         .is_some()
 }
-async fn are_friends(pool: &SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::Error> {
+async fn are_friends_conn<'e, E>(exec: E, a: &str, b: &str) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let (x, y) = pair(a, b);
     Ok(
         sqlx::query("SELECT 1 FROM friendships WHERE user_a=? AND user_b=?")
             .bind(x)
             .bind(y)
-            .fetch_optional(pool)
+            .fetch_optional(exec)
             .await?
             .is_some(),
     )
 }
-async fn is_blocked(pool: &SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::Error> {
-    Ok(sqlx::query("SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)").bind(a).bind(b).bind(b).bind(a).fetch_optional(pool).await?.is_some())
+async fn are_friends(pool: &SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::Error> {
+    are_friends_conn(pool, a, b).await
 }
-async fn make_friends(pool: &SqlitePool, a: &str, b: &str) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let (x, y) = pair(a, b);
-    sqlx::query("INSERT OR IGNORE INTO friendships(user_a,user_b,created_at) VALUES(?,?,?)")
-        .bind(x)
-        .bind(y)
-        .bind(now())
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "DELETE FROM friend_requests WHERE (from_id=? AND to_id=?) OR (from_id=? AND to_id=?)",
+async fn is_blocked_conn<'e, E>(exec: E, a: &str, b: &str) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    Ok(sqlx::query(
+        "SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)",
     )
     .bind(a)
     .bind(b)
     .bind(b)
     .bind(a)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await
+    .fetch_optional(exec)
+    .await?
+    .is_some())
+}
+async fn is_blocked(pool: &SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::Error> {
+    is_blocked_conn(pool, a, b).await
 }
 fn db_error() -> axum::response::Response {
     error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR)
@@ -767,5 +834,235 @@ mod tests {
         }
         let limited = user_profile(State(state.clone()), alice_headers, Path("bob".into())).await;
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn request_friend_rate_limits_before_lookup_and_hides_blocked_vs_missing() {
+        let (_fix, state) = Fixture::new().await;
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO users(id,username) VALUES(?,?)")
+                .bind(id)
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('bob','alice','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let alice_headers = auth_headers(&state.db, "alice").await;
+
+        let blocked_resp = request_friend(
+            State(state.clone()),
+            alice_headers.clone(),
+            Json(json!({"username": "bob"})),
+        )
+        .await;
+        let blocked_status = blocked_resp.status();
+        let blocked_body: Value = serde_json::from_slice(
+            &to_bytes(blocked_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        let missing_resp = request_friend(
+            State(state.clone()),
+            alice_headers.clone(),
+            Json(json!({"username": "no_such_user_123"})),
+        )
+        .await;
+        let missing_status = missing_resp.status();
+        let missing_body: Value = serde_json::from_slice(
+            &to_bytes(missing_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(blocked_status, StatusCode::BAD_REQUEST);
+        assert_eq!(missing_status, blocked_status);
+        assert_eq!(missing_body["message"], blocked_body["message"]);
+
+        // Remaining 28 calls with nonexistent username succeed in counting toward 30/600s limit,
+        // and the 31st is rate limited before target_user lookup.
+        for _ in 0..28 {
+            let r = request_friend(
+                State(state.clone()),
+                alice_headers.clone(),
+                Json(json!({"username": "no_such_user_123"})),
+            )
+            .await;
+            assert_ne!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        let limited = request_friend(
+            State(state),
+            alice_headers,
+            Json(json!({"username": "no_such_user_123"})),
+        )
+        .await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn invite_endpoints_are_rate_limited() {
+        let (_fix, state) = Fixture::new().await;
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO users(id,username) VALUES(?,?)")
+                .bind(id)
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO friend_invites(token,user_id,created_at) VALUES('tok-bob','bob','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let alice_headers = auth_headers(&state.db, "alice").await;
+
+        for _ in 0..30 {
+            let r = show_invite(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("tok-bob".into()),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+        let limited_show = show_invite(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path("tok-bob".into()),
+        )
+        .await;
+        assert_eq!(limited_show.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        for _ in 0..30 {
+            let r = accept_invite(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("invalid-tok".into()),
+            )
+            .await;
+            assert_ne!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        let limited_accept =
+            accept_invite(State(state), alice_headers, Path("invalid-tok".into())).await;
+        assert_eq!(limited_accept.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn accept_friend_rejects_blocked_and_unblock_does_not_refriend() {
+        let (_fix, state) = Fixture::new().await;
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO users(id,username) VALUES(?,?)")
+                .bind(id)
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let bob_headers = auth_headers(&state.db, "bob").await;
+
+        // Pending friend request + block -> accept_friend must reject and not insert friendship.
+        sqlx::query(
+            "INSERT INTO friend_requests(from_id,to_id,created_at) VALUES('alice','bob','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('alice','bob','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let resp = accept_friend(
+            State(state.clone()),
+            bob_headers.clone(),
+            Json(json!({"username": "alice"})),
+        )
+        .await;
+        assert!(!resp.status().is_success());
+        assert!(!are_friends(&state.db, "alice", "bob").await.unwrap());
+
+        // Clear block/requests, make them friends, block, then unblock -> must NOT re-friend.
+        sqlx::query("DELETE FROM blocks")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM friend_requests")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO friendships(user_a,user_b,created_at) VALUES('alice','bob','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let blk = block_user(
+            State(state.clone()),
+            alice_headers.clone(),
+            Json(json!({"username": "bob"})),
+        )
+        .await;
+        assert_eq!(blk.status(), StatusCode::OK);
+        let unblk = unblock_user(
+            State(state.clone()),
+            alice_headers,
+            Json(json!({"username": "bob"})),
+        )
+        .await;
+        assert_eq!(unblk.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(unblk.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["friends"], false);
+        assert!(!are_friends(&state.db, "alice", "bob").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn user_profile_requires_non_hidden_chat_for_can_see() {
+        let (_fix, state) = Fixture::new().await;
+        let seen = now();
+        for id in ["alice", "bob"] {
+            sqlx::query(
+                "INSERT INTO users(id,username,status_text,last_seen,show_last_seen) VALUES(?,?,'secret-status',?,1)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(&seen)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chat_members(chat_id,user_id,role,joined_at,hidden) VALUES('dm1','alice','member','now',1),('dm1','bob','member','now',0)",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let resp = user_profile(State(state), alice_headers, Path("bob".into())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert!(body["user"]["status"].is_null());
+        assert!(body["presence"].is_null());
     }
 }

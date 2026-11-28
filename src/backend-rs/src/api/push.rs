@@ -144,10 +144,15 @@ async fn subscribe(
         ));
     }
     let db = || super::ApiError::new("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
+    let mut tx = state
+        .db
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| db())?;
     sqlx::query(
         "INSERT INTO push_subscriptions(endpoint,user_id,session_hash,p256dh,auth,created_at) VALUES(?,?,?,?,?,?)
          ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id, session_hash=excluded.session_hash,
-         p256dh=excluded.p256dh, auth=excluded.auth",
+         p256dh=excluded.p256dh, auth=excluded.auth, created_at=excluded.created_at",
     )
     .bind(endpoint)
     .bind(&user_id)
@@ -155,7 +160,7 @@ async fn subscribe(
     .bind(p256dh)
     .bind(auth)
     .bind(super::auth::now_iso())
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(|_| db())?;
     // Only the newest devices of an account keep their subscription.
@@ -166,9 +171,10 @@ async fn subscribe(
     .bind(&user_id)
     .bind(&user_id)
     .bind(MAX_SUBSCRIPTIONS_PER_USER)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(|_| db())?;
+    tx.commit().await.map_err(|_| db())?;
     Ok(json_ok(json!({})))
 }
 
@@ -499,6 +505,79 @@ mod tests {
             .collect();
         assert_eq!(endpoints, vec!["https://fcm.googleapis.com/ok"]);
         let _ = client();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn subscribe_refreshes_created_at_on_conflict_so_active_device_is_not_pruned() {
+        let dir = std::env::temp_dir().join(format!("seres-push-upsert-{}", uuid::Uuid::new_v4()));
+        let pool = crate::db::connect(&dir.join("users.db")).await.unwrap();
+        sqlx::query("INSERT INTO users(id,username) VALUES('u1','alice')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let token = "tok-u1";
+        let sess_hash = super::super::auth::hash_token(token);
+        sqlx::query(
+            "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1','2999-01-01T00:00:00Z','now',1)",
+        )
+        .bind(&sess_hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let ep0 = "https://fcm.googleapis.com/fcm/send/ep0";
+        sqlx::query(
+            "INSERT INTO push_subscriptions(endpoint,user_id,session_hash,p256dh,auth,created_at) VALUES(?,'u1',?,'k','a','2020-01-01T00:00:00Z')",
+        )
+        .bind(ep0)
+        .bind(&sess_hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for i in 1..=10 {
+            sqlx::query(
+                "INSERT INTO push_subscriptions(endpoint,user_id,session_hash,p256dh,auth,created_at) VALUES(?,'u1',?,'k','a','2025-01-01T00:00:00Z')",
+            )
+            .bind(format!("https://fcm.googleapis.com/fcm/send/ep{i}"))
+            .bind(&sess_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let state = AppState::new(pool.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_str(&format!("sessioncookie={token}")).unwrap(),
+        );
+        let resp = subscribe(
+            State(state),
+            headers,
+            Json(json!({
+                "endpoint": ep0,
+                "keys": {"p256dh": "AAAA", "auth": "BBBB"}
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let created_at: Option<String> =
+            sqlx::query_scalar("SELECT created_at FROM push_subscriptions WHERE endpoint=?")
+                .bind(ep0)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(
+            created_at
+                .as_deref()
+                .is_some_and(|ts| ts > "2025-01-01T00:00:00Z"),
+            "re-subscribed endpoint should refresh created_at and survive pruning, got {:?}",
+            created_at
+        );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
