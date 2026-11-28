@@ -292,18 +292,44 @@ fn origin_allowed(headers: &HeaderMap, origin: &str) -> bool {
     )
 }
 
-/// Forwarded addresses are accepted only from the local reverse proxy.
+/// Forwarded addresses are accepted only from the local reverse proxy and
+/// only from the single header configured by `SERES_CLIENT_IP_HEADER`.
 pub(crate) fn client_ip(headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
+    client_ip_with(
+        headers,
+        peer,
+        std::env::var("SERES_CLIENT_IP_HEADER").ok().as_deref(),
+    )
+}
+
+pub(crate) fn client_ip_with(
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    configured_header: Option<&str>,
+) -> IpAddr {
     if peer.ip().is_loopback() {
-        for name in ["cf-connecting-ip", "x-real-ip", "x-forwarded-for"] {
-            if let Some(ip) = headers
-                .get(name)
+        let header_name = match configured_header
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("none") => None,
+            Some("cf-connecting-ip") => Some("cf-connecting-ip"),
+            Some("x-real-ip") => Some("x-real-ip"),
+            Some("x-forwarded-for") | None => Some("x-forwarded-for"),
+            Some(_) => None,
+        };
+        if let Some(name) = header_name
+            && let Some(ip) = headers
+                .get_all(name)
+                .iter()
+                .next_back()
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.rsplit(',').next())
                 .and_then(|v| v.trim().parse::<IpAddr>().ok())
-            {
-                return ip;
-            }
+        {
+            return ip;
         }
     }
     peer.ip()
@@ -425,6 +451,19 @@ mod tests {
         assert!(!state.rate_limited(format!("login-ip:{other_ip}"), 1, 60));
         let remote = "198.51.100.10:9000".parse().unwrap();
         assert_eq!(client_ip(&headers, remote), remote.ip());
+
+        // Configured single-header modes via client_ip_with:
+        headers.insert("x-real-ip", "203.0.113.5".parse().unwrap());
+        assert_eq!(client_ip_with(&headers, peer, Some("none")), peer.ip());
+        assert_eq!(
+            client_ip_with(&headers, peer, Some("cf-connecting-ip")).to_string(),
+            "203.0.113.3"
+        );
+        assert_eq!(
+            client_ip_with(&headers, peer, Some("x-real-ip")).to_string(),
+            "203.0.113.5"
+        );
+        assert_eq!(client_ip_with(&headers, peer, Some("bogus")), peer.ip());
     }
 
     #[test]

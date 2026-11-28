@@ -25,7 +25,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const SESSION_DAYS: i64 = 90;
+pub(crate) const SESSION_DAYS: i64 = 90;
 const DEFAULT_KDF_ITERATIONS: i64 = 600_000;
 const MIN_KDF_ITERATIONS: i64 = 100_000;
 const MAX_KDF_ITERATIONS: i64 = 5_000_000;
@@ -109,15 +109,12 @@ pub(crate) fn session_hash(headers: &HeaderMap) -> Option<String> {
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(header::COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .find_map(|part| {
+    headers.get_all(header::COOKIE).iter().find_map(|header| {
+        header.to_str().ok()?.split(';').find_map(|part| {
             let (key, value) = part.trim().split_once('=')?;
             (key == name).then(|| value.to_owned())
         })
+    })
 }
 
 pub(crate) fn hash_token(token: &str) -> String {
@@ -130,7 +127,7 @@ pub(crate) fn hash_token(token: &str) -> String {
 pub(crate) fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
-fn iso_after(seconds: i64) -> String {
+pub(crate) fn iso_after(seconds: i64) -> String {
     (chrono::Utc::now() + chrono::Duration::seconds(seconds))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
@@ -303,15 +300,24 @@ fn username_valid(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+pub(crate) fn parse_email_address(value: &str) -> Option<lettre::Address> {
+    if value.is_empty()
+        || value.len() > 254
+        || value.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | ',' | '"' | '\'' | '\\')
+        })
+    {
+        return None;
+    }
+    let (_, domain) = value.split_once('@')?;
+    if !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') {
+        return None;
+    }
+    value.parse::<lettre::Address>().ok()
+}
+
 fn email_valid(value: &str) -> bool {
-    let Some((local, domain)) = value.split_once('@') else {
-        return false;
-    };
-    !local.is_empty()
-        && domain.contains('.')
-        && !domain.starts_with('.')
-        && !domain.ends_with('.')
-        && !value.chars().any(char::is_whitespace)
+    parse_email_address(value).is_some()
 }
 
 fn user_display(row: &SqliteRow) -> String {
@@ -643,7 +649,8 @@ async fn login(
         Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
     };
     let id: String = user.try_get("id").unwrap_or_default();
-    if user.try_get::<i64, _>("auth_version").unwrap_or(0) == 0 {
+    let is_legacy = user.try_get::<i64, _>("auth_version").unwrap_or(0) == 0;
+    let pending_upgrade = if is_legacy {
         let legacy = body.get("passwd").and_then(Value::as_str);
         let pass = user.try_get::<Option<String>, _>("passwd").ok().flatten();
         if !legacy.is_some_and(|v| verify_password(pass.as_deref(), v)) {
@@ -665,36 +672,65 @@ async fn login(
             Ok(v) => v,
             Err(e) => return axum::response::IntoResponse::into_response(e),
         };
-        if sqlx::query("UPDATE users SET passwd=?,auth_version=1,pub_ecdh=?,pub_sign=?,enc_private=? WHERE id=?").bind(hashed).bind(ecdh).bind(sign).bind(enc).bind(&id).execute(&state.db).await.is_err(){return error("Database unavailable",StatusCode::INTERNAL_SERVER_ERROR);}
+        Some((hashed, ecdh, sign, enc))
     } else {
         let pass = user.try_get::<Option<String>, _>("passwd").ok().flatten();
         if !verify_password(pass.as_deref(), auth_hash) {
             return api_bad_request("Login not succesfull");
         }
-    }
+        None
+    };
     let totp = user
         .try_get::<Option<String>, _>("totp_secret")
         .ok()
         .flatten()
         .is_some();
-    let passkeys = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM passkeys WHERE user_id=?")
-        .bind(&id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0)
-        > 0;
+    let passkeys =
+        match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM passkeys WHERE user_id=?")
+            .bind(&id)
+            .fetch_one(&state.db)
+            .await
+        {
+            Ok(count) => count > 0,
+            Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
+        };
     if totp || passkeys {
         let token = Uuid::new_v4().simple().to_string() + &Uuid::new_v4().simple().to_string();
         let token_hash = hash_token(&token);
-        let challenge = Uuid::new_v4().simple().to_string();
-        if sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,?,'login',?,0,?)")
-            .bind(token_hash)
-            .bind(&id)
-            .bind(challenge)
-            .bind(iso_after(300))
-            .execute(&state.db)
+        let nonce = Uuid::new_v4().simple().to_string();
+        let challenge = if let Some((hashed, ecdh, sign, enc)) = pending_upgrade {
+            json!({
+                "nonce": nonce,
+                "upgrade": {
+                    "passwd": hashed,
+                    "pub_ecdh": ecdh,
+                    "pub_sign": sign,
+                    "enc_private": enc
+                }
+            })
+            .to_string()
+        } else {
+            nonce
+        };
+        let now = now_iso();
+        let mut tx = match state.db.begin().await {
+            Ok(v) => v,
+            Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
+        };
+        if sqlx::query("DELETE FROM twofa_challenges WHERE expires_at<?")
+            .bind(&now)
+            .execute(&mut *tx)
             .await
             .is_err()
+            || sqlx::query("INSERT INTO twofa_challenges(token_hash,user_id,purpose,challenge,attempts,expires_at) VALUES(?,?,'login',?,0,?)")
+                .bind(token_hash)
+                .bind(&id)
+                .bind(challenge)
+                .bind(iso_after(300))
+                .execute(&mut *tx)
+                .await
+                .is_err()
+            || tx.commit().await.is_err()
         {
             return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
         }
@@ -712,6 +748,23 @@ async fn login(
                 "backup_codes": has_backup_codes(&state, &id).await
             }
         }));
+    }
+    if let Some((hashed, ecdh, sign, enc)) = pending_upgrade {
+        match sqlx::query(
+            "UPDATE users SET passwd=?,auth_version=1,pub_ecdh=?,pub_sign=?,enc_private=? WHERE id=? AND auth_version=0",
+        )
+        .bind(hashed)
+        .bind(ecdh)
+        .bind(sign)
+        .bind(enc)
+        .bind(&id)
+        .execute(&state.db)
+        .await
+        {
+            Ok(r) if r.rows_affected() == 1 => {}
+            Ok(_) => return api_bad_request("Please retry the login"),
+            Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
+        }
     }
     login_response(&state, &id, &headers).await
 }
@@ -771,7 +824,6 @@ pub(crate) async fn create_session(
     };
     let token = format!("{}.{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let created = now_iso();
-    let expires = iso_after(SESSION_DAYS * 24 * 60 * 60);
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -782,6 +834,11 @@ pub(crate) async fn create_session(
         super::devices::main_session(&state.db, user_id).await
     };
     let approved = main.is_none();
+    let expires = if approved {
+        iso_after(SESSION_DAYS * 24 * 60 * 60)
+    } else {
+        iso_after(super::devices::PENDING_SECONDS)
+    };
     if sqlx::query(
         "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,last_seen,user_agent,approved) VALUES(?,?,?,?,?,?,?)",
     )
@@ -826,10 +883,76 @@ pub(crate) async fn create_session(
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = cookie_value(&headers, SESSION_COOKIE) {
-        let _ = sqlx::query("DELETE FROM user_sessions WHERE token_hash=?")
-            .bind(hash_token(&token))
-            .execute(&state.db)
-            .await;
+        let token_hash = hash_token(&token);
+        let now = now_iso();
+        let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
+            Ok(v) => v,
+            Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
+        };
+        let active_user = sqlx::query_scalar::<_, String>(
+            "SELECT user_id FROM user_sessions WHERE token_hash=? AND expires_at>? AND approved=1",
+        )
+        .bind(&token_hash)
+        .bind(&now)
+        .fetch_optional(&mut *tx)
+        .await;
+        match active_user {
+            Ok(Some(user_id)) => {
+                let main = sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT main_session FROM users WHERE id=?",
+                )
+                .bind(&user_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .ok()
+                .flatten()
+                .flatten();
+                if main.as_deref() == Some(token_hash.as_str()) {
+                    let has_other_approved = sqlx::query(
+                        "SELECT 1 FROM user_sessions WHERE user_id=? AND token_hash!=? AND approved=1 AND expires_at>? LIMIT 1",
+                    )
+                    .bind(&user_id)
+                    .bind(&token_hash)
+                    .bind(&now)
+                    .fetch_optional(&mut *tx)
+                    .await;
+                    match has_other_approved {
+                        Ok(Some(_)) => {
+                            let _ = tx.rollback().await;
+                            return error(
+                                "Choose another main device before logging out",
+                                StatusCode::CONFLICT,
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            return error(
+                                "Database unavailable",
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                            );
+                        }
+                    }
+                    let _ = sqlx::query(
+                        "UPDATE users SET main_session=NULL WHERE id=? AND main_session=?",
+                    )
+                    .bind(&user_id)
+                    .bind(&token_hash)
+                    .execute(&mut *tx)
+                    .await;
+                }
+            }
+            Ok(None) => {}
+            Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
+        }
+        if sqlx::query("DELETE FROM user_sessions WHERE token_hash=?")
+            .bind(&token_hash)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+            || tx.commit().await.is_err()
+        {
+            return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR);
+        }
     }
     let mut response = json_response(
         StatusCode::OK,
@@ -913,6 +1036,15 @@ async fn change_password(
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
     let user_id: String = user.try_get("id").unwrap_or_default();
+    let current_hash = hash_token(&cookie_value(&headers, SESSION_COOKIE).unwrap_or_default());
+    if let Some(main) = super::devices::main_session(&state.db, &user_id).await
+        && main != current_hash
+    {
+        return error(
+            "Only your main device can change your password",
+            StatusCode::FORBIDDEN,
+        );
+    }
     if state.rate_limited(format!("change-password:{user_id}"), 5, 300) {
         return error(
             "Too many attempts, please wait a few minutes",
@@ -927,11 +1059,29 @@ async fn change_password(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    let current_hash = hash_token(&cookie_value(&headers, SESSION_COOKIE).unwrap_or_default());
-    let mut tx = match state.db.begin().await {
+    let mut tx = match state.db.begin_with("BEGIN IMMEDIATE").await {
         Ok(v) => v,
         Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
     };
+    let active_main = sqlx::query_scalar::<_, String>(
+        "SELECT u.main_session FROM users u JOIN user_sessions s ON s.token_hash=u.main_session
+         WHERE u.id=? AND s.expires_at>? AND s.approved=1",
+    )
+    .bind(&user_id)
+    .bind(now_iso())
+    .fetch_optional(&mut *tx)
+    .await;
+    match active_main {
+        Ok(Some(main)) if main != current_hash => {
+            let _ = tx.rollback().await;
+            return error(
+                "Only your main device can change your password",
+                StatusCode::FORBIDDEN,
+            );
+        }
+        Ok(_) => {}
+        Err(_) => return error("Database unavailable", StatusCode::INTERNAL_SERVER_ERROR),
+    }
     if sqlx::query("UPDATE users SET passwd=?,kdf_salt=?,kdf_iterations=?,enc_private=? WHERE id=?")
         .bind(hashed)
         .bind(salt)
@@ -953,6 +1103,11 @@ async fn change_password(
             .await
             .is_err()
         || sqlx::query("DELETE FROM twofa_challenges WHERE user_id=?")
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        || sqlx::query("DELETE FROM device_links WHERE user_id=?")
             .bind(&user_id)
             .execute(&mut *tx)
             .await
@@ -1384,6 +1539,69 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(expired_left, 0);
+
+        // Complete TOTP 2FA via /api/login/2fa and verify deferred upgrade completes.
+        let twofa_token = body["two_factor"]["token"].as_str().unwrap().to_owned();
+        let totp_code = {
+            use hmac::{Hmac, Mac};
+            let decoded = data_encoding::BASE32_NOPAD
+                .decode(secret.as_bytes())
+                .unwrap();
+            let step = chrono::Utc::now().timestamp() / 30;
+            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&decoded).unwrap();
+            mac.update(&(step as u64).to_be_bytes());
+            let digest = mac.finalize().into_bytes();
+            let off = (digest[19] & 15) as usize;
+            let val = ((u32::from(digest[off] & 127) << 24)
+                | (u32::from(digest[off + 1]) << 16)
+                | (u32::from(digest[off + 2]) << 8)
+                | u32::from(digest[off + 3]))
+                % 1_000_000;
+            format!("{val:06}")
+        };
+        let app = super::super::router().with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let res = client
+            .post(format!("http://{addr}/api/login/2fa"))
+            .header("host", format!("localhost:{}", addr.port()))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(
+                serde_json::to_vec(&json!({
+                    "token": twofa_token,
+                    "method": "totp",
+                    "code": totp_code
+                }))
+                .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+        server.abort();
+
+        let upgraded = sqlx::query("SELECT auth_version, enc_private FROM users WHERE id=?")
+            .bind(&user_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(upgraded.try_get::<i64, _>("auth_version").unwrap(), 1);
+        assert_eq!(
+            upgraded
+                .try_get::<Option<String>, _>("enc_private")
+                .unwrap()
+                .as_deref(),
+            Some("upgraded-enc")
+        );
 
         state.db.close().await;
         let _ = std::fs::remove_file(path);

@@ -1,14 +1,44 @@
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Instant,
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
+
+const MAX_LIMITER_ENTRIES: usize = 50_000;
+const MAX_LIMITER_KEY_BYTES: usize = 128;
+
+static DISABLE_RATE_LIMIT: OnceLock<bool> = OnceLock::new();
+
+fn rate_limit_disabled() -> bool {
+    *DISABLE_RATE_LIMIT
+        .get_or_init(|| std::env::var("SERES_DISABLE_RATE_LIMIT").as_deref() == Ok("1"))
+}
+
+fn normalize_limiter_key(raw: String) -> String {
+    if raw.len() <= MAX_LIMITER_KEY_BYTES {
+        return raw;
+    }
+    let digest = Sha256::digest(raw.as_bytes());
+    let mut out = String::with_capacity(7 + 64);
+    out.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+struct RateEntry {
+    hits: Vec<Instant>,
+    expires_at: Instant,
+}
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
-    limiter: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    limiter: Arc<Mutex<HashMap<String, RateEntry>>>,
     typing: Arc<Mutex<HashMap<(String, String), Instant>>>,
 }
 
@@ -22,27 +52,51 @@ impl AppState {
     }
 
     pub fn rate_limited(&self, key: impl Into<String>, limit: usize, window_secs: u64) -> bool {
-        if std::env::var("SERES_DISABLE_RATE_LIMIT").as_deref() == Ok("1") {
+        if rate_limit_disabled() {
             return false;
         }
+        let key = normalize_limiter_key(key.into());
         let now = Instant::now();
+        let window = Duration::from_secs(window_secs);
         let mut map = self
             .limiter
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let hits = map.entry(key.into()).or_default();
-        hits.retain(|at| now.duration_since(*at).as_secs() < window_secs);
-        if hits.len() >= limit {
+        if let Some(entry) = map.get_mut(&key) {
+            entry
+                .hits
+                .retain(|at| now.saturating_duration_since(*at) < window);
+            if entry.hits.len() >= limit {
+                return true;
+            }
+            entry.hits.push(now);
+            entry.expires_at = now + window;
+            return false;
+        }
+        if limit == 0 {
             return true;
         }
-        hits.push(now);
-        if map.len() > 50_000 {
-            map.retain(|_, values| {
-                values
-                    .last()
-                    .is_some_and(|at| now.duration_since(*at).as_secs() < 3600)
-            });
+        if map.len() >= MAX_LIMITER_ENTRIES {
+            map.retain(|_, entry| entry.expires_at > now);
+            if map.len() >= MAX_LIMITER_ENTRIES {
+                let evict_count = (MAX_LIMITER_ENTRIES / 10).max(1);
+                let mut candidates: Vec<(Instant, String)> =
+                    map.iter().map(|(k, v)| (v.expires_at, k.clone())).collect();
+                if evict_count < candidates.len() {
+                    candidates.select_nth_unstable_by_key(evict_count - 1, |item| item.0);
+                }
+                for (_, k) in candidates.into_iter().take(evict_count) {
+                    map.remove(&k);
+                }
+            }
         }
+        map.insert(
+            key,
+            RateEntry {
+                hits: vec![now],
+                expires_at: now + window,
+            },
+        );
         false
     }
 
