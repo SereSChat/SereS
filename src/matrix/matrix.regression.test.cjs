@@ -1054,6 +1054,7 @@ test('SSO loginToken callback waits for SereS boot/auth and deduplicates concurr
     // Simulate SereS boot completing (/api/me succeeded, switchView('chats') activated nav)
     const chatsNav = w.document.querySelector('.rail-nav[data-rail-view="chats"]');
     chatsNav.classList.add('active');
+    chatsNav.setAttribute('aria-current', 'page');
     await tick();
     await tick();
 

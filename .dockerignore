@@ -3,6 +3,7 @@
 **/.env
 users.db*
 **/users.db*
+*.p8
 data/
 ecosystem.config.js
 

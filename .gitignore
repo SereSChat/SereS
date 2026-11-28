@@ -14,3 +14,13 @@ ecosystem.config.js
 !src/matrix/package-lock.json
 data/
 backups/
+src/backend/files/
+src/backend/user_data/
+src/backend/group_avatars/
+src/backend/chats/
+src/backend/friends/
+*.p8
+*.db
+*.db-wal
+*.db-shm
+*.db.gz

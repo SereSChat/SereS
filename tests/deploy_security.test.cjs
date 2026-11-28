@@ -46,7 +46,7 @@ test('setup-mailserver.sh replaces sed -i with literal awk ENVIRON + atomic temp
   // Strict validation of CLI flags
   assert.match(script, /MAIL_HOSTNAME.*=~|valid_domain.*MAIL_HOSTNAME|valid_host.*MAIL_HOSTNAME/, 'must strictly validate --hostname');
   assert.match(script, /FROM.*=~|valid_email.*FROM/, 'must strictly validate --from');
-  assert.match(script, /PUBLIC_URL.*=~|valid_url.*PUBLIC_URL/, 'must strictly validate --public-url');
+  assert.match(script, /PUBLIC_URL.*=~|valid_public_url.*PUBLIC_URL|valid_url.*PUBLIC_URL/, 'must strictly validate --public-url');
   assert.match(script, /SERVER_IP.*=~|valid_ipv4.*SERVER_IP/, 'must strictly validate --ip');
   assert.match(script, /TEST_TO.*=~|valid_email.*TEST_TO/, 'must strictly validate --test-to');
 
@@ -64,18 +64,19 @@ test('setup-mailserver.sh replaces sed -i with literal awk ENVIRON + atomic temp
 });
 
 test('setup-mailserver.sh set_env/remove_env behavior handles special characters literally when bash is available', { skip: !hasRealBash() }, () => {
-  const script = read('deploy/setup-mailserver.sh');
+  const script = read('deploy/setup-mailserver.sh').replace(/\r\n/g, '\n');
   const dir = mkdtempSync(join(tmpdir(), 'seres-mail-'));
   try {
     const envFile = join(dir, '.env');
     writeFileSync(envFile, 'SMTP_USER=olduser\nSMTP_PASSWORD=oldpass\nKEEP=1\nMAIL_FROM=old');
-    // Extract functions from setup-mailserver.sh up to "# ------------------------------------------------------------ SereS .env" helpers
+    const envOwnerFn = script.match(/env_owner\(\)\s*\{[\s\S]*?\n\}/)?.[0] || '';
     const setEnvFn = script.match(/set_env\(\)\s*\{[\s\S]*?\n\}/)?.[0] || '';
     const removeEnvFn = script.match(/(?:remove_env|unset_env|clear_env)\(\)\s*\{[\s\S]*?\n\}/)?.[0] || '';
     assert.ok(setEnvFn && removeEnvFn, 'both set_env and remove_env helpers must exist');
 
     const cmd = `
       set -euo pipefail
+      ${envOwnerFn}
       ${setEnvFn}
       ${removeEnvFn}
       set_env "${envFile.replace(/\\/g, '/')}" MAIL_FROM '"SereS & Co | \\1 <no-reply@example.com>"'

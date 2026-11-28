@@ -51553,10 +51553,10 @@ var init_indexeddb_crypto_store_backend = __esm({
 });
 
 // node_modules/matrix-js-sdk/lib/indexeddb-helpers.js
-function exists(indexedDB2, dbName) {
+function exists(indexedDB3, dbName) {
   return new Promise((resolve, reject) => {
     let exists2 = true;
-    const req = indexedDB2.open(dbName);
+    const req = indexedDB3.open(dbName);
     req.onupgradeneeded = () => {
       exists2 = false;
     };
@@ -51565,7 +51565,7 @@ function exists(indexedDB2, dbName) {
       const db = req.result;
       db.close();
       if (!exists2) {
-        indexedDB2.deleteDatabase(dbName);
+        indexedDB3.deleteDatabase(dbName);
       }
       resolve(exists2);
     };
@@ -51590,8 +51590,8 @@ var init_indexeddb_crypto_store = __esm({
     init_indexeddb_helpers();
     init_base();
     IndexedDBCryptoStore = class _IndexedDBCryptoStore {
-      static exists(indexedDB2, dbName) {
-        return exists(indexedDB2, dbName);
+      static exists(indexedDB3, dbName) {
+        return exists(indexedDB3, dbName);
       }
       /**
        * Utility to check if a legacy crypto store exists and has not been migrated.
@@ -51634,10 +51634,10 @@ var init_indexeddb_crypto_store = __esm({
        * @param indexedDB -  global indexedDB instance
        * @param dbName -   name of db to connect to
        */
-      constructor(indexedDB2, dbName) {
+      constructor(indexedDB3, dbName) {
         _defineProperty(this, "backendPromise", void 0);
         _defineProperty(this, "backend", void 0);
-        this.indexedDB = indexedDB2;
+        this.indexedDB = indexedDB3;
         this.dbName = dbName;
       }
       /**
@@ -52824,17 +52824,17 @@ var init_client = __esm({
           promises.push(this.legacyCryptoStore.deleteAllData());
         }
         const deleteRustSdkStore = async () => {
-          let indexedDB2;
+          let indexedDB3;
           try {
-            indexedDB2 = globalThis.indexedDB;
-            if (!indexedDB2) return;
+            indexedDB3 = globalThis.indexedDB;
+            if (!indexedDB3) return;
           } catch {
             return;
           }
           for (const dbname of [`${args.cryptoDatabasePrefix ?? RUST_SDK_STORE_PREFIX}::matrix-sdk-crypto`, `${args.cryptoDatabasePrefix ?? RUST_SDK_STORE_PREFIX}::matrix-sdk-crypto-meta`]) {
             const prom = new Promise((resolve, reject) => {
               this.logger.info(`Removing IndexedDB instance ${dbname}`);
-              const req = indexedDB2.deleteDatabase(dbname);
+              const req = indexedDB3.deleteDatabase(dbname);
               req.onsuccess = (_) => {
                 this.logger.info(`Removed IndexedDB instance ${dbname}`);
                 resolve(0);
@@ -69704,9 +69704,9 @@ function reqAsCursorPromise(req) {
   return reqAsEventPromise(req).then((event) => req.result);
 }
 var LocalIndexedDBStoreBackend = class {
-  static exists(indexedDB2, dbName) {
+  static exists(indexedDB3, dbName) {
     dbName = "matrix-js-sdk:" + (dbName || "default");
-    return exists(indexedDB2, dbName);
+    return exists(indexedDB3, dbName);
   }
   /**
    * Does the actual reading from and writing to the indexeddb
@@ -69718,7 +69718,7 @@ var LocalIndexedDBStoreBackend = class {
    * @param dbName - Optional database name. The same name must be used
    * to open the same database.
    */
-  constructor(indexedDB2, dbName = "default") {
+  constructor(indexedDB3, dbName = "default") {
     _defineProperty(this, "dbName", void 0);
     _defineProperty(this, "syncAccumulator", void 0);
     _defineProperty(this, "db", void 0);
@@ -69726,7 +69726,7 @@ var LocalIndexedDBStoreBackend = class {
     _defineProperty(this, "_isNewlyCreated", false);
     _defineProperty(this, "syncToDatabasePromise", void 0);
     _defineProperty(this, "pendingUserPresenceData", []);
-    this.indexedDB = indexedDB2;
+    this.indexedDB = indexedDB3;
     this.dbName = "matrix-js-sdk:" + dbName;
     this.syncAccumulator = new SyncAccumulator();
   }
@@ -70338,8 +70338,8 @@ init_logger();
 init_typed_event_emitter();
 var WRITE_DELAY_MS = 1e3 * 60 * 5;
 var IndexedDBStore = class extends MemoryStore {
-  static exists(indexedDB2, dbName) {
-    return LocalIndexedDBStoreBackend.exists(indexedDB2, dbName);
+  static exists(indexedDB3, dbName) {
+    return LocalIndexedDBStoreBackend.exists(indexedDB3, dbName);
   }
   /**
    * Construct a new Indexed Database store, which extends MemoryStore.
@@ -70720,13 +70720,13 @@ if (globalThis.__js_sdk_entrypoint) {
   throw new Error("Multiple matrix-js-sdk entrypoints detected!");
 }
 globalThis.__js_sdk_entrypoint = true;
-var indexedDB;
+var indexedDB2;
 try {
-  indexedDB = globalThis.indexedDB;
+  indexedDB2 = globalThis.indexedDB;
 } catch {
 }
-if (indexedDB) {
-  setCryptoStoreFactory(() => new IndexedDBCryptoStore(indexedDB, "matrix-js-sdk:crypto"));
+if (indexedDB2) {
+  setCryptoStoreFactory(() => new IndexedDBCryptoStore(indexedDB2, "matrix-js-sdk:crypto"));
 }
 globalThis.matrixcs = matrix_exports;
 
@@ -70735,6 +70735,8 @@ init_matrix_sdk_crypto_wasm();
 var SESSION_KEY = "seres.matrix.session.v1";
 var TOKEN_KEY = "seres.matrix.token.v1";
 var SSO_STATE_KEY = "seres.matrix.sso.state.v1";
+var SSO_SERVER_KEY = "seres.matrix.sso.server";
+var SERVER_KEY = "seres.matrix.server";
 var ROOT_ID = "matrix-app-root";
 var LIST_ID = "matrix-list";
 var MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -70770,6 +70772,8 @@ var cryptoLease = null;
 var cancelInputDialog = null;
 var observedThreadRoom = null;
 var stopObservingThreads = null;
+var ssoCallbackTask = null;
+var seresBootReadyTask = null;
 var mediaObjectUrls = /* @__PURE__ */ new Set();
 var mediaNodes = /* @__PURE__ */ new Map();
 function symbol(name) {
@@ -70848,27 +70852,72 @@ function clearCallbackFromAddress() {
   url.searchParams.delete("matrix_sso");
   history.replaceState({}, document.title, url.pathname + url.search + url.hash);
 }
+function isSeresAppShell() {
+  return !!document.getElementById("my-username-display");
+}
+function isSeresBootComplete() {
+  return !isSeresAppShell() || !!document.querySelector('.rail-nav[data-rail-view][aria-current="page"]');
+}
+function waitForSeresBoot() {
+  if (isSeresBootComplete()) return Promise.resolve();
+  if (seresBootReadyTask) return seresBootReadyTask;
+  seresBootReadyTask = new Promise((resolve) => {
+    let observer = null;
+    const check = () => {
+      if (!isSeresBootComplete()) return false;
+      observer?.disconnect();
+      resolve();
+      return true;
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => {
+        check();
+      }, { once: true });
+    }
+    const target = document.body || document.documentElement;
+    if (typeof MutationObserver !== "undefined" && target) {
+      observer = new MutationObserver(() => {
+        check();
+      });
+      observer.observe(target, { subtree: true, attributes: true, attributeFilter: ["class", "aria-current"], childList: true });
+    }
+    check();
+  }).finally(() => {
+    seresBootReadyTask = null;
+  });
+  return seresBootReadyTask;
+}
 async function handleSsoCallback() {
+  if (ssoCallbackTask) return ssoCallbackTask;
   const query = new URLSearchParams(location.search);
   const token = query.get("loginToken");
   if (!token) return false;
-  const expected = sessionStorage.getItem(SSO_STATE_KEY);
-  const received = query.get("state") || query.get("matrix_sso");
-  const baseUrl = sessionStorage.getItem("seres.matrix.sso.server");
-  sessionStorage.removeItem(SSO_STATE_KEY);
-  sessionStorage.removeItem("seres.matrix.sso.server");
-  clearCallbackFromAddress();
-  if (!expected || !received || expected !== received || !baseUrl) {
-    throw new Error("Matrix SSO callback did not match the sign-in request. Please try again.");
-  }
-  const authClient = createClient({ baseUrl });
-  const response = await authClient.loginRequest({
-    type: "m.login.token",
-    token,
-    initial_device_display_name: "SereS web"
+  ssoCallbackTask = (async () => {
+    await waitForSeresBoot();
+    const currentQuery = new URLSearchParams(location.search);
+    const currentToken = currentQuery.get("loginToken");
+    if (!currentToken) return false;
+    const expected = sessionStorage.getItem(SSO_STATE_KEY);
+    const received = currentQuery.get("state") || currentQuery.get("matrix_sso");
+    const baseUrl = sessionStorage.getItem(SSO_SERVER_KEY);
+    sessionStorage.removeItem(SSO_STATE_KEY);
+    sessionStorage.removeItem(SSO_SERVER_KEY);
+    clearCallbackFromAddress();
+    if (!expected || !received || expected !== received || !baseUrl) {
+      throw new Error("Matrix SSO callback did not match the sign-in request. Please try again.");
+    }
+    const authClient = createClient({ baseUrl });
+    const response = await authClient.loginRequest({
+      type: "m.login.token",
+      token: currentToken,
+      initial_device_display_name: "SereS web"
+    });
+    await finishLogin(baseUrl, response);
+    return true;
+  })().finally(() => {
+    ssoCallbackTask = null;
   });
-  await finishLogin(baseUrl, response);
-  return true;
+  return ssoCallbackTask;
 }
 function startClient(session) {
   const matrix = createClient({
@@ -71005,9 +71054,12 @@ function notifyMatrixMessage(event, room) {
   const relation = event.getContent()?.["m.relates_to"];
   const replyThreadId = relation?.rel_type === "m.thread" ? relation.event_id || "" : "";
   if (active && selectedRoomId === room.roomId && threadRootId === replyThreadId && document.visibilityState === "visible") return;
+  const roomEncrypted = !!client.isRoomEncrypted?.(room.roomId);
+  const unencryptedInEncryptedRoom = roomEncrypted && !event.isEncrypted?.();
+  const body = unencryptedInEncryptedRoom ? "Unencrypted message in encrypted room" : event.getContent().body || "New Matrix message";
   window.dispatchEvent(new CustomEvent("seres:notification", { detail: {
     title: `${room.name || room.roomId}${replyThreadId ? " \xB7 Thread" : ""}`,
-    body: event.getContent().body || "New Matrix message",
+    body,
     tag: `matrix:${event.getId() || `${room.roomId}:${Date.now()}`}`,
     onClick: () => {
       selectedRoomId = room.roomId;
@@ -71110,7 +71162,7 @@ function renderRoomList() {
     const button = h("button", `matrix-room-button${selectedRoomId === room.roomId ? " selected" : ""}`);
     button.type = "button";
     button.append(h("span", "matrix-room-name", room.name || room.roomId));
-    if (room.hasEncryptionStateEvent()) {
+    if (matrix.isRoomEncrypted?.(room.roomId)) {
       button.append(symbol("lock"));
       button.setAttribute("aria-label", `${room.name || room.roomId}, end-to-end encrypted`);
     }
@@ -71315,8 +71367,9 @@ function renderRoom() {
   }
   const header = h("header", "matrix-room-header");
   const title = h("div", "matrix-room-heading");
+  const roomEncrypted = !!matrix.isRoomEncrypted?.(room.roomId);
   title.append(h("strong", "", threadRootId ? "Thread" : room.name || room.roomId));
-  title.append(h("span", "matrix-room-subtitle", `${room.getJoinedMemberCount()} members | ${room.hasEncryptionStateEvent() ? "End-to-end encrypted" : "Not encrypted"}`));
+  title.append(h("span", "matrix-room-subtitle", `${room.getJoinedMemberCount()} members | ${roomEncrypted ? "End-to-end encrypted" : "Not encrypted"}`));
   header.append(mobileRoomsButton(), title);
   const actions = h("div", "matrix-header-actions");
   if (threadRootId) {
@@ -71346,21 +71399,28 @@ function renderRoom() {
     return relation?.rel_type === "m.thread" && relation?.event_id === threadRootId;
   }).sort((a, b) => (a.getDate()?.getTime() || 0) - (b.getDate()?.getTime() || 0))].filter((event) => !!event) : events.filter((event) => !event.getContent()?.["m.relates_to"]?.rel_type);
   for (const event of filtered.slice(-150)) {
-    if (event.getType() !== EventType.RoomMessage && !event.isEncrypted()) continue;
+    if (event.getType() !== EventType.RoomMessage && !event.isEncrypted?.()) continue;
     const content = event.getContent();
-    const row = h("article", `matrix-message${threadRootId && event.getId() === threadRootId ? " matrix-thread-root" : ""}`);
+    const isEncryptedEvent = !!event.isEncrypted?.();
+    const unencryptedInEncryptedRoom = roomEncrypted && !isEncryptedEvent;
+    const row = h("article", `matrix-message${threadRootId && event.getId() === threadRootId ? " matrix-thread-root" : ""}${unencryptedInEncryptedRoom ? " matrix-message-unencrypted" : ""}`);
     row.dataset.eventId = event.getId() || "";
     const senderName = matrixSenderName(event, room);
     const time = matrixTimestamp(event.getDate());
     const replies = !threadRootId && event.getId() ? threadSummary(room, event.getId(), events) : null;
-    row.dataset.signature = JSON.stringify([event.getType(), content, senderName, time, replies]);
+    row.dataset.signature = JSON.stringify([event.getType(), content, senderName, time, replies, unencryptedInEncryptedRoom]);
     const sender = h("strong", "matrix-message-sender", senderName);
     sender.title = event.getSender() || "";
     const stamp = h("time", "matrix-message-time", time.label);
     stamp.dateTime = time.iso;
     stamp.title = time.title;
     row.append(sender, stamp);
-    row.append(h("div", "matrix-message-body", content.body || (event.isEncrypted() ? "Encrypted message could not be decrypted yet." : "Unsupported message")));
+    if (unencryptedInEncryptedRoom) {
+      const warning = h("div", "matrix-unencrypted-warning", "Warning: Unencrypted message in an encrypted room");
+      warning.setAttribute("role", "note");
+      row.append(warning);
+    }
+    row.append(h("div", "matrix-message-body", content.body || (isEncryptedEvent ? "Encrypted message could not be decrypted yet." : "Unsupported message")));
     appendAttachment(row, content, matrix);
     if (!threadRootId && event.getId()) {
       const label = replies?.count ? `${replies.count} ${replies.count === 1 ? "reply" : "replies"} in thread` : "Reply in thread";
@@ -72089,25 +72149,82 @@ function renderLogin(error = "") {
     if (handled) renderWorkspace();
   }).catch((reason) => renderLogin(safeError(reason)));
 }
+function deleteIndexedDatabase(name) {
+  if (typeof indexedDB === "undefined" || typeof indexedDB.deleteDatabase !== "function") return Promise.resolve();
+  return new Promise((resolve) => {
+    try {
+      const request = indexedDB.deleteDatabase(name);
+      request.onsuccess = () => resolve();
+      request.onerror = () => resolve();
+      request.onblocked = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+function knownCryptoStorePrefixes() {
+  const prefixes = /* @__PURE__ */ new Set();
+  for (const raw of [sessionStorage.getItem(TOKEN_KEY), localStorage.getItem(SESSION_KEY)]) {
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.baseUrl && parsed?.userId && parsed?.deviceId) {
+        prefixes.add(cryptoStoreName(parsed));
+      }
+    } catch {
+    }
+  }
+  return prefixes;
+}
 async function logout() {
+  const activeClient = client;
+  const prefixes = knownCryptoStorePrefixes();
+  const [primaryPrefix] = prefixes;
   try {
-    await client?.logout(true);
+    await activeClient?.logout(true);
   } catch {
   }
   await stop();
+  try {
+    await activeClient?.clearStores?.(primaryPrefix ? { cryptoDatabasePrefix: primaryPrefix } : void 0);
+  } catch {
+  }
+  const dbNames = /* @__PURE__ */ new Set();
+  for (const prefix of prefixes) {
+    dbNames.add(`${prefix}::matrix-sdk-crypto`);
+    dbNames.add(`${prefix}::matrix-sdk-crypto-meta`);
+    dbNames.add(prefix);
+  }
+  if (typeof indexedDB !== "undefined" && typeof indexedDB.databases === "function") {
+    try {
+      const databases = await indexedDB.databases();
+      for (const info of databases) {
+        if (typeof info.name === "string" && info.name.startsWith("seres-matrix:")) {
+          dbNames.add(info.name);
+        }
+      }
+    } catch {
+    }
+  }
+  await Promise.all(Array.from(dbNames, (name) => deleteIndexedDatabase(name)));
   localStorage.removeItem(SESSION_KEY);
   sessionStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(SSO_STATE_KEY);
+  sessionStorage.removeItem(SSO_SERVER_KEY);
+  localStorage.removeItem(SERVER_KEY);
+  loginBaseUrl = "";
+  loginFlows = [];
   selectedRoomId = "";
   selectedSpaceId = "";
   threadRootId = "";
   drafts.clear();
   pendingSends.clear();
-  renderLogin();
+  if (document.getElementById(LIST_ID) && document.getElementById(ROOT_ID)) renderLogin();
 }
 function activate() {
   active = true;
   if (new URLSearchParams(location.search).has("loginToken")) {
-    renderLogin();
+    if (!client && !connectionTask) renderLogin();
     return;
   }
   const session = savedSession();
@@ -72123,12 +72240,16 @@ function deactivate() {
   active = false;
   cancelInputDialog?.();
 }
-window.SeresMatrix = { activate, deactivate };
+window.SeresMatrix = { activate, deactivate, logout };
 document.addEventListener("visibilitychange", () => {
   if (active && client && document.visibilityState === "visible") renderRoom();
 });
 if (new URLSearchParams(location.search).has("loginToken")) {
-  window.dispatchEvent(new Event("seres:open-matrix"));
+  void waitForSeresBoot().then(() => {
+    if (new URLSearchParams(location.search).has("loginToken")) {
+      window.dispatchEvent(new Event("seres:open-matrix"));
+    }
+  });
 }
 /*! Bundled license information:
 

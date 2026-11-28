@@ -31,7 +31,7 @@ TURN=1
 TURN_HOST=""
 TURN_PORT=3478
 TURN_MIN_PORT=49160
-TURN_MAX_PORT=49200
+TURN_MAX_PORT=50160
 PUBLIC_URL=""
 RP_ID=""
 PULL=1
@@ -104,7 +104,7 @@ if node_ok; then
   step "Node.js $(node -v) and npm $(npm -v) are already installed"
 else
   step "Installing Node.js $NODE_MAJOR with npm (NodeSource)"
-  curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | ${SUDO:+$SUDO -E} bash - >/dev/null
+  curl --proto '=https' --tlsv1.2 -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | ${SUDO:+$SUDO -E} bash - >/dev/null
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >/dev/null
   node_ok || die "Node.js could not be installed"
   echo "    Node.js $(node -v), npm $(npm -v)"
@@ -212,7 +212,37 @@ if [[ $TURN -eq 1 ]]; then
   TURN_SECRET="${TURN_SECRET:-$(node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')}"
   [[ "$TURN_SECRET" =~ ^[0-9a-f]+$ ]] || die "unexpected TURN secret in $TURN_CONF"
 
+  HOST_PEER_IPS=""
+  add_denied_ip() {
+    local ip="$1"
+    [[ -n "$ip" ]] || return 0
+    if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$ip" =~ ^[0-9A-Fa-f:]+$ ]]; then
+      case $'\n'"$HOST_PEER_IPS"$'\n' in
+        *$'\n'"$ip"$'\n'*) ;;
+        *) HOST_PEER_IPS="${HOST_PEER_IPS:+$HOST_PEER_IPS$'\n'}$ip" ;;
+      esac
+    fi
+  }
+  add_denied_ip "$TURN_HOST"
+  for addr in $(hostname -I 2>/dev/null || true); do
+    add_denied_ip "$addr"
+  done
+  if command -v getent >/dev/null; then
+    for addr in $(getent ahosts "$TURN_HOST" 2>/dev/null | awk '{print $1}'); do
+      add_denied_ip "$addr"
+    done
+  fi
+  HOST_DENIED_LINES=""
+  while IFS= read -r host_ip; do
+    [[ -n "$host_ip" ]] && HOST_DENIED_LINES="${HOST_DENIED_LINES}denied-peer-ip=$host_ip"$'\n'
+  done <<< "$HOST_PEER_IPS"
+
   step "Writing $TURN_CONF (TURN on $TURN_HOST:$TURN_PORT)"
+  if $SUDO getent group turnserver >/dev/null 2>&1; then
+    $SUDO install -m 640 -o root -g turnserver /dev/null "$TURN_CONF"
+  else
+    $SUDO install -m 640 -o root -g root /dev/null "$TURN_CONF"
+  fi
   $SUDO tee "$TURN_CONF" >/dev/null <<TURNCONF
 $TURN_MARK. Run the script again instead of changing it.
 listening-port=$TURN_PORT
@@ -225,25 +255,34 @@ static-auth-secret=$TURN_SECRET
 no-cli
 no-tls
 no-dtls
+no-tcp-relay
+no-loopback-peers
 no-multicast-peers
 stale-nonce=600
-user-quota=12
+user-quota=6
 total-quota=1200
 simple-log
 syslog
 # Only relay to the internet, never into this server or private networks.
-denied-peer-ip=0.0.0.0-0.255.255.255
+${HOST_DENIED_LINES}denied-peer-ip=0.0.0.0-0.255.255.255
 denied-peer-ip=10.0.0.0-10.255.255.255
 denied-peer-ip=100.64.0.0-100.127.255.255
 denied-peer-ip=127.0.0.0-127.255.255.255
 denied-peer-ip=169.254.0.0-169.254.255.255
 denied-peer-ip=172.16.0.0-172.31.255.255
 denied-peer-ip=192.0.0.0-192.0.0.255
+# RFC 5737 / documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32)
+denied-peer-ip=192.0.2.0-192.0.2.255
 denied-peer-ip=192.168.0.0-192.168.255.255
 denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=198.51.100.0-198.51.100.255
+denied-peer-ip=203.0.113.0-203.0.113.255
+denied-peer-ip=240.0.0.0-255.255.255.255
 denied-peer-ip=::
 denied-peer-ip=::1
 denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255
+denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff
+denied-peer-ip=2001:db8::-2001:db8:ffff:ffff:ffff:ffff:ffff:ffff
 denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 TURNCONF
@@ -265,18 +304,24 @@ fi
 # ------------------------------------------------------------------- pm2
 
 step "Writing $DIR/ecosystem.config.js"
-export SERES_PM2_NAME="$NAME" SERES_PM2_BIN="$BIN" SERES_PM2_CWD="$BACKEND"
-export SERES_PM2_PORT="$PORT" SERES_PM2_PUBLIC_DIR="$PUBLIC_DIR" SERES_PM2_DATA_DIR="$BACKEND"
-export SERES_PM2_PUBLIC_URL="$PUBLIC_URL" SERES_PM2_RP_ID="$RP_ID"
 IPV6_HOST=""
 if [[ $IPV6 -eq 1 ]] && node -e 'const net=require("net");const s=net.createServer();s.once("error",()=>process.exit(1));s.listen({host:"::1",port:0},()=>s.close());' 2>/dev/null; then
   IPV6_HOST="::1"
 fi
-export SERES_PM2_IPV6_HOST="$IPV6_HOST"
-export SERES_PM2_TURN_HOST="$TURN_HOST" SERES_PM2_TURN_PORT="$TURN_PORT"
-export SERES_PM2_TURN_SECRET="${TURN_SECRET:-}"
-export SERES_PM2_TURN_ENABLED="$TURN"
-export SERES_PM2_CONFIG="$DIR/ecosystem.config.js"
+SERES_PM2_NAME="$NAME" \
+SERES_PM2_BIN="$BIN" \
+SERES_PM2_CWD="$BACKEND" \
+SERES_PM2_PORT="$PORT" \
+SERES_PM2_PUBLIC_DIR="$PUBLIC_DIR" \
+SERES_PM2_DATA_DIR="$BACKEND" \
+SERES_PM2_PUBLIC_URL="$PUBLIC_URL" \
+SERES_PM2_RP_ID="$RP_ID" \
+SERES_PM2_IPV6_HOST="$IPV6_HOST" \
+SERES_PM2_TURN_HOST="$TURN_HOST" \
+SERES_PM2_TURN_PORT="$TURN_PORT" \
+SERES_PM2_TURN_SECRET="${TURN_SECRET:-}" \
+SERES_PM2_TURN_ENABLED="$TURN" \
+SERES_PM2_CONFIG="$DIR/ecosystem.config.js" \
 node <<'NODE'
 const fs = require('fs');
 const env = {
@@ -298,6 +343,7 @@ fs.writeFileSync(process.env.SERES_PM2_CONFIG,
   `// Written by deploy/install.sh. Start with: pm2 start ecosystem.config.js\nmodule.exports = ${JSON.stringify(config, null, 2)};\n`,
   { mode: 0o600 });
 NODE
+unset TURN_SECRET SERES_PM2_TURN_SECRET
 # It contains the TURN secret.
 chmod 600 "$DIR/ecosystem.config.js"
 
@@ -311,6 +357,8 @@ if [[ $STARTUP -eq 1 ]]; then
   $SUDO env PATH="$PATH" "$(command -v pm2)" startup systemd -u "$RUN_USER" --hp "$RUN_HOME" >/dev/null
   pm2 save >/dev/null
 fi
+[[ -d "$RUN_HOME/.pm2" ]] && chmod 700 "$RUN_HOME/.pm2"
+[[ -f "$RUN_HOME/.pm2/dump.pm2" ]] && chmod 600 "$RUN_HOME/.pm2/dump.pm2"
 
 step "Checking http://127.0.0.1:$PORT/"
 status=""
@@ -339,6 +387,9 @@ Update SereS later (pulls the newest version and restarts):
 
 SereS only listens on this server. Point your Cloudflare tunnel or
 reverse proxy (nginx, Caddy) to http://localhost:$PORT.
+If using nginx or Caddy without Cloudflare, clear CF-Connecting-IP before
+proxying (nginx: proxy_set_header CF-Connecting-IP ""; Caddy:
+header_up -CF-Connecting-IP) and configure SERES_CLIENT_IP_HEADER accordingly.
 EOF
 if [[ $TURN -eq 1 ]]; then
   cat <<EOF

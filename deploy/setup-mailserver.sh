@@ -41,35 +41,82 @@ die() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --domain) DOMAIN="${2:-}"; shift 2 ;;
-    --hostname) MAIL_HOSTNAME="${2:-}"; shift 2 ;;
-    --from) FROM="${2:-}"; shift 2 ;;
-    --public-url) PUBLIC_URL="${2:-}"; shift 2 ;;
-    --seres-env) SERES_ENV="${2:-}"; shift 2 ;;
-    --ip) SERVER_IP="${2:-}"; shift 2 ;;
-    --test-to) TEST_TO="${2:-}"; shift 2 ;;
+    --domain) [[ $# -ge 2 ]] || die "--domain requires a value"; DOMAIN="$2"; shift 2 ;;
+    --hostname) [[ $# -ge 2 ]] || die "--hostname requires a value"; MAIL_HOSTNAME="$2"; shift 2 ;;
+    --from) [[ $# -ge 2 ]] || die "--from requires a value"; FROM="$2"; shift 2 ;;
+    --public-url) [[ $# -ge 2 ]] || die "--public-url requires a value"; PUBLIC_URL="$2"; shift 2 ;;
+    --seres-env) [[ $# -ge 2 ]] || die "--seres-env requires a value"; SERES_ENV="$2"; shift 2 ;;
+    --ip) [[ $# -ge 2 ]] || die "--ip requires a value"; SERVER_IP="$2"; shift 2 ;;
+    --test-to) [[ $# -ge 2 ]] || die "--test-to requires a value"; TEST_TO="$2"; shift 2 ;;
     -h | --help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 1 ;;
   esac
 done
 
+has_ctrl() {
+  [[ "$1" == *$'\n'* || "$1" == *$'\r'* || "$1" =~ [[:cntrl:]] ]]
+}
+
+valid_domain() {
+  local d="$1"
+  ! has_ctrl "$d" && [[ ${#d} -le 253 && "$d" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
+}
+
+valid_email() {
+  local e="$1"
+  ! has_ctrl "$e" && [[ ${#e} -le 254 && "$e" =~ ^[A-Za-z0-9._%+-]+@([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
+}
+
+valid_ipv4() {
+  local ip="$1" o
+  ! has_ctrl "$ip" || return 1
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local IFS='.'
+  read -r -a octets <<<"$ip"
+  [[ ${#octets[@]} -eq 4 ]] || return 1
+  for o in "${octets[@]}"; do
+    [[ "$o" == "0" || ! "$o" =~ ^0 ]] || return 1
+    ((10#$o >= 0 && 10#$o <= 255)) || return 1
+  done
+}
+
+valid_public_url() {
+  local u="$1"
+  ! has_ctrl "$u" || return 1
+  [[ "$u" != *"@"* ]] || return 1
+  [[ "$u" =~ ^https://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}(:[0-9]{1,5})?(/[^\s\"\'\<\>\\]*)?$ ]]
+}
+
 # ---------------------------------------------------------------- checks
 
 [[ $EUID -eq 0 ]] || die "Please run as root (sudo $0 ...)."
 [[ -n "$DOMAIN" ]] || die "--domain is required, e.g. --domain example.com"
-[[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "'$DOMAIN' is not a valid domain."
+valid_domain "$DOMAIN" || die "'$DOMAIN' is not a valid domain."
 if ! grep -qi ubuntu /etc/os-release 2>/dev/null; then
   echo "Warning: this script was written for Ubuntu; continuing anyway." >&2
 fi
 
 MAIL_HOSTNAME="${MAIL_HOSTNAME:-mail.$DOMAIN}"
+valid_domain "$MAIL_HOSTNAME" || die "'$MAIL_HOSTNAME' is not a valid mail hostname."
 FROM="${FROM:-no-reply@$DOMAIN}"
+valid_email "$FROM" || die "'$FROM' is not a valid sender email address."
 [[ "$FROM" == *"@$DOMAIN" ]] || die "--from must be an address @$DOMAIN (DKIM signs only this domain)."
+if [[ -n "$PUBLIC_URL" ]]; then
+  valid_public_url "$PUBLIC_URL" || die "'$PUBLIC_URL' is not a valid https:// URL."
+fi
+if [[ -n "$TEST_TO" ]]; then
+  valid_email "$TEST_TO" || die "'$TEST_TO' is not a valid recipient email address."
+fi
+if [[ -n "$SERES_ENV" ]]; then
+  ! has_ctrl "$SERES_ENV" || die "Invalid --seres-env path."
+  [[ -d "$(dirname "$SERES_ENV")" ]] || die "Parent directory for --seres-env does not exist: $(dirname "$SERES_ENV")"
+fi
 
 if [[ -z "$SERVER_IP" ]]; then
   SERVER_IP="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
   [[ -n "$SERVER_IP" ]] || SERVER_IP="$(hostname -I | awk '{print $1}')"
 fi
+valid_ipv4 "$SERVER_IP" || die "'$SERVER_IP' is not a valid IPv4 address."
 
 echo "==> Domain:        $DOMAIN"
 echo "==> Mail hostname: $MAIL_HOSTNAME"
@@ -161,18 +208,79 @@ systemctl restart postfix
 
 # ------------------------------------------------------------ SereS .env
 
-set_env() {
-  local file="$1" key="$2" value="$3"
-  touch "$file"
-  # Replace an existing line or append a new one.
-  if grep -q "^$key=" "$file"; then
-    sed -i "s|^$key=.*|$key=$value|" "$file"
-  else
-    # Without this, the new line would be glued to a last line that has no
-    # line break (as in the .env of the repository).
-    [[ -s "$file" && -n "$(tail -c 1 "$file")" ]] && echo >>"$file"
-    printf '%s=%s\n' "$key" "$value" >>"$file"
+env_owner() {
+  local file="$1" dir owner uid
+  dir="$(dirname "$file")"
+  owner="$(stat -c '%u:%g' "$dir" 2>/dev/null || true)"
+  uid="${owner%%:*}"
+  if [[ -n "$owner" && "$uid" != "0" ]]; then
+    printf '%s\n' "$owner"
+    return 0
   fi
+  if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+    printf '%s:%s\n' "$(id -u "$SUDO_USER")" "$(id -g "$SUDO_USER")"
+    return 0
+  fi
+  if [[ -e "$file" ]]; then
+    stat -c '%u:%g' "$file" 2>/dev/null || true
+  fi
+}
+
+set_env() {
+  local file="$1" key="$2" value="$3" dir tmp="" owner
+  dir="$(dirname "$file")"
+  tmp="$(mktemp "$dir/.seres-env.XXXXXX")"
+  trap 'rm -f "$tmp"' RETURN
+  if [[ -f "$file" ]]; then
+    SERES_ENV_KEY="$key" SERES_ENV_VAL="$value" awk '
+      BEGIN {
+        k = ENVIRON["SERES_ENV_KEY"]
+        v = ENVIRON["SERES_ENV_VAL"]
+        prefix = k "="
+        plen = length(prefix)
+        found = 0
+      }
+      substr($0, 1, plen) == prefix {
+        if (!found) {
+          print k "=" v
+          found = 1
+        }
+        next
+      }
+      { print }
+      END {
+        if (!found) print k "=" v
+      }
+    ' "$file" >"$tmp"
+  else
+    printf '%s=%s\n' "$key" "$value" >"$tmp"
+  fi
+  owner="$(env_owner "$file")"
+  [[ -n "$owner" ]] && chown "$owner" "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$file"
+  trap - RETURN
+}
+
+remove_env() {
+  local file="$1" key="$2" dir tmp="" owner
+  [[ -f "$file" ]] || return 0
+  dir="$(dirname "$file")"
+  tmp="$(mktemp "$dir/.seres-env.XXXXXX")"
+  trap 'rm -f "$tmp"' RETURN
+  SERES_ENV_KEY="$key" awk '
+    BEGIN {
+      prefix = ENVIRON["SERES_ENV_KEY"] "="
+      plen = length(prefix)
+    }
+    substr($0, 1, plen) == prefix { next }
+    { print }
+  ' "$file" >"$tmp"
+  owner="$(env_owner "$file")"
+  [[ -n "$owner" ]] && chown "$owner" "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$file"
+  trap - RETURN
 }
 
 if [[ -n "$SERES_ENV" ]]; then
@@ -180,8 +288,12 @@ if [[ -n "$SERES_ENV" ]]; then
   set_env "$SERES_ENV" SMTP_HOST localhost
   set_env "$SERES_ENV" SMTP_PORT 25
   set_env "$SERES_ENV" SMTP_SECURITY none
+  remove_env "$SERES_ENV" SMTP_USER
+  remove_env "$SERES_ENV" SMTP_PASSWORD
   set_env "$SERES_ENV" MAIL_FROM "\"SereS <$FROM>\""
   [[ -n "$PUBLIC_URL" ]] && set_env "$SERES_ENV" PUBLIC_URL "$PUBLIC_URL"
+  owner="$(env_owner "$SERES_ENV")"
+  [[ -n "$owner" ]] && chown "$owner" "$SERES_ENV"
   chmod 600 "$SERES_ENV"
   echo "    Restart SereS so it reads the new settings."
 fi
@@ -191,7 +303,7 @@ fi
 if [[ -n "$TEST_TO" ]]; then
   echo "==> Sending a test mail to $TEST_TO"
   printf 'This is a test mail from the SereS mail server on %s.\n' "$MAIL_HOSTNAME" |
-    mail -s "SereS test mail" -r "$FROM" "$TEST_TO"
+    mail -s "SereS test mail" -r "$FROM" -- "$TEST_TO"
   echo "    Check the inbox (and spam folder). Logs: journalctl -u postfix -n 50"
 fi
 
