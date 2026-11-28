@@ -18,18 +18,23 @@ const MAX_GROUP_MEMBERS: usize = 50;
 const MAX_CIPHERTEXT_LEN: usize = 64 * 1024;
 const MAX_FILES_PER_MESSAGE: usize = 10;
 const MAX_FILE_BYTES: usize = 16 * 1024 * 1024 + 1024;
+const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
+const DEFAULT_UPLOAD_DAILY_MB: i64 = 2048;
 
 pub async fn scheduled_loop(pool: SqlitePool) {
     loop {
         if let Err(error) = deliver_due_messages(&pool).await {
             tracing::error!(%error, "scheduled message delivery failed");
         }
+        if let Err(error) = purge_expired(&pool).await {
+            tracing::error!(%error, "expired message purge failed");
+        }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }
 
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let json_routes = Router::new()
         .route("/api/chats", get(list_chats).post(create_chat))
         .route("/api/load_chats", get(list_chats))
         .route("/api/new_chat", post(new_chat_legacy))
@@ -84,13 +89,18 @@ pub fn router() -> Router<AppState> {
             "/api/chats/{chat_id}/scheduled/{message_id}",
             axum::routing::delete(cancel_scheduled),
         )
-        .route("/api/chats/{chat_id}/files", post(upload_file))
         .route("/api/chats/{chat_id}/files/{file_id}", get(download_file))
         .route(
             "/api/chats/{chat_id}/history/{user_id}",
             post(share_history),
         )
-        .layer(DefaultBodyLimit::max(MAX_FILE_BYTES + 64 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES));
+
+    let upload_routes = Router::new()
+        .route("/api/chats/{chat_id}/files", post(upload_file))
+        .layer(DefaultBodyLimit::max(MAX_FILE_BYTES + 64 * 1024));
+
+    json_routes.merge(upload_routes)
 }
 
 async fn list_chats(State(state): State<AppState>, headers: HeaderMap) -> axum::response::Response {
@@ -134,6 +144,12 @@ async fn create_chat(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
+    if state.rate_limited(format!("create_chat:{}", me.id), 20, 60) {
+        return error(
+            "You are creating chats too fast",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     if body.get("type").and_then(Value::as_str).unwrap_or("dm") == "dm" {
         let username = body
             .get("username")
@@ -153,6 +169,9 @@ async fn create_chat(
             Err(_) => return db_error(),
         };
         return open_dm(&state, &me.id, &other).await;
+    }
+    if !has_e2ee_keys(me.pub_ecdh.as_deref(), me.pub_sign.as_deref()) {
+        return error("Your account has no keys yet", StatusCode::BAD_REQUEST);
     }
     let name = body
         .get("name")
@@ -177,17 +196,24 @@ async fn create_chat(
             StatusCode::BAD_REQUEST,
         );
     }
+    if usernames.len() > MAX_GROUP_MEMBERS {
+        return error(
+            format!("A group needs 2-{MAX_GROUP_MEMBERS} members"),
+            StatusCode::BAD_REQUEST,
+        );
+    }
     let mut members = Vec::new();
     for item in usernames {
         let Some(username) = item.as_str() else {
             return error("A member name is invalid", StatusCode::BAD_REQUEST);
         };
-        let row = sqlx::query("SELECT id FROM users WHERE username=? COLLATE NOCASE")
-            .bind(username.trim())
-            .fetch_optional(&state.db)
-            .await;
-        let id = match row {
-            Ok(Some(r)) => r.try_get::<String, _>("id").unwrap_or_default(),
+        let row =
+            sqlx::query("SELECT id,pub_ecdh,pub_sign FROM users WHERE username=? COLLATE NOCASE")
+                .bind(username.trim())
+                .fetch_optional(&state.db)
+                .await;
+        let row = match row {
+            Ok(Some(r)) => r,
             _ => {
                 return error(
                     format!("{username} is not your friend"),
@@ -195,12 +221,21 @@ async fn create_chat(
                 );
             }
         };
+        let id: String = row.try_get("id").unwrap_or_default();
         if id == me.id {
             continue;
         }
         if !are_friends(&state.db, &me.id, &id).await.unwrap_or(false) {
             return error(
                 format!("{username} is not your friend"),
+                StatusCode::BAD_REQUEST,
+            );
+        }
+        let member_ecdh = row.try_get::<Option<String>, _>("pub_ecdh").ok().flatten();
+        let member_sign = row.try_get::<Option<String>, _>("pub_sign").ok().flatten();
+        if !has_e2ee_keys(member_ecdh.as_deref(), member_sign.as_deref()) {
+            return error(
+                format!("{username} has not set up encryption keys yet"),
                 StatusCode::BAD_REQUEST,
             );
         }
@@ -216,7 +251,7 @@ async fn create_chat(
     }
     let chat_id = Uuid::new_v4().to_string();
     let now = now();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -252,6 +287,12 @@ async fn new_chat_legacy(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
+    if state.rate_limited(format!("create_chat:{}", me.id), 20, 60) {
+        return error(
+            "You are creating chats too fast",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     let name = body
         .get("username")
         .or_else(|| body.get("friend_username"))
@@ -274,6 +315,26 @@ async fn new_chat_legacy(
     open_dm(&state, &me.id, &other).await
 }
 
+async fn reopen_dm_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    chat_id: &str,
+    me: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT OR IGNORE INTO chat_members(chat_id,user_id,role,joined_at,joined_seq,cleared_seq,last_read_seq) SELECT ?,?, 'member', ?, COALESCE(MAX(seq),0),0,COALESCE(MAX(seq),0) FROM messages WHERE chat_id=?")
+        .bind(chat_id)
+        .bind(me)
+        .bind(now())
+        .bind(chat_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("UPDATE chat_members SET hidden=0 WHERE chat_id=? AND user_id=?")
+        .bind(chat_id)
+        .bind(me)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 async fn open_dm(state: &AppState, me: &str, other: &str) -> axum::response::Response {
     if me == other {
         return error("Cannot create chat with yourself", StatusCode::BAD_REQUEST);
@@ -281,47 +342,80 @@ async fn open_dm(state: &AppState, me: &str, other: &str) -> axum::response::Res
     if is_blocked(&state.db, me, other).await.unwrap_or(true) {
         return error("Cannot create chat with this user", StatusCode::BAD_REQUEST);
     }
-    let (a, b) = pair(me, other);
-    let key = format!("{a}:{b}");
-    if let Some(row) = sqlx::query("SELECT id FROM chats WHERE dm_key=?")
-        .bind(&key)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-    {
-        let id: String = row.try_get("id").unwrap_or_default();
-        let mut tx = match state.db.begin().await {
-            Ok(v) => v,
-            Err(_) => return db_error(),
-        };
-        if sqlx::query("INSERT OR IGNORE INTO chat_members(chat_id,user_id,role,joined_at,joined_seq,cleared_seq,last_read_seq) SELECT ?,?, 'member', ?, COALESCE(MAX(seq),0),0,COALESCE(MAX(seq),0) FROM messages WHERE chat_id=?").bind(&id).bind(me).bind(now()).bind(&id).execute(&mut *tx).await.is_err()||sqlx::query("UPDATE chat_members SET hidden=0 WHERE chat_id=? AND user_id=?").bind(&id).bind(me).execute(&mut *tx).await.is_err()||tx.commit().await.is_err(){return db_error()}
-        return json_ok(json!({"chat_id":id,"message":"Chat already exists","existing":true}))
-            .into_response();
-    }
     if !are_friends(&state.db, me, other).await.unwrap_or(false) {
         return error(
             "Cannot create chat with a user who is not your friend",
             StatusCode::BAD_REQUEST,
         );
     }
-    let id = Uuid::new_v4().to_string();
-    let now = now();
-    let mut tx = match state.db.begin().await {
+    let (a, b) = pair(me, other);
+    let key = format!("{a}:{b}");
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
-    if sqlx::query(
+    if is_blocked(&mut *tx, me, other).await.unwrap_or(true) {
+        return error("Cannot create chat with this user", StatusCode::BAD_REQUEST);
+    }
+    if !are_friends(&mut *tx, me, other).await.unwrap_or(false) {
+        return error(
+            "Cannot create chat with a user who is not your friend",
+            StatusCode::BAD_REQUEST,
+        );
+    }
+    if let Some(row) = sqlx::query("SELECT id FROM chats WHERE dm_key=?")
+        .bind(&key)
+        .fetch_optional(&mut *tx)
+        .await
+        .ok()
+        .flatten()
+    {
+        let id: String = row.try_get("id").unwrap_or_default();
+        if reopen_dm_tx(&mut tx, &id, me).await.is_err() || tx.commit().await.is_err() {
+            return db_error();
+        }
+        return json_ok(json!({"chat_id":id,"message":"Chat already exists","existing":true}))
+            .into_response();
+    }
+    let id = Uuid::new_v4().to_string();
+    let now = now();
+    match sqlx::query(
         "INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES(?,'dm',?,?,?)",
     )
     .bind(&id)
-    .bind(key)
+    .bind(&key)
     .bind(&now)
     .bind(&now)
     .execute(&mut *tx)
     .await
-    .is_err()
-        || insert_member(&mut tx, &id, me, "member").await.is_err()
+    {
+        Ok(_) => {}
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+            let _ = tx.rollback().await;
+            let mut tx2 = match begin_write(&state.db).await {
+                Ok(v) => v,
+                Err(_) => return db_error(),
+            };
+            let existing =
+                match sqlx::query_scalar::<_, String>("SELECT id FROM chats WHERE dm_key=?")
+                    .bind(&key)
+                    .fetch_optional(&mut *tx2)
+                    .await
+                {
+                    Ok(Some(v)) => v,
+                    _ => return db_error(),
+                };
+            if reopen_dm_tx(&mut tx2, &existing, me).await.is_err() || tx2.commit().await.is_err() {
+                return db_error();
+            }
+            return json_ok(
+                json!({"chat_id":existing,"message":"Chat already exists","existing":true}),
+            )
+            .into_response();
+        }
+        Err(_) => return db_error(),
+    }
+    if insert_member(&mut tx, &id, me, "member").await.is_err()
         || insert_member(&mut tx, &id, other, "member").await.is_err()
         || tx.commit().await.is_err()
     {
@@ -552,14 +646,17 @@ async fn post_message(
     let Some(payload) = body.get("payload") else {
         return error("Unsupported message format", StatusCode::BAD_REQUEST);
     };
-    if let Some(problem) = validate_envelope(payload, &members) {
-        let status = if problem.contains("members") {
-            StatusCode::CONFLICT
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        return error(problem, status);
-    }
+    let clean_payload = match validate_and_clean_envelope(payload, &members) {
+        Ok(v) => v,
+        Err(problem) => {
+            let status = if problem.contains("members") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return error(problem, status);
+        }
+    };
     let silent = body.get("silent").and_then(Value::as_bool) == Some(true);
     let files = body.get("files").cloned().unwrap_or(json!([]));
     let Some(files) = files.as_array() else {
@@ -579,7 +676,7 @@ async fn post_message(
             .to_string()
     });
     let now = now();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -593,7 +690,7 @@ async fn post_message(
         Ok(v) => v,
         Err(_) => return db_error(),
     };
-    let result=sqlx::query("INSERT INTO messages(id,chat_id,sender_id,kind,payload,created_at,rev,silent,expires_at) VALUES(?,?,?,'e2e',?,?,?,?,?)").bind(id).bind(&chat_id).bind(&me.id).bind(payload.to_string()).bind(&now).bind(rev).bind(i64::from(silent)).bind(expires_at).execute(&mut *tx).await;
+    let result=sqlx::query("INSERT INTO messages(id,chat_id,sender_id,kind,payload,created_at,rev,silent,expires_at) VALUES(?,?,?,'e2e',?,?,?,?,?)").bind(id).bind(&chat_id).bind(&me.id).bind(clean_payload.to_string()).bind(&now).bind(rev).bind(i64::from(silent)).bind(expires_at).execute(&mut *tx).await;
     let result = match result {
         Ok(v) => v,
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
@@ -655,7 +752,7 @@ async fn delete_message(
     {
         return error("Chat not found", StatusCode::NOT_FOUND);
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -720,16 +817,19 @@ async fn edit_message(
     let Some(payload) = body.get("payload") else {
         return error("Unsupported message format", StatusCode::BAD_REQUEST);
     };
-    if let Some(problem) = validate_envelope(payload, &members) {
-        let status = if problem.contains("members") {
-            StatusCode::CONFLICT
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        return error(problem, status);
+    let clean_payload = match validate_and_clean_envelope(payload, &members) {
+        Ok(v) => v,
+        Err(problem) => {
+            let status = if problem.contains("members") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return error(problem, status);
+        }
     };
     let now = now();
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -737,11 +837,31 @@ async fn edit_message(
         Ok(v) => v,
         Err(_) => return db_error(),
     };
-    let result=sqlx::query("UPDATE messages SET payload=?,edited_at=?,rev=? WHERE id=? AND chat_id=? AND sender_id=? AND kind='e2e' AND deleted=0").bind(payload.to_string()).bind(now).bind(rev).bind(message_id).bind(&chat_id).bind(&me.id).execute(&mut *tx).await;
+    let result = sqlx::query(
+        "UPDATE messages SET payload=?,edited_at=?,rev=? WHERE id=? AND chat_id=? AND sender_id=? AND kind='e2e' AND deleted=0 AND (expires_at IS NULL OR expires_at>?)",
+    )
+    .bind(clean_payload.to_string())
+    .bind(&now)
+    .bind(rev)
+    .bind(&message_id)
+    .bind(&chat_id)
+    .bind(&me.id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await;
     let rows = match result {
         Ok(v) => v.rows_affected(),
         Err(_) => return db_error(),
     };
+    if rows > 0
+        && sqlx::query("DELETE FROM message_key_shares WHERE message_id=?")
+            .bind(&message_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+    {
+        return db_error();
+    }
     if tx.commit().await.is_err() {
         return db_error();
     }
@@ -831,7 +951,7 @@ async fn add_member_route(
         return error("Missing or invalid 'username'", StatusCode::BAD_REQUEST);
     };
     let other = match sqlx::query(
-        "SELECT id,username,display_name FROM users WHERE username=? COLLATE NOCASE",
+        "SELECT id,username,display_name,pub_ecdh,pub_sign FROM users WHERE username=? COLLATE NOCASE",
     )
     .bind(name.trim())
     .fetch_optional(&state.db)
@@ -842,13 +962,63 @@ async fn add_member_route(
         Err(_) => return db_error(),
     };
     let other_id: String = other.try_get("id").unwrap_or_default();
+    let other_ecdh = other
+        .try_get::<Option<String>, _>("pub_ecdh")
+        .ok()
+        .flatten();
+    let other_sign = other
+        .try_get::<Option<String>, _>("pub_sign")
+        .ok()
+        .flatten();
+    if !has_e2ee_keys(other_ecdh.as_deref(), other_sign.as_deref()) {
+        return error(
+            "User has not set up encryption keys yet",
+            StatusCode::BAD_REQUEST,
+        );
+    }
     if !are_friends(&state.db, &me.id, &other_id)
         .await
         .unwrap_or(false)
     {
         return error("You can only add your friends", StatusCode::BAD_REQUEST);
     }
-    if membership(&state.db, &chat_id, &other_id)
+    let mut tx = match begin_write(&state.db).await {
+        Ok(v) => v,
+        Err(_) => return db_error(),
+    };
+    let chat = match membership(&mut *tx, &chat_id, &me.id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
+        Err(_) => return db_error(),
+    };
+    let is_owner = chat.try_get::<String, _>("role").ok().as_deref() == Some("owner");
+    let banned = sqlx::query("SELECT 1 FROM group_bans WHERE chat_id=? AND user_id=?")
+        .bind(&chat_id)
+        .bind(&other_id)
+        .fetch_optional(&mut *tx)
+        .await;
+    match banned {
+        Ok(Some(_)) if !is_owner => {
+            return error(
+                "Only the group owner can re-add a removed member",
+                StatusCode::FORBIDDEN,
+            );
+        }
+        Ok(Some(_)) => {
+            if sqlx::query("DELETE FROM group_bans WHERE chat_id=? AND user_id=?")
+                .bind(&chat_id)
+                .bind(&other_id)
+                .execute(&mut *tx)
+                .await
+                .is_err()
+            {
+                return db_error();
+            }
+        }
+        Ok(None) => {}
+        Err(_) => return db_error(),
+    }
+    if membership(&mut *tx, &chat_id, &other_id)
         .await
         .ok()
         .flatten()
@@ -856,18 +1026,27 @@ async fn add_member_route(
     {
         return error("Already in the group", StatusCode::BAD_REQUEST);
     }
-    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chat_members WHERE chat_id=?")
-        .bind(&chat_id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
-    if count >= MAX_GROUP_MEMBERS as i64 {
-        return error("The group is full", StatusCode::BAD_REQUEST);
+    let owner_id: Option<String> = chat.try_get("owner_id").ok().flatten();
+    if let Some(oid) = owner_id.as_deref()
+        && is_blocked(&mut *tx, oid, &other_id).await.unwrap_or(true)
+    {
+        return error("Cannot add this user to the group", StatusCode::FORBIDDEN);
     }
-    let mut tx = match state.db.begin().await {
+    let current_members = match member_ids(&mut *tx, &chat_id).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
+    if current_members.len() >= MAX_GROUP_MEMBERS {
+        return error("The group is full", StatusCode::BAD_REQUEST);
+    }
+    for member_id in &current_members {
+        if is_blocked(&mut *tx, member_id, &other_id)
+            .await
+            .unwrap_or(true)
+        {
+            return error("Cannot add this user to the group", StatusCode::FORBIDDEN);
+        }
+    }
     if insert_member(&mut tx, &chat_id, &other_id, "member")
         .await
         .is_err()
@@ -913,7 +1092,19 @@ async fn remove_member_route(
     if other.0 == me.id {
         return error("Use 'leave group' instead", StatusCode::BAD_REQUEST);
     }
-    if membership(&state.db, &chat_id, &other.0)
+    let mut tx = match begin_write(&state.db).await {
+        Ok(v) => v,
+        Err(_) => return db_error(),
+    };
+    let chat = match membership(&mut *tx, &chat_id, &me.id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
+        Err(_) => return db_error(),
+    };
+    if chat.try_get::<String, _>("role").ok().as_deref() != Some("owner") {
+        return error("Only the group owner can do that", StatusCode::FORBIDDEN);
+    }
+    if membership(&mut *tx, &chat_id, &other.0)
         .await
         .ok()
         .flatten()
@@ -921,16 +1112,19 @@ async fn remove_member_route(
     {
         return error("Not a member", StatusCode::BAD_REQUEST);
     }
-    let mut tx = match state.db.begin().await {
-        Ok(v) => v,
-        Err(_) => return db_error(),
-    };
     if sqlx::query("DELETE FROM chat_members WHERE chat_id=? AND user_id=?")
         .bind(&chat_id)
         .bind(&other.0)
         .execute(&mut *tx)
         .await
         .is_err()
+        || sqlx::query("INSERT OR REPLACE INTO group_bans(chat_id,user_id,banned_at) VALUES(?,?,?)")
+            .bind(&chat_id)
+            .bind(&other.0)
+            .bind(now())
+            .execute(&mut *tx)
+            .await
+            .is_err()
         || system_message(
             &mut tx,
             &chat_id,
@@ -981,7 +1175,7 @@ async fn rename_group(
             StatusCode::BAD_REQUEST,
         );
     };
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1017,13 +1211,13 @@ async fn delete_chat(
     delete_chat_for(&state, &me, &chat_id).await
 }
 async fn delete_chat_for(state: &AppState, me: &User, chat_id: &str) -> axum::response::Response {
-    let chat = match membership(&state.db, chat_id, &me.id).await {
-        Ok(Some(v)) => v,
-        Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
+    let mut tx = match begin_write(&state.db).await {
+        Ok(v) => v,
         Err(_) => return db_error(),
     };
-    let mut tx = match state.db.begin().await {
-        Ok(v) => v,
+    let chat = match membership(&mut *tx, chat_id, &me.id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
         Err(_) => return db_error(),
     };
     let is_group = chat.try_get::<String, _>("type").ok().as_deref() == Some("group");
@@ -1040,17 +1234,63 @@ async fn delete_chat_for(state: &AppState, me: &User, chat_id: &str) -> axum::re
         {
             return db_error();
         }
-        let remaining=sqlx::query("SELECT user_id FROM chat_members WHERE chat_id=? ORDER BY joined_at, user_id COLLATE NOCASE").bind(chat_id).fetch_all(&mut *tx).await;
+        let remaining = sqlx::query(
+            "SELECT user_id FROM chat_members WHERE chat_id=? ORDER BY CASE WHEN role='owner' THEN 0 ELSE 1 END, joined_at, user_id COLLATE NOCASE",
+        )
+        .bind(chat_id)
+        .fetch_all(&mut *tx)
+        .await;
         let remaining = match remaining {
             Ok(v) => v,
             Err(_) => return db_error(),
         };
         if remaining.is_empty() {
-            if sqlx::query("DELETE FROM group_avatars WHERE chat_id=?")
+            if sqlx::query(
+                "DELETE FROM message_key_shares WHERE message_id IN (SELECT id FROM messages WHERE chat_id=?)",
+            )
+            .bind(chat_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+                || sqlx::query("DELETE FROM receipts WHERE chat_id=?")
+                    .bind(chat_id)
+                    .execute(&mut *tx)
+                    .await
+                    .is_err()
+                || sqlx::query("DELETE FROM scheduled_messages WHERE chat_id=?")
+                    .bind(chat_id)
+                    .execute(&mut *tx)
+                    .await
+                    .is_err()
+                || sqlx::query("DELETE FROM group_bans WHERE chat_id=?")
+                    .bind(chat_id)
+                    .execute(&mut *tx)
+                    .await
+                    .is_err()
+                || sqlx::query(
+                    "DELETE FROM call_signals WHERE call_id IN (SELECT id FROM calls WHERE chat_id=?)",
+                )
                 .bind(chat_id)
                 .execute(&mut *tx)
                 .await
                 .is_err()
+                || sqlx::query(
+                    "DELETE FROM call_participants WHERE call_id IN (SELECT id FROM calls WHERE chat_id=?)",
+                )
+                .bind(chat_id)
+                .execute(&mut *tx)
+                .await
+                .is_err()
+                || sqlx::query("DELETE FROM calls WHERE chat_id=?")
+                    .bind(chat_id)
+                    .execute(&mut *tx)
+                    .await
+                    .is_err()
+                || sqlx::query("DELETE FROM group_avatars WHERE chat_id=?")
+                    .bind(chat_id)
+                    .execute(&mut *tx)
+                    .await
+                    .is_err()
                 || sqlx::query(
                     "DELETE FROM file_blobs WHERE id IN (SELECT id FROM files WHERE chat_id=?)",
                 )
@@ -1082,13 +1322,14 @@ async fn delete_chat_for(state: &AppState, me: &User, chat_id: &str) -> axum::re
                 return db_error();
             }
         } else {
-            if chat
+            let was_owner = chat
                 .try_get::<Option<String>, _>("owner_id")
                 .ok()
                 .flatten()
                 .as_deref()
                 == Some(&me.id)
-            {
+                || chat.try_get::<String, _>("role").ok().as_deref() == Some("owner");
+            if was_owner {
                 let new_owner: String = remaining[0].try_get("user_id").unwrap_or_default();
                 if sqlx::query("UPDATE chats SET owner_id=? WHERE id=?")
                     .bind(&new_owner)
@@ -1135,6 +1376,9 @@ async fn delete_chat_for(state: &AppState, me: &User, chat_id: &str) -> axum::re
         {
             return db_error();
         }
+        if reclaim_mutually_cleared_dm(&mut tx, chat_id).await.is_err() {
+            return db_error();
+        }
     }
     if tx.commit().await.is_err() {
         return db_error();
@@ -1173,7 +1417,15 @@ async fn single_message(
         Err(_) => return db_error(),
     };
     let floor = number(&chat, "joined_seq").max(number(&chat, "cleared_seq"));
-    let row=sqlx::query("SELECT m.*,u.username sender,u.display_name sender_display FROM messages m LEFT JOIN users u ON u.id=m.sender_id WHERE m.id=? AND m.chat_id=? AND m.seq>?").bind(&message_id).bind(&chat_id).bind(floor).fetch_optional(&state.db).await;
+    let row = sqlx::query(
+        "SELECT m.*,u.username sender,u.display_name sender_display FROM messages m LEFT JOIN users u ON u.id=m.sender_id WHERE m.id=? AND m.chat_id=? AND m.seq>? AND (m.expires_at IS NULL OR m.expires_at>?)",
+    )
+    .bind(&message_id)
+    .bind(&chat_id)
+    .bind(floor)
+    .bind(now())
+    .fetch_optional(&state.db)
+    .await;
     let row = match row {
         Ok(Some(v)) => v,
         Ok(None) => return error("Message not found", StatusCode::NOT_FOUND),
@@ -1201,7 +1453,20 @@ async fn message_info(
         Err(_) => return db_error(),
     };
     let floor = number(&chat, "joined_seq").max(number(&chat, "cleared_seq"));
-    let message=match sqlx::query("SELECT seq,created_at,sender_id FROM messages WHERE id=? AND chat_id=? AND deleted=0 AND seq>?").bind(&message_id).bind(&chat_id).bind(floor).fetch_optional(&state.db).await{Ok(Some(v))=>v,Ok(None)=>return error("Message not found",StatusCode::NOT_FOUND),Err(_)=>return db_error()};
+    let message = match sqlx::query(
+        "SELECT seq,created_at,sender_id FROM messages WHERE id=? AND chat_id=? AND deleted=0 AND seq>? AND (expires_at IS NULL OR expires_at>?)",
+    )
+    .bind(&message_id)
+    .bind(&chat_id)
+    .bind(floor)
+    .bind(now())
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => return error("Message not found", StatusCode::NOT_FOUND),
+        Err(_) => return db_error(),
+    };
     let seq = number(&message, "seq");
     let sender: Option<String> = message.try_get("sender_id").ok().flatten();
     let rows=match sqlx::query("SELECT u.id,u.username,u.display_name,m.delivered_seq,m.last_read_seq,m.joined_seq FROM chat_members m JOIN users u ON u.id=m.user_id WHERE m.chat_id=?").bind(&chat_id).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return db_error()};
@@ -1275,13 +1540,21 @@ async fn pin_message(
     };
     let pinned = body.get("pinned").and_then(Value::as_bool) != Some(false);
     let floor = number(&chat, "joined_seq").max(number(&chat, "cleared_seq"));
-    let valid=sqlx::query("SELECT 1 FROM messages WHERE id=? AND chat_id=? AND deleted=0 AND silent=0 AND kind!='system' AND seq>?").bind(message_id).bind(&chat_id).bind(floor).fetch_optional(&state.db).await;
+    let valid = sqlx::query(
+        "SELECT 1 FROM messages WHERE id=? AND chat_id=? AND deleted=0 AND silent=0 AND kind!='system' AND seq>? AND (expires_at IS NULL OR expires_at>?)",
+    )
+    .bind(message_id)
+    .bind(&chat_id)
+    .bind(floor)
+    .bind(now())
+    .fetch_optional(&state.db)
+    .await;
     match valid {
         Ok(Some(_)) => {}
         Ok(None) => return error("Message not found", StatusCode::NOT_FOUND),
         Err(_) => return db_error(),
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1343,7 +1616,7 @@ async fn chat_prefs(
     {
         return error("Chat not found", StatusCode::NOT_FOUND);
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1399,7 +1672,7 @@ async fn set_disappearing(
     if seconds == number(&chat, "disappear_seconds") {
         return json_ok(json!({"disappear_seconds":seconds})).into_response();
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
@@ -1503,13 +1776,34 @@ async fn schedule_message(
             StatusCode::BAD_REQUEST,
         );
     }
-    let members = match member_ids(&state.db, &chat_id).await {
+    let Some(payload) = body.get("payload") else {
+        return error("Unsupported message format", StatusCode::BAD_REQUEST);
+    };
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
+    let member_rows = match sqlx::query(
+        "SELECT m.user_id,u.pub_ecdh FROM chat_members m JOIN users u ON u.id=m.user_id WHERE m.chat_id=? ORDER BY m.user_id",
+    )
+    .bind(&chat_id)
+    .fetch_all(&mut *tx)
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => return db_error(),
+    };
+    let mut members = Vec::with_capacity(member_rows.len());
+    let mut member_keys = std::collections::BTreeMap::new();
+    for row in &member_rows {
+        let uid: String = row.try_get("user_id").unwrap_or_default();
+        let ecdh: Option<String> = row.try_get("pub_ecdh").ok().flatten();
+        member_keys.insert(uid.clone(), ecdh);
+        members.push(uid);
+    }
     if chat.try_get::<String, _>("type").ok().as_deref() == Some("dm") {
         for member in &members {
-            if member != &me.id && is_blocked(&state.db, &me.id, member).await.unwrap_or(true) {
+            if member != &me.id && is_blocked(&mut *tx, &me.id, member).await.unwrap_or(true) {
                 return error(
                     "You can't send messages to this chat",
                     StatusCode::FORBIDDEN,
@@ -1517,21 +1811,21 @@ async fn schedule_message(
             }
         }
     }
-    let Some(payload) = body.get("payload") else {
-        return error("Unsupported message format", StatusCode::BAD_REQUEST);
+    let clean_payload = match validate_and_clean_envelope(payload, &members) {
+        Ok(v) => v,
+        Err(problem) => {
+            let status = if problem.contains("members") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return error(problem, status);
+        }
     };
-    if let Some(problem) = validate_envelope(payload, &members) {
-        let status = if problem.contains("members") {
-            StatusCode::CONFLICT
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        return error(problem, status);
-    }
     let count =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM scheduled_messages WHERE sender_id=?")
             .bind(&me.id)
-            .fetch_one(&state.db)
+            .fetch_one(&mut *tx)
             .await
             .unwrap_or(0);
     if count >= 100 {
@@ -1542,7 +1836,7 @@ async fn schedule_message(
     )
     .bind(id)
     .bind(id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     {
         Ok(Some(_)) => return error("Duplicate message id", StatusCode::CONFLICT),
@@ -1553,12 +1847,33 @@ async fn schedule_message(
         Ok(v) => v,
         Err(_) => return db_error(),
     };
-    match sqlx::query("INSERT INTO scheduled_messages(id,chat_id,sender_id,payload,member_ids,sender_sign_key,send_at,created_at) VALUES(?,?,?,?,?,?,?,?)")
-        .bind(id).bind(&chat_id).bind(&me.id).bind(payload.to_string()).bind(member_ids).bind(me.pub_sign.unwrap_or_default())
-        .bind(send_at.format("%Y-%m-%dT%H:%M:%SZ").to_string()).bind(now()).execute(&state.db).await {
-        Ok(_) => json_ok(json!({"message":"Message scheduled","id":id})).into_response(),
-        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => error("Duplicate message id", StatusCode::CONFLICT),
-        Err(_) => db_error()
+    let member_keys_json = match serde_json::to_string(&member_keys) {
+        Ok(v) => v,
+        Err(_) => return db_error(),
+    };
+    match sqlx::query("INSERT INTO scheduled_messages(id,chat_id,sender_id,payload,member_ids,sender_sign_key,member_keys,send_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
+        .bind(id)
+        .bind(&chat_id)
+        .bind(&me.id)
+        .bind(clean_payload.to_string())
+        .bind(member_ids)
+        .bind(me.pub_sign.unwrap_or_default())
+        .bind(member_keys_json)
+        .bind(send_at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .bind(now())
+        .execute(&mut *tx)
+        .await
+    {
+        Ok(_) => {
+            if tx.commit().await.is_err() {
+                return db_error();
+            }
+            json_ok(json!({"message":"Message scheduled","id":id})).into_response()
+        }
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+            error("Duplicate message id", StatusCode::CONFLICT)
+        }
+        Err(_) => db_error(),
     }
 }
 
@@ -1629,11 +1944,15 @@ async fn upload_file(
     if body.len() > MAX_FILE_BYTES {
         return error("Files can be at most 16 MB", StatusCode::PAYLOAD_TOO_LARGE);
     }
+    let mut tx = match begin_write(&state.db).await {
+        Ok(v) => v,
+        Err(_) => return db_error(),
+    };
     let pending = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM files WHERE uploader_id=? AND message_id IS NULL",
     )
     .bind(&me.id)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap_or(0);
     if pending >= 30 {
@@ -1642,12 +1961,46 @@ async fn upload_file(
             StatusCode::TOO_MANY_REQUESTS,
         );
     }
+    let daily_limit = upload_daily_limit_bytes();
+    let day_cutoff = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let uploaded_today = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(SUM(size),0) FROM files WHERE uploader_id=? AND created_at>?",
+    )
+    .bind(&me.id)
+    .bind(&day_cutoff)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap_or(0);
+    if uploaded_today.saturating_add(body.len() as i64) > daily_limit {
+        return error(
+            "Daily upload quota exceeded, please try again later",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     let id = Uuid::new_v4().simple().to_string();
-    let mut tx = match state.db.begin().await {
-        Ok(v) => v,
-        Err(_) => return db_error(),
-    };
-    if sqlx::query("INSERT INTO file_blobs(id,data) VALUES(?,?)").bind(&id).bind(body.as_ref()).execute(&mut *tx).await.is_err()||sqlx::query("INSERT INTO files(id,chat_id,uploader_id,message_id,size,created_at) VALUES(?,?,?,NULL,?,?)").bind(&id).bind(&chat_id).bind(&me.id).bind(body.len() as i64).bind(now()).execute(&mut *tx).await.is_err()||tx.commit().await.is_err(){return db_error()}
+    if sqlx::query("INSERT INTO file_blobs(id,data) VALUES(?,?)")
+        .bind(&id)
+        .bind(body.as_ref())
+        .execute(&mut *tx)
+        .await
+        .is_err()
+        || sqlx::query(
+            "INSERT INTO files(id,chat_id,uploader_id,message_id,size,created_at) VALUES(?,?,?,NULL,?,?)",
+        )
+        .bind(&id)
+        .bind(&chat_id)
+        .bind(&me.id)
+        .bind(body.len() as i64)
+        .bind(now())
+        .execute(&mut *tx)
+        .await
+        .is_err()
+        || tx.commit().await.is_err()
+    {
+        return db_error();
+    }
     json_ok(json!({"file_id":id})).into_response()
 }
 async fn download_file(
@@ -1665,13 +2018,22 @@ async fn download_file(
         Err(_) => return db_error(),
     };
     let floor = number(&chat, "joined_seq").max(number(&chat, "cleared_seq"));
-    let row=sqlx::query("SELECT f.uploader_id,f.message_id,m.seq,b.data FROM files f LEFT JOIN messages m ON m.id=f.message_id LEFT JOIN file_blobs b ON b.id=f.id WHERE f.id=? AND f.chat_id=?").bind(file_id).bind(&chat_id).fetch_optional(&state.db).await;
+    let now_ts = now();
+    let row = sqlx::query(
+        "SELECT f.uploader_id,f.message_id,m.seq,m.deleted,m.expires_at,b.data FROM files f LEFT JOIN messages m ON m.id=f.message_id LEFT JOIN file_blobs b ON b.id=f.id WHERE f.id=? AND f.chat_id=? AND (f.message_id IS NULL OR (m.deleted=0 AND (m.expires_at IS NULL OR m.expires_at>?)))",
+    )
+    .bind(file_id)
+    .bind(&chat_id)
+    .bind(&now_ts)
+    .fetch_optional(&state.db)
+    .await;
     let row = match row {
         Ok(Some(v)) => v,
         Ok(None) => return error("File not found", StatusCode::NOT_FOUND),
         Err(_) => return db_error(),
     };
     let message_id: Option<String> = row.try_get("message_id").ok().flatten();
+    let expires_at: Option<String> = row.try_get("expires_at").ok().flatten();
     let visible = if message_id.is_none() {
         row.try_get::<String, _>("uploader_id").ok().as_deref() == Some(me.id.as_str())
     } else {
@@ -1679,6 +2041,8 @@ async fn download_file(
             .ok()
             .flatten()
             .is_some_and(|seq| seq > floor)
+            && row.try_get::<Option<i64>, _>("deleted").ok().flatten() == Some(0)
+            && expires_at.as_deref().is_none_or(|e| e > now_ts.as_str())
     };
     if !visible {
         return error("File not found", StatusCode::NOT_FOUND);
@@ -1691,9 +2055,14 @@ async fn download_file(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/octet-stream"),
     );
+    let cache_control = if expires_at.is_some() {
+        "no-store"
+    } else {
+        "private, max-age=604800, immutable"
+    };
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("private, max-age=604800, immutable"),
+        axum::http::HeaderValue::from_static(cache_control),
     );
     response
 }
@@ -1708,6 +2077,15 @@ async fn share_history(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
+    let Some(pub_ecdh) = me
+        .pub_ecdh
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+    else {
+        return error("Your account has no keys yet", StatusCode::BAD_REQUEST);
+    };
     let chat = match membership(&state.db, &chat_id, &me.id).await {
         Ok(Some(v)) => v,
         Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
@@ -1719,14 +2097,15 @@ async fn share_history(
             StatusCode::BAD_REQUEST,
         );
     }
-    let target = match membership(&state.db, &chat_id, &target_id).await {
-        Ok(Some(v)) => v,
-        Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
-        Err(_) => return db_error(),
-    };
-    let reset = number(&target, "reset_seq");
-    if reset == 0 {
-        return error("There is nothing to share", StatusCode::CONFLICT);
+    if chat.try_get::<String, _>("type").ok().as_deref() == Some("dm")
+        && is_blocked(&state.db, &me.id, &target_id)
+            .await
+            .unwrap_or(true)
+    {
+        return error(
+            "You can't share history in this chat",
+            StatusCode::FORBIDDEN,
+        );
     }
     let empty = serde_json::Map::new();
     let keys = match body.get("keys") {
@@ -1749,27 +2128,50 @@ async fn share_history(
             return error("Invalid keys", StatusCode::BAD_REQUEST);
         }
     }
-    let lowest = number(&target, "joined_seq")
-        .max(number(&target, "reset_cleared_seq"))
-        .max(number(&chat, "joined_seq"))
-        .max(number(&chat, "cleared_seq"));
-    let my_pub = me.id.as_str();
-    let pub_ecdh =
-        match sqlx::query_scalar::<_, Option<String>>("SELECT pub_ecdh FROM users WHERE id=?")
-            .bind(my_pub)
-            .fetch_optional(&state.db)
-            .await
-        {
-            Ok(Some(v)) => v.unwrap_or_default(),
-            _ => return db_error(),
-        };
-    let mut stored = 0i64;
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_write(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
+    let chat = match membership(&mut *tx, &chat_id, &me.id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
+        Err(_) => return db_error(),
+    };
+    if chat.try_get::<String, _>("type").ok().as_deref() == Some("dm")
+        && is_blocked(&mut *tx, &me.id, &target_id)
+            .await
+            .unwrap_or(true)
+    {
+        return error(
+            "You can't share history in this chat",
+            StatusCode::FORBIDDEN,
+        );
+    }
+    let target = match membership(&mut *tx, &chat_id, &target_id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
+        Err(_) => return db_error(),
+    };
+    let reset = number(&target, "reset_seq");
+    if reset == 0 {
+        return error("There is nothing to share", StatusCode::CONFLICT);
+    }
+    let target_floor = number(&target, "joined_seq").max(number(&target, "reset_cleared_seq"));
+    let sharer_floor = number(&chat, "joined_seq").max(number(&chat, "cleared_seq"));
+    let lowest = target_floor.max(sharer_floor);
+    let now_ts = now();
+    let mut stored = 0i64;
     for (id, wrapped) in keys {
-        let eligible=sqlx::query("SELECT 1 FROM messages WHERE chat_id=? AND id=? AND kind='e2e' AND deleted=0 AND seq>? AND seq<=?").bind(&chat_id).bind(id).bind(lowest).bind(reset).fetch_optional(&mut *tx).await;
+        let eligible = sqlx::query(
+            "SELECT 1 FROM messages WHERE chat_id=? AND id=? AND kind='e2e' AND deleted=0 AND seq>? AND seq<=? AND (expires_at IS NULL OR expires_at>?)",
+        )
+        .bind(&chat_id)
+        .bind(id)
+        .bind(lowest)
+        .bind(reset)
+        .bind(&now_ts)
+        .fetch_optional(&mut *tx)
+        .await;
         match eligible {
             Ok(Some(_)) => {}
             Ok(None) => continue,
@@ -1780,20 +2182,106 @@ async fn share_history(
             .and_then(Value::as_str)
             .unwrap_or_default();
         let k = wrapped.get("k").and_then(Value::as_str).unwrap_or_default();
-        match sqlx::query("INSERT OR IGNORE INTO message_key_shares(message_id,recipient_id,sharer_id,sharer_pub_ecdh,iv,k,created_at) VALUES(?,?,?,?,?,?,?)").bind(id).bind(&target_id).bind(&me.id).bind(&pub_ecdh).bind(iv).bind(k).bind(now()).execute(&mut *tx).await{Ok(v)=>stored+=v.rows_affected() as i64,Err(_)=>return db_error()}
-    }
-    if body.get("done").and_then(Value::as_bool) == Some(true) {
-        let target_name = match sqlx::query(
-            "SELECT COALESCE(NULLIF(display_name,''),username) AS name FROM users WHERE id=?",
+        match sqlx::query(
+            "INSERT INTO message_key_shares(message_id,recipient_id,sharer_id,sharer_pub_ecdh,iv,k,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(message_id,recipient_id,sharer_id) DO UPDATE SET sharer_pub_ecdh=excluded.sharer_pub_ecdh,iv=excluded.iv,k=excluded.k,created_at=excluded.created_at",
         )
+        .bind(id)
         .bind(&target_id)
-        .fetch_optional(&mut *tx)
+        .bind(&me.id)
+        .bind(&pub_ecdh)
+        .bind(iv)
+        .bind(k)
+        .bind(&now_ts)
+        .execute(&mut *tx)
         .await
         {
-            Ok(Some(row)) => row.try_get::<String, _>("name").unwrap_or_default(),
-            _ => return db_error(),
-        };
-        if sqlx::query("UPDATE chat_members SET cleared_seq=MIN(cleared_seq,?),reset_seq=0,reset_cleared_seq=0 WHERE chat_id=? AND user_id=? AND cleared_seq<=reset_seq").bind(number(&target,"reset_cleared_seq")).bind(&chat_id).bind(&target_id).execute(&mut *tx).await.is_err()||sqlx::query("UPDATE chat_members SET reset_seq=0,reset_cleared_seq=0 WHERE chat_id=? AND user_id=?").bind(&chat_id).bind(&target_id).execute(&mut *tx).await.is_err()||system_message(&mut tx,&chat_id,"history_shared",json!({"actor":me.display_name,"target":target_name,"target_id":target_id})).await.is_err(){return db_error()}
+            Ok(v) => stored += v.rows_affected() as i64,
+            Err(_) => return db_error(),
+        }
+    }
+    if body.get("done").and_then(Value::as_bool) == Some(true) {
+        let eligible_in_range: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE chat_id=? AND kind='e2e' AND deleted=0 AND seq>? AND seq<=? AND (expires_at IS NULL OR expires_at>?)",
+        )
+        .bind(&chat_id)
+        .bind(lowest)
+        .bind(reset)
+        .bind(&now_ts)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(0);
+        let shares_by_me: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_key_shares s JOIN messages m ON m.id=s.message_id WHERE m.chat_id=? AND m.kind='e2e' AND m.deleted=0 AND m.seq>? AND m.seq<=? AND (m.expires_at IS NULL OR m.expires_at>?) AND s.recipient_id=? AND s.sharer_id=?",
+        )
+        .bind(&chat_id)
+        .bind(lowest)
+        .bind(reset)
+        .bind(&now_ts)
+        .bind(&target_id)
+        .bind(&me.id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(0);
+        if eligible_in_range > 0 && stored == 0 && shares_by_me == 0 {
+            return error("No message keys were shared", StatusCode::BAD_REQUEST);
+        }
+        if lowest > target_floor {
+            if lowest >= reset {
+                return error(
+                    "You do not have earlier messages to share",
+                    StatusCode::BAD_REQUEST,
+                );
+            }
+            let narrowed = sqlx::query(
+                "UPDATE chat_members SET cleared_seq=CASE WHEN cleared_seq<=reset_seq THEN MIN(cleared_seq,?) ELSE cleared_seq END,reset_seq=? WHERE chat_id=? AND user_id=? AND reset_seq>0",
+            )
+            .bind(lowest)
+            .bind(lowest)
+            .bind(&chat_id)
+            .bind(&target_id)
+            .execute(&mut *tx)
+            .await;
+            match narrowed {
+                Ok(r) if r.rows_affected() > 0 => {}
+                Ok(_) => return error("There is nothing to share", StatusCode::CONFLICT),
+                Err(_) => return db_error(),
+            }
+        } else {
+            let target_name = match sqlx::query(
+                "SELECT COALESCE(NULLIF(display_name,''),username) AS name FROM users WHERE id=?",
+            )
+            .bind(&target_id)
+            .fetch_optional(&mut *tx)
+            .await
+            {
+                Ok(Some(row)) => row.try_get::<String, _>("name").unwrap_or_default(),
+                _ => return db_error(),
+            };
+            let completed = sqlx::query(
+                "UPDATE chat_members SET cleared_seq=CASE WHEN cleared_seq<=reset_seq THEN MIN(cleared_seq,?) ELSE cleared_seq END,reset_seq=0,reset_cleared_seq=0 WHERE chat_id=? AND user_id=? AND reset_seq>0",
+            )
+            .bind(number(&target, "reset_cleared_seq"))
+            .bind(&chat_id)
+            .bind(&target_id)
+            .execute(&mut *tx)
+            .await;
+            match completed {
+                Ok(r) if r.rows_affected() > 0 => {}
+                Ok(_) => return error("There is nothing to share", StatusCode::CONFLICT),
+                Err(_) => return db_error(),
+            }
+            if system_message(
+                &mut tx,
+                &chat_id,
+                "history_shared",
+                json!({"actor":me.display_name,"target":target_name,"target_id":target_id}),
+            )
+            .await
+            .is_err()
+            {
+                return db_error();
+            }
+        }
     }
     if tx.commit().await.is_err() {
         return db_error();
@@ -1826,7 +2314,7 @@ async fn previous_key_history(
 }
 
 async fn chat_pins(pool: &SqlitePool, chat: &str, floor: i64) -> Result<Vec<Value>, sqlx::Error> {
-    let rows=sqlx::query("SELECT p.message_id,p.pinned_at,m.seq,u.username,u.display_name FROM pinned_messages p JOIN messages m ON m.id=p.message_id LEFT JOIN users u ON u.id=p.pinned_by WHERE p.chat_id=? AND m.deleted=0 AND m.seq>? ORDER BY p.pinned_at DESC").bind(chat).bind(floor).fetch_all(pool).await?;
+    let rows=sqlx::query("SELECT p.message_id,p.pinned_at,m.seq,u.username,u.display_name FROM pinned_messages p JOIN messages m ON m.id=p.message_id LEFT JOIN users u ON u.id=p.pinned_by WHERE p.chat_id=? AND m.deleted=0 AND m.seq>? AND (m.expires_at IS NULL OR m.expires_at>?) ORDER BY p.pinned_at DESC").bind(chat).bind(floor).bind(now()).fetch_all(pool).await?;
     Ok(rows.iter().map(|r|json!({"message_id":r.try_get::<String,_>("message_id").unwrap_or_default(),"seq":number(r,"seq"),"pinned_at":r.try_get::<String,_>("pinned_at").unwrap_or_default(),"pinned_by":if r.try_get::<Option<String>,_>("username").ok().flatten().is_some(){Some(display_name(r))}else{None}})).collect())
 }
 
@@ -1839,7 +2327,7 @@ async fn deliver_due_messages(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     if due.is_empty() {
         return Ok(());
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_write(pool).await?;
     let mut delivered = Vec::new();
     for item in due {
         let id: String = item.try_get("id")?;
@@ -1848,6 +2336,7 @@ async fn deliver_due_messages(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         let payload: String = item.try_get("payload")?;
         let expected: String = item.try_get("member_ids")?;
         let sender_key: String = item.try_get("sender_sign_key")?;
+        let member_keys_snap: Option<String> = item.try_get("member_keys").ok().flatten();
         let chat = sqlx::query("SELECT type,disappear_seconds FROM chats WHERE id=?")
             .bind(&chat_id)
             .fetch_optional(&mut *tx)
@@ -1856,27 +2345,40 @@ async fn deliver_due_messages(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             .bind(&sender)
             .fetch_optional(&mut *tx)
             .await?;
-        let current =
-            sqlx::query("SELECT user_id FROM chat_members WHERE chat_id=? ORDER BY user_id")
-                .bind(&chat_id)
-                .fetch_all(&mut *tx)
-                .await?;
-        let members = current
-            .iter()
-            .map(|row| row.try_get::<String, _>("user_id"))
-            .collect::<Result<Vec<_>, _>>()?;
+        let current = sqlx::query(
+            "SELECT m.user_id,u.pub_ecdh FROM chat_members m JOIN users u ON u.id=m.user_id WHERE m.chat_id=? ORDER BY m.user_id",
+        )
+        .bind(&chat_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut members = Vec::with_capacity(current.len());
+        let mut current_keys = std::collections::BTreeMap::new();
+        for row in current {
+            let uid = row.try_get::<String, _>("user_id")?;
+            let ecdh = row.try_get::<Option<String>, _>("pub_ecdh").ok().flatten();
+            current_keys.insert(uid.clone(), ecdh);
+            members.push(uid);
+        }
         let members_now = serde_json::to_string(&members).unwrap_or_default();
         let keys_match = sender_row
             .and_then(|row| row.try_get::<Option<String>, _>("pub_sign").ok().flatten())
             .unwrap_or_default()
             == sender_key;
-        let chat = chat;
-        let mut can_send = chat.is_some() && keys_match && members_now == expected;
-        if let Some(row) = &chat
+        let member_keys_match = match member_keys_snap.as_deref() {
+            Some(snap) if !snap.is_empty() => {
+                serde_json::from_str::<std::collections::BTreeMap<String, Option<String>>>(snap)
+                    .is_ok_and(|expected_keys| expected_keys == current_keys)
+            }
+            _ => true,
+        };
+        let mut can_send =
+            chat.is_some() && keys_match && members_now == expected && member_keys_match;
+        if can_send
+            && let Some(row) = &chat
             && row.try_get::<String, _>("type")?.as_str() == "dm"
         {
             for member in &members {
-                if member != &sender && is_blocked(pool, &sender, member).await? {
+                if member != &sender && is_blocked(&mut *tx, &sender, member).await? {
                     can_send = false;
                     break;
                 }
@@ -1929,6 +2431,7 @@ async fn deliver_due_messages(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 struct User {
     id: String,
     display_name: String,
+    pub_ecdh: Option<String>,
     pub_sign: Option<String>,
 }
 async fn user(state: &AppState, headers: &HeaderMap) -> ApiResult<User> {
@@ -1936,8 +2439,25 @@ async fn user(state: &AppState, headers: &HeaderMap) -> ApiResult<User> {
     Ok(User {
         id: row.try_get("id").unwrap_or_default(),
         display_name: display_name(&row),
+        pub_ecdh: row.try_get("pub_ecdh").ok().flatten(),
         pub_sign: row.try_get("pub_sign").ok().flatten(),
     })
+}
+fn has_e2ee_keys(pub_ecdh: Option<&str>, pub_sign: Option<&str>) -> bool {
+    pub_ecdh.is_some_and(|v| !v.trim().is_empty()) && pub_sign.is_some_and(|v| !v.trim().is_empty())
+}
+fn upload_daily_limit_bytes() -> i64 {
+    std::env::var("SERES_UPLOAD_DAILY_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v >= 0)
+        .unwrap_or(DEFAULT_UPLOAD_DAILY_MB)
+        .saturating_mul(1024 * 1024)
+}
+async fn begin_write(
+    pool: &SqlitePool,
+) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>, sqlx::Error> {
+    pool.begin_with("BEGIN IMMEDIATE").await
 }
 fn display_name(row: &SqliteRow) -> String {
     row.try_get::<Option<String>, _>("display_name")
@@ -1977,17 +2497,24 @@ fn serialize_message(row: &SqliteRow) -> Value {
     json!({"seq":number(row,"seq"),"rev":number(row,"rev"),"id":row.try_get::<String,_>("id").unwrap_or_default(),"sender_id":row.try_get::<Option<String>,_>("sender_id").ok().flatten(),"sender":row.try_get::<Option<String>,_>("sender").ok().flatten(),"sender_display":row.try_get::<Option<String>,_>("sender_display").ok().flatten().filter(|v|!v.is_empty()).or_else(||row.try_get("sender").ok().flatten()),"kind":row.try_get::<String,_>("kind").unwrap_or_default(),"payload":payload,"created_at":row.try_get::<String,_>("created_at").unwrap_or_default(),"edited_at":row.try_get::<Option<String>,_>("edited_at").ok().flatten(),"deleted":deleted,"silent":number(row,"silent")!=0,"expires_at":row.try_get::<Option<String>,_>("expires_at").ok().flatten()})
 }
 
-async fn membership(
-    pool: &SqlitePool,
+async fn membership<'e, E: sqlx::SqliteExecutor<'e>>(
+    exec: E,
     chat: &str,
     user: &str,
 ) -> Result<Option<SqliteRow>, sqlx::Error> {
-    sqlx::query("SELECT c.*,m.role,m.joined_seq,m.cleared_seq,m.last_read_seq,m.hidden,m.pinned,m.archived,m.delivered_seq,m.reset_seq,m.reset_cleared_seq FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE c.id=? AND m.user_id=?").bind(chat).bind(user).fetch_optional(pool).await
+    sqlx::query("SELECT c.*,m.role,m.joined_seq,m.cleared_seq,m.last_read_seq,m.hidden,m.pinned,m.archived,m.delivered_seq,m.reset_seq,m.reset_cleared_seq FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE c.id=? AND m.user_id=?")
+        .bind(chat)
+        .bind(user)
+        .fetch_optional(exec)
+        .await
 }
-async fn member_ids(pool: &SqlitePool, chat: &str) -> Result<Vec<String>, sqlx::Error> {
+async fn member_ids<'e, E: sqlx::SqliteExecutor<'e>>(
+    exec: E,
+    chat: &str,
+) -> Result<Vec<String>, sqlx::Error> {
     let rows = sqlx::query("SELECT user_id FROM chat_members WHERE chat_id=? ORDER BY user_id")
         .bind(chat)
-        .fetch_all(pool)
+        .fetch_all(exec)
         .await?;
     Ok(rows
         .iter()
@@ -2037,60 +2564,89 @@ pub(crate) async fn system_message(
         .await?;
     Ok(())
 }
-async fn are_friends(pool: &SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::Error> {
+async fn are_friends<'e, E: sqlx::SqliteExecutor<'e>>(
+    exec: E,
+    a: &str,
+    b: &str,
+) -> Result<bool, sqlx::Error> {
     let (x, y) = pair(a, b);
     Ok(
         sqlx::query("SELECT 1 FROM friendships WHERE user_a=? AND user_b=?")
             .bind(x)
             .bind(y)
-            .fetch_optional(pool)
+            .fetch_optional(exec)
             .await?
             .is_some(),
     )
 }
-async fn is_blocked(pool: &SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::Error> {
-    Ok(sqlx::query("SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)").bind(a).bind(b).bind(b).bind(a).fetch_optional(pool).await?.is_some())
+async fn is_blocked<'e, E: sqlx::SqliteExecutor<'e>>(
+    exec: E,
+    a: &str,
+    b: &str,
+) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query("SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)").bind(a).bind(b).bind(b).bind(a).fetch_optional(exec).await?.is_some())
 }
 
-fn validate_envelope(payload: &Value, members: &[String]) -> Option<String> {
-    if payload
-        .as_object()
-        .is_none_or(|p| p.get("v").and_then(Value::as_i64) != Some(1))
+fn validate_and_clean_envelope(payload: &Value, members: &[String]) -> Result<Value, String> {
+    let Some(obj) = payload.as_object() else {
+        return Err("Unsupported message format".into());
+    };
+    if obj.get("v").and_then(Value::as_i64) != Some(1) {
+        return Err("Unsupported message format".into());
+    }
+    if obj
+        .keys()
+        .any(|k| !matches!(k.as_str(), "v" | "iv" | "ct" | "sig" | "keys"))
     {
-        return Some("Unsupported message format".into());
+        return Err("Unknown fields in message".into());
     }
     for (field, max) in [("iv", 64usize), ("sig", 256), ("ct", MAX_CIPHERTEXT_LEN)] {
-        if !valid_b64_field(payload.get(field), max) {
-            return Some(format!("Invalid '{field}'"));
+        if !valid_b64_field(obj.get(field), max) {
+            return Err(format!("Invalid '{field}'"));
         }
     }
-    let Some(keys) = payload.get("keys").and_then(Value::as_object) else {
-        return Some("Message must be encrypted for exactly the current chat members".into());
+    let Some(keys) = obj.get("keys").and_then(Value::as_object) else {
+        return Err("Message must be encrypted for exactly the current chat members".into());
     };
     let mut actual = keys.keys().cloned().collect::<Vec<_>>();
     actual.sort();
     let mut expected = members.to_vec();
     expected.sort();
     if actual != expected {
-        return Some("Message must be encrypted for exactly the current chat members".into());
+        return Err("Message must be encrypted for exactly the current chat members".into());
     }
-    for wrapped in keys.values() {
+    let mut clean_keys = serde_json::Map::with_capacity(keys.len());
+    for (member_id, wrapped) in keys {
         let Some(wrapped) = wrapped.as_object() else {
-            return Some("Invalid key".into());
+            return Err("Invalid key".into());
         };
+        if wrapped.keys().any(|k| !matches!(k.as_str(), "iv" | "k")) {
+            return Err("Invalid key".into());
+        }
         for field in ["iv", "k"] {
             if !valid_b64_field(wrapped.get(field), 128) {
-                return Some("Invalid key".into());
+                return Err("Invalid key".into());
             }
         }
+        clean_keys.insert(
+            member_id.clone(),
+            json!({
+                "iv": wrapped["iv"].as_str().unwrap_or_default(),
+                "k": wrapped["k"].as_str().unwrap_or_default(),
+            }),
+        );
     }
-    if payload.as_object().is_some_and(|p| {
-        p.keys()
-            .any(|k| !matches!(k.as_str(), "v" | "iv" | "ct" | "sig" | "keys"))
-    }) {
-        return Some("Unknown fields in message".into());
-    }
-    None
+    Ok(json!({
+        "v": 1,
+        "iv": obj["iv"].as_str().unwrap_or_default(),
+        "ct": obj["ct"].as_str().unwrap_or_default(),
+        "sig": obj["sig"].as_str().unwrap_or_default(),
+        "keys": Value::Object(clean_keys),
+    }))
+}
+
+fn validate_envelope(payload: &Value, members: &[String]) -> Option<String> {
+    validate_and_clean_envelope(payload, members).err()
 }
 fn valid_b64_field(value: Option<&Value>, max: usize) -> bool {
     value.and_then(Value::as_str).is_some_and(|v| {
@@ -2112,7 +2668,7 @@ async fn advance_receipt(
     kind: &str,
     seq: i64,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_write(pool).await?;
     let kinds: &[&str] = if kind == "read" {
         &["delivered", "read"]
     } else {
@@ -2170,7 +2726,26 @@ async fn add_shares(
         let Some(id) = message.get("id").and_then(Value::as_str) else {
             continue;
         };
-        if let Some(row)=sqlx::query("SELECT iv,k,sharer_pub_ecdh FROM message_key_shares WHERE recipient_id=? AND message_id=?").bind(user).bind(id).fetch_optional(pool).await?{message["share"]=json!({"iv":row.try_get::<String,_>("iv")?,"k":row.try_get::<String,_>("k")?,"from_pub":row.try_get::<String,_>("sharer_pub_ecdh")?})}
+        let rows = sqlx::query(
+            "SELECT sharer_id,iv,k,sharer_pub_ecdh FROM message_key_shares WHERE recipient_id=? AND message_id=? ORDER BY created_at DESC, sharer_id",
+        )
+        .bind(user)
+        .bind(id)
+        .fetch_all(pool)
+        .await?;
+        if !rows.is_empty() {
+            let mut shares = Vec::with_capacity(rows.len());
+            for row in rows {
+                shares.push(json!({
+                    "sharer_id": row.try_get::<String, _>("sharer_id")?,
+                    "iv": row.try_get::<String, _>("iv")?,
+                    "k": row.try_get::<String, _>("k")?,
+                    "from_pub": row.try_get::<String, _>("sharer_pub_ecdh")?,
+                }));
+            }
+            message["share"] = shares[0].clone();
+            message["shares"] = Value::Array(shares);
+        }
     }
     Ok(messages)
 }
@@ -2204,7 +2779,7 @@ async fn purge_expired(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     if expired.is_empty() && stale.is_empty() {
         return Ok(());
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_write(pool).await?;
     for row in expired {
         let id: String = row.try_get("id")?;
         let chat: String = row.try_get("chat_id")?;
@@ -2229,6 +2804,64 @@ async fn purge_expired(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     }
     tx.commit().await
 }
+async fn reclaim_mutually_cleared_dm(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    chat_id: &str,
+) -> Result<(), sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN hidden=1 THEN 1 ELSE 0 END),0) AS hidden_count, COALESCE(MIN(MAX(joined_seq, CASE WHEN reset_seq>0 THEN MIN(cleared_seq, reset_cleared_seq) ELSE cleared_seq END)),0) AS safe_floor FROM chat_members WHERE chat_id=?",
+    )
+    .bind(chat_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let total = number(&row, "total");
+    let hidden_count = number(&row, "hidden_count");
+    let safe_floor = number(&row, "safe_floor");
+    if total == 0 || hidden_count != total || safe_floor <= 0 {
+        return Ok(());
+    }
+    sqlx::query(
+        "DELETE FROM file_blobs WHERE id IN (SELECT id FROM files WHERE message_id IN (SELECT id FROM messages WHERE chat_id=? AND seq<=?))",
+    )
+    .bind(chat_id)
+    .bind(safe_floor)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM files WHERE message_id IN (SELECT id FROM messages WHERE chat_id=? AND seq<=?)",
+    )
+    .bind(chat_id)
+    .bind(safe_floor)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM pinned_messages WHERE chat_id=? AND message_id IN (SELECT id FROM messages WHERE chat_id=? AND seq<=?)",
+    )
+    .bind(chat_id)
+    .bind(chat_id)
+    .bind(safe_floor)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM message_key_shares WHERE message_id IN (SELECT id FROM messages WHERE chat_id=? AND seq<=?)",
+    )
+    .bind(chat_id)
+    .bind(safe_floor)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM receipts WHERE chat_id=? AND seq<=?")
+        .bind(chat_id)
+        .bind(safe_floor)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM messages WHERE chat_id=? AND seq<=?")
+        .bind(chat_id)
+        .bind(safe_floor)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 async fn forget_message_data(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     chat: &str,
@@ -2312,7 +2945,15 @@ async fn presence(pool: &SqlitePool, me: &str, other: &str) -> Result<Option<Val
     if is_blocked(pool, me, other).await? {
         return Ok(None);
     }
-    let visible=are_friends(pool,me,other).await?||sqlx::query("SELECT 1 FROM chat_members a JOIN chat_members b ON a.chat_id=b.chat_id WHERE a.user_id=? AND b.user_id=?").bind(me).bind(other).fetch_optional(pool).await?.is_some();
+    let visible = are_friends(pool, me, other).await?
+        || sqlx::query(
+            "SELECT 1 FROM chat_members a JOIN chat_members b ON a.chat_id=b.chat_id JOIN chats c ON c.id=a.chat_id WHERE a.user_id=? AND b.user_id=? AND (c.type='group' OR (a.hidden=0 AND b.hidden=0))",
+        )
+        .bind(me)
+        .bind(other)
+        .fetch_optional(pool)
+        .await?
+        .is_some();
     if !visible {
         return Ok(None);
     }
@@ -2489,41 +3130,76 @@ async fn invite_join(
             StatusCode::TOO_MANY_REQUESTS,
         );
     }
-    if me.pub_sign.is_none() {
+    if !has_e2ee_keys(me.pub_ecdh.as_deref(), me.pub_sign.as_deref()) {
         return error("Your account has no keys yet", StatusCode::BAD_REQUEST);
     }
-    let chat = match invited_group(&state, &token).await {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            return error(
-                "This invite link is not valid (any more)",
-                StatusCode::NOT_FOUND,
-            );
-        }
+    if !valid_token(&token) {
+        return error(
+            "This invite link is not valid (any more)",
+            StatusCode::NOT_FOUND,
+        );
+    }
+    let mut tx = match begin_write(&state.db).await {
+        Ok(v) => v,
         Err(_) => return db_error(),
     };
+    let chat =
+        match sqlx::query("SELECT id,owner_id FROM chats WHERE invite_token=? AND type='group'")
+            .bind(&token)
+            .fetch_optional(&mut *tx)
+            .await
+        {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                return error(
+                    "This invite link is not valid (any more)",
+                    StatusCode::NOT_FOUND,
+                );
+            }
+            Err(_) => return db_error(),
+        };
     let chat_id: String = chat.try_get("id").unwrap_or_default();
-    if let Ok(Some(_)) = membership(&state.db, &chat_id, &me.id).await {
+    if let Ok(Some(_)) = membership(&mut *tx, &chat_id, &me.id).await {
         // Already in it: show it again if it was hidden.
         let _ = sqlx::query("UPDATE chat_members SET hidden=0 WHERE chat_id=? AND user_id=?")
             .bind(&chat_id)
             .bind(&me.id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await;
+        let _ = tx.commit().await;
         return json_ok(json!({"chat_id":chat_id})).into_response();
     }
-    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chat_members WHERE chat_id=?")
+    match sqlx::query("SELECT 1 FROM group_bans WHERE chat_id=? AND user_id=?")
         .bind(&chat_id)
-        .fetch_one(&state.db)
+        .bind(&me.id)
+        .fetch_optional(&mut *tx)
         .await
-        .unwrap_or(0);
-    if count >= MAX_GROUP_MEMBERS as i64 {
-        return error("The group is full", StatusCode::BAD_REQUEST);
+    {
+        Ok(Some(_)) => return error("You cannot join this group", StatusCode::FORBIDDEN),
+        Ok(None) => {}
+        Err(_) => return db_error(),
     }
-    let mut tx = match state.db.begin().await {
+    let owner_id: Option<String> = chat.try_get("owner_id").ok().flatten();
+    if let Some(oid) = owner_id.as_deref()
+        && is_blocked(&mut *tx, oid, &me.id).await.unwrap_or(true)
+    {
+        return error("You cannot join this group", StatusCode::FORBIDDEN);
+    }
+    let members = match member_ids(&mut *tx, &chat_id).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
+    if members.len() >= MAX_GROUP_MEMBERS {
+        return error("The group is full", StatusCode::BAD_REQUEST);
+    }
+    for member_id in &members {
+        if is_blocked(&mut *tx, member_id, &me.id)
+            .await
+            .unwrap_or(true)
+        {
+            return error("You cannot join this group", StatusCode::FORBIDDEN);
+        }
+    }
     if insert_member(&mut tx, &chat_id, &me.id, "member")
         .await
         .is_err()
@@ -2771,5 +3447,759 @@ mod tests {
             .await
             .unwrap();
         assert!(ended.is_some());
+    }
+
+    async fn insert_user_with_keys(pool: &SqlitePool, id: &str) {
+        sqlx::query(
+            "INSERT INTO users(id,username,pub_ecdh,pub_sign,last_seen,show_last_seen) VALUES(?,?,?,?,?,1)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(format!("ecdh-{id}"))
+        .bind(format!("sign-{id}"))
+        .bind(now())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn befriend(pool: &SqlitePool, a: &str, b: &str) {
+        let (x, y) = pair(a, b);
+        sqlx::query("INSERT OR IGNORE INTO friendships(user_a,user_b,created_at) VALUES(?,?,?)")
+            .bind(x)
+            .bind(y)
+            .bind(now())
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_envelope_rejects_unknown_keys_inside_member_entry() {
+        let payload = json!({
+            "v": 1,
+            "iv": "AAAA",
+            "sig": "AAAA",
+            "ct": "AAAA",
+            "keys": {
+                "alice": {"iv": "AAAA", "k": "AAAA", "evil": "junk"}
+            }
+        });
+        assert!(validate_envelope(&payload, &["alice".to_string()]).is_some());
+    }
+
+    #[tokio::test]
+    async fn chats_router_enforces_tight_json_body_limit_outside_files() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        let _ = auth_headers(&state.db, "alice").await;
+        let app = router().with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let big = "a".repeat(1_500_000);
+        let body = format!(r#"{{"id":"{}","payload":{{"x":"{big}"}}}}"#, Uuid::new_v4());
+        let res = reqwest::Client::new()
+            .post(format!("http://{addr}/api/chats/c1/messages"))
+            .header("cookie", "sessioncookie=tok-alice")
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn create_chat_checks_group_size_before_loop_requires_keys_and_rate_limits() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        insert_user_with_keys(&state.db, "bob").await;
+        befriend(&state.db, "alice", "bob").await;
+
+        sqlx::query("INSERT INTO users(id,username) VALUES('nokeys','nokeys')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        befriend(&state.db, "alice", "nokeys").await;
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+
+        // Duplicate usernames exceeding MAX_GROUP_MEMBERS must be rejected before loop.
+        let too_many = vec!["bob"; MAX_GROUP_MEMBERS + 1];
+        let resp = create_chat(
+            State(state.clone()),
+            alice_headers.clone(),
+            Json(json!({"type": "group", "name": "Big", "usernames": too_many})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // User without E2EE keys cannot be added to a group.
+        let resp = create_chat(
+            State(state.clone()),
+            alice_headers.clone(),
+            Json(json!({"type": "group", "name": "NoKeys", "usernames": ["nokeys"]})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // create_chat must be rate-limited.
+        let mut saw_limited = false;
+        for _ in 0..40 {
+            let r = create_chat(
+                State(state.clone()),
+                alice_headers.clone(),
+                Json(json!({"type": "group", "name": "Spam", "usernames": ["bob"]})),
+            )
+            .await;
+            if r.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_limited = true;
+                break;
+            }
+        }
+        assert!(saw_limited);
+    }
+
+    #[tokio::test]
+    async fn empty_group_delete_cleans_shares_receipts_scheduled_and_calls() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        sqlx::query("INSERT INTO chats(id,type,name,owner_id,created_at,last_activity) VALUES('g1','group','Solo','alice','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,role,joined_at) VALUES('g1','alice','owner','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages(id,chat_id,sender_id,kind,payload,created_at,rev) VALUES('m1','g1','alice','e2e','{}','now',1)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO message_key_shares(message_id,recipient_id,sharer_id,sharer_pub_ecdh,iv,k,created_at) VALUES('m1','alice','alice','p','iv','k','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO receipts(chat_id,user_id,kind,seq,at) VALUES('g1','alice','read',1,'now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO scheduled_messages(id,chat_id,sender_id,payload,member_ids,sender_sign_key,send_at,created_at) VALUES('s1','g1','alice','{}','[\"alice\"]','sign-alice','2999-01-01T00:00:00Z','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO calls(id,chat_id,started_by,started_at) VALUES('c1','g1','alice','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO call_participants(call_id,user_id,state,updated_at,seen_at) VALUES('c1','alice','joined','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO call_signals(call_id,from_id,to_id,kind,data,created_at) VALUES('c1','alice','bob','offer','{}','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let resp = delete_chat(State(state.clone()), alice_headers, Path("g1".into())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        for table in [
+            "message_key_shares",
+            "receipts",
+            "scheduled_messages",
+            "calls",
+            "call_participants",
+            "call_signals",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "{table} should be empty");
+        }
+    }
+
+    #[tokio::test]
+    async fn share_history_hardening_and_edit_message_drops_shares() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        insert_user_with_keys(&state.db, "bob").await;
+        insert_user_with_keys(&state.db, "carol").await;
+        sqlx::query(
+            "INSERT INTO users(id,username,pub_ecdh,pub_sign) VALUES('nokey','nokey','','sign-nk')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // 1. DM blocked share_history rejected, plus empty pub_ecdh sharer rejected.
+        sqlx::query("INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO chat_members(chat_id,user_id,joined_at,reset_seq) VALUES('dm1',?,'now',1)")
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO messages(id,chat_id,sender_id,kind,payload,created_at,rev) VALUES('mdm','dm1','alice','e2e','{}','now',1)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('bob','alice','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let resp = share_history(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("dm1".into(), "bob".into())),
+            Json(json!({"keys": {"mdm": {"iv": "AAAA", "k": "AAAA"}}, "done": true})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 2. Group history sharing hardening
+        sqlx::query("INSERT INTO chats(id,type,name,owner_id,created_at,last_activity) VALUES('g1','group','Team','alice','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,role,joined_at,joined_seq) VALUES('g1','alice','owner','now',0)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,role,joined_at,joined_seq) VALUES('g1','nokey','member','now',0)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // Bob joined at seq 10 (so he cannot see seq 10, only >10)
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,role,joined_at,joined_seq) VALUES('g1','bob','member','now',10)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages(seq,id,chat_id,sender_id,kind,payload,created_at,rev) VALUES(10,'m1','g1','alice','e2e','{}','now',2)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages(seq,id,chat_id,sender_id,kind,payload,created_at,rev) VALUES(20,'m2','g1','alice','e2e','{}','now',3)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // Carol joined at 0 and reset at seq 20
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,role,joined_at,joined_seq,cleared_seq,reset_seq,reset_cleared_seq) VALUES('g1','carol','member','now',0,20,20,0)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let nokey_headers = auth_headers(&state.db, "nokey").await;
+        let bob_headers = auth_headers(&state.db, "bob").await;
+        let carol_headers = auth_headers(&state.db, "carol").await;
+
+        // Sharer with empty pub_ecdh rejected
+        let r_nk = share_history(
+            State(state.clone()),
+            nokey_headers,
+            Path(("g1".into(), "carol".into())),
+            Json(json!({"keys": {"m1": {"iv": "AAAA", "k": "AAAA"}}, "done": true})),
+        )
+        .await;
+        assert_eq!(r_nk.status(), StatusCode::BAD_REQUEST);
+
+        // Unilateral done:true with stored==0 must NOT clear reset_seq
+        let _ = share_history(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("g1".into(), "carol".into())),
+            Json(json!({"keys": {}, "done": true})),
+        )
+        .await;
+        let reset_after_empty: i64 = sqlx::query_scalar(
+            "SELECT reset_seq FROM chat_members WHERE chat_id='g1' AND user_id='carol'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(reset_after_empty, 20);
+
+        // Alice shares m2 first (without done) so both Alice and Bob can share m2.
+        let r_alice_m2 = share_history(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("g1".into(), "carol".into())),
+            Json(json!({"keys": {"m2": {"iv": "CCCC", "k": "CCCC"}}})),
+        )
+        .await;
+        assert_eq!(r_alice_m2.status(), StatusCode::OK);
+
+        // Bob (joined_seq=10) also shares m2 with done:true -> narrows reset_seq to 10 (NOT 0!) and keeps both shares!
+        let r_bob = share_history(
+            State(state.clone()),
+            bob_headers,
+            Path(("g1".into(), "carol".into())),
+            Json(json!({"keys": {"m2": {"iv": "BBBB", "k": "BBBB"}}, "done": true})),
+        )
+        .await;
+        assert_eq!(r_bob.status(), StatusCode::OK);
+        let reset_narrowed: i64 = sqlx::query_scalar(
+            "SELECT reset_seq FROM chat_members WHERE chat_id='g1' AND user_id='carol'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(reset_narrowed, 10);
+
+        // Alice finishes remaining m1 with done:true -> clears reset_seq to 0; m2 retains both shares.
+        let r_alice = share_history(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("g1".into(), "carol".into())),
+            Json(json!({"keys": {"m1": {"iv": "AAAA", "k": "AAAA"}}, "done": true})),
+        )
+        .await;
+        assert_eq!(r_alice.status(), StatusCode::OK);
+        let share_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_key_shares WHERE message_id='m2' AND recipient_id='carol'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(share_count, 2);
+
+        // Carol sees `shares` array on m2 via get_chat_messages
+        let msgs_resp = get_chat_messages(
+            State(state.clone()),
+            carol_headers,
+            Path("g1".into()),
+            Query(HashMap::new()),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(msgs_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let m2 = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "m2")
+            .unwrap();
+        assert_eq!(m2["shares"].as_array().map(|a| a.len()), Some(2));
+
+        // 3. edit_message deletes stale message_key_shares
+        let r_edit = edit_message(
+            State(state.clone()),
+            alice_headers,
+            Path(("g1".into(), "m2".into())),
+            Json(json!({"payload": {
+                "v": 1, "iv": "AAAA", "sig": "AAAA", "ct": "AAAA",
+                "keys": {
+                    "alice": {"iv": "AAAA", "k": "AAAA"},
+                    "bob": {"iv": "AAAA", "k": "AAAA"},
+                    "carol": {"iv": "AAAA", "k": "AAAA"},
+                    "nokey": {"iv": "AAAA", "k": "AAAA"},
+                }
+            }})),
+        )
+        .await;
+        assert_eq!(r_edit.status(), StatusCode::OK);
+        let remaining_shares: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message_key_shares WHERE message_id='m2'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(remaining_shares, 0);
+    }
+
+    #[tokio::test]
+    async fn disappearing_filters_no_store_dm_reclaim_and_upload_quota() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        insert_user_with_keys(&state.db, "bob").await;
+        befriend(&state.db, "alice", "bob").await;
+
+        sqlx::query("INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO chat_members(chat_id,user_id,joined_at,reset_seq) VALUES('dm1',?,'now',10)")
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        // Expired message + attachment
+        sqlx::query("INSERT INTO messages(seq,id,chat_id,sender_id,kind,payload,created_at,rev,expires_at) VALUES(1,'mexp','dm1','alice','e2e','{}','now',1,'2000-01-01T00:00:00Z')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO file_blobs(id,data) VALUES('fexp',X'0102')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO files(id,chat_id,uploader_id,message_id,size,created_at) VALUES('fexp','dm1','alice','mexp',2,'now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // Active disappearing message + attachment
+        sqlx::query("INSERT INTO messages(seq,id,chat_id,sender_id,kind,payload,created_at,rev,expires_at) VALUES(2,'mact','dm1','alice','e2e','{}','now',2,'2999-01-01T00:00:00Z')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO file_blobs(id,data) VALUES('fact',X'0304')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO files(id,chat_id,uploader_id,message_id,size,created_at) VALUES('fact','dm1','alice','mact',2,'now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let bob_headers = auth_headers(&state.db, "bob").await;
+
+        assert_eq!(
+            single_message(
+                State(state.clone()),
+                bob_headers.clone(),
+                Path(("dm1".into(), "mexp".into())),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            message_info(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path(("dm1".into(), "mexp".into())),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            pin_message(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("dm1".into()),
+                Json(json!({"message_id": "mexp"})),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            edit_message(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path(("dm1".into(), "mexp".into())),
+                Json(json!({"payload": valid_dm_payload("alice", "bob")})),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            download_file(
+                State(state.clone()),
+                bob_headers.clone(),
+                Path(("dm1".into(), "fexp".into())),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        let share_exp = share_history(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(("dm1".into(), "bob".into())),
+            Json(json!({"keys": {"mexp": {"iv": "AAAA", "k": "AAAA"}}})),
+        )
+        .await;
+        let share_body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(share_exp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(share_body["stored"], 0);
+
+        // Active disappearing attachment gets Cache-Control: no-store
+        let active_dl = download_file(
+            State(state.clone()),
+            bob_headers.clone(),
+            Path(("dm1".into(), "fact".into())),
+        )
+        .await;
+        assert_eq!(active_dl.status(), StatusCode::OK);
+        assert_eq!(
+            active_dl
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+
+        // Daily upload quota enforced (default 2048 MB)
+        sqlx::query("INSERT INTO files(id,chat_id,uploader_id,message_id,size,created_at) VALUES('fquota','dm1','alice',NULL,?,?)")
+            .bind(2048i64 * 1024 * 1024)
+            .bind(now())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let quota_resp = upload_file(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path("dm1".into()),
+            Bytes::from_static(b"x"),
+        )
+        .await;
+        assert_eq!(quota_resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        sqlx::query("DELETE FROM files WHERE id='fquota'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        // Mutually cleared DM reclaims messages & file_blobs
+        sqlx::query("UPDATE chat_members SET reset_seq=0 WHERE chat_id='dm1'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            delete_chat(State(state.clone()), alice_headers, Path("dm1".into()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            delete_chat(State(state.clone()), bob_headers, Path("dm1".into()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let msg_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id='dm1'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        let blob_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM file_blobs")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(msg_count, 0);
+        assert_eq!(blob_count, 0);
+    }
+
+    #[tokio::test]
+    async fn group_bans_blocks_keys_and_hidden_dm_presence_and_reopen() {
+        let (_fix, state) = Fixture::new().await;
+        for id in ["alice", "bob", "carol", "dave"] {
+            insert_user_with_keys(&state.db, id).await;
+        }
+        sqlx::query("INSERT INTO users(id,username) VALUES('nokeys','nokeys')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        befriend(&state.db, "alice", "bob").await;
+        befriend(&state.db, "alice", "carol").await;
+        befriend(&state.db, "carol", "bob").await;
+        befriend(&state.db, "alice", "nokeys").await;
+
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let bob_headers = auth_headers(&state.db, "bob").await;
+        let carol_headers = auth_headers(&state.db, "carol").await;
+        let dave_headers = auth_headers(&state.db, "dave").await;
+
+        sqlx::query("INSERT INTO chats(id,type,name,owner_id,invite_token,created_at,last_activity) VALUES('g1','group','Team','alice','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for (id, role) in [("alice", "owner"), ("bob", "member"), ("carol", "member")] {
+            sqlx::query(
+                "INSERT INTO chat_members(chat_id,user_id,role,joined_at) VALUES('g1',?,?,'now')",
+            )
+            .bind(id)
+            .bind(role)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+
+        // Owner removes bob -> banned from invite_join & non-owner re-add
+        assert_eq!(
+            remove_member_route(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("g1".into()),
+                Json(json!({"username": "bob"})),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            invite_join(
+                State(state.clone()),
+                bob_headers.clone(),
+                Path("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            add_member_route(
+                State(state.clone()),
+                carol_headers,
+                Path("g1".into()),
+                Json(json!({"username": "bob"})),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        // Owner can re-add bob, clearing ban
+        assert_eq!(
+            add_member_route(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("g1".into()),
+                Json(json!({"username": "bob"})),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+
+        // User without E2EE keys cannot be added via add_member_route
+        assert_eq!(
+            add_member_route(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("g1".into()),
+                Json(json!({"username": "nokeys"})),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        // Blocked user cannot join via invite_join (alice is owner, blocks dave)
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('alice','dave','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            invite_join(
+                State(state.clone()),
+                dave_headers,
+                Path("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // Hidden DM after unfriending cannot be reopened by open_dm and leaks no presence
+        sqlx::query("DELETE FROM chat_members WHERE chat_id='g1' AND user_id='bob'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm2','dm','alice:bob','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chat_members(chat_id,user_id,hidden,joined_at) VALUES('dm2','alice',1,'now'),('dm2','bob',0,'now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM friendships WHERE (user_a='alice' AND user_b='bob')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert!(presence(&state.db, "alice", "bob").await.unwrap().is_none());
+        let reopen = create_chat(
+            State(state.clone()),
+            alice_headers,
+            Json(json!({"type": "dm", "username": "bob"})),
+        )
+        .await;
+        assert_eq!(reopen.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn scheduled_message_checks_member_pub_ecdh_snapshot_at_delivery() {
+        let (_fix, state) = Fixture::new().await;
+        insert_user_with_keys(&state.db, "alice").await;
+        insert_user_with_keys(&state.db, "bob").await;
+        sqlx::query("INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for id in ["alice", "bob"] {
+            sqlx::query(
+                "INSERT INTO chat_members(chat_id,user_id,joined_at) VALUES('dm1',?,'now')",
+            )
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let msg_id = Uuid::new_v4().to_string();
+        let send_at = (chrono::Utc::now() + chrono::Duration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let resp = schedule_message(
+            State(state.clone()),
+            alice_headers,
+            Path("dm1".into()),
+            Json(json!({
+                "id": msg_id,
+                "send_at": send_at,
+                "payload": valid_dm_payload("alice", "bob")
+            })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Bob rotates ECDH key before delivery; make message due now
+        sqlx::query("UPDATE users SET pub_ecdh='ecdh-bob-rotated' WHERE id='bob'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE scheduled_messages SET send_at='2000-01-01T00:00:00Z' WHERE id=?")
+            .bind(&msg_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        deliver_due_messages(&state.db).await.unwrap();
+
+        let delivered_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE id=?")
+            .bind(&msg_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(delivered_count, 0);
     }
 }

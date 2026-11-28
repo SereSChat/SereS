@@ -10,6 +10,7 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+    ensure_private_db_permissions(path, true)?;
     let options = SqliteConnectOptions::from_str(&format!("sqlite:{}", path.display()))?
         .create_if_missing(true)
         .foreign_keys(true)
@@ -22,6 +23,7 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
         .connect_with(options)
         .await
         .context("connect to SQLite database")?;
+    ensure_private_db_permissions(path, false)?;
 
     sqlx::raw_sql(include_str!("../migrations/0001_existing_schema.sql"))
         .execute(&pool)
@@ -113,8 +115,47 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
         .context("enforce email uniqueness")?;
     // Older installations can contain names that differ only by case. Keep
     // their data intact and enforce case-insensitive uniqueness on new users.
-    let _ = sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase ON users(username COLLATE NOCASE)")
-        .execute(&pool).await;
+    let _ = sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase ON users(username COLLATE NOCASE)",
+    )
+    .execute(&pool)
+    .await;
+    sqlx::raw_sql(
+        "CREATE TRIGGER IF NOT EXISTS users_username_unique_insert
+         BEFORE INSERT ON users
+         WHEN NEW.username IS NOT NULL AND EXISTS (
+             SELECT 1 FROM users WHERE username = NEW.username COLLATE NOCASE
+         )
+         BEGIN
+             SELECT RAISE(ABORT, 'Username already in use');
+         END;
+         CREATE TRIGGER IF NOT EXISTS users_username_unique_update
+         BEFORE UPDATE OF username ON users
+         WHEN NEW.username IS NOT OLD.username AND NEW.username IS NOT NULL AND EXISTS (
+             SELECT 1 FROM users WHERE username = NEW.username COLLATE NOCASE AND rowid != OLD.rowid
+         )
+         BEGIN
+             SELECT RAISE(ABORT, 'Username already in use');
+         END;",
+    )
+    .execute(&pool)
+    .await
+    .context("enforce username uniqueness")?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_rev ON messages(rev)")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS group_bans (chat_id TEXT NOT NULL, user_id TEXT NOT NULL, banned_at TEXT NOT NULL, PRIMARY KEY(chat_id, user_id))",
+    )
+    .execute(&pool)
+    .await?;
+    ensure_columns(&pool, "scheduled_messages", &[("member_keys", "TEXT")]).await?;
+    migrate_message_key_shares(&pool).await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_key_shares_message ON message_key_shares(message_id)",
+    )
+    .execute(&pool)
+    .await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS user_avatars (user_id TEXT PRIMARY KEY, image BLOB NOT NULL, updated_at TEXT NOT NULL)")
         .execute(&pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS group_avatars (chat_id TEXT PRIMARY KEY, image BLOB NOT NULL, updated_at TEXT NOT NULL)")
@@ -163,7 +204,74 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     sqlx::query("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')")
         .execute(&pool)
         .await?;
+    ensure_private_db_permissions(path, false)?;
     Ok(pool)
+}
+
+fn ensure_private_db_permissions(path: &Path, create_if_missing: bool) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        if path != Path::new(":memory:") {
+            if create_if_missing && !path.exists() {
+                fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(path)?;
+            }
+            if path.exists() {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            }
+            for suffix in ["-wal", "-shm"] {
+                let sidecar = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+                if sidecar.exists() {
+                    let _ = fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, create_if_missing);
+    }
+    Ok(())
+}
+
+async fn migrate_message_key_shares(pool: &SqlitePool) -> Result<()> {
+    let cols = sqlx::query("PRAGMA table_info(message_key_shares)")
+        .fetch_all(pool)
+        .await?;
+    let sharer_is_pk = cols.iter().any(|row| {
+        row.try_get::<String, _>("name").ok().as_deref() == Some("sharer_id")
+            && row.try_get::<i64, _>("pk").unwrap_or(0) > 0
+    });
+    if sharer_is_pk {
+        return Ok(());
+    }
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    sqlx::raw_sql(
+        "CREATE TABLE message_key_shares_new (
+            message_id TEXT NOT NULL,
+            recipient_id TEXT NOT NULL,
+            sharer_id TEXT NOT NULL DEFAULT '',
+            sharer_pub_ecdh TEXT NOT NULL,
+            iv TEXT NOT NULL,
+            k TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (message_id, recipient_id, sharer_id)
+        );
+        INSERT OR IGNORE INTO message_key_shares_new (message_id, recipient_id, sharer_id, sharer_pub_ecdh, iv, k, created_at)
+        SELECT message_id, recipient_id, COALESCE(sharer_id, ''), sharer_pub_ecdh, iv, k, created_at FROM message_key_shares;
+        DROP TABLE message_key_shares;
+        ALTER TABLE message_key_shares_new RENAME TO message_key_shares;
+        CREATE INDEX IF NOT EXISTS idx_key_shares_recipient ON message_key_shares(recipient_id);",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("migrate message_key_shares primary key")?;
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn ensure_columns(pool: &SqlitePool, table: &str, columns: &[(&str, &str)]) -> Result<()> {
@@ -712,6 +820,106 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(remaining, vec!["https://fcm.googleapis.com/2"]);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn username_constraints_preserve_existing_duplicates_but_block_new_claims() {
+        let fixture = Fixture::new();
+        let database = fixture.0.join("users.db");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&database)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0001_existing_schema.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql("INSERT INTO users(id,username) VALUES('a','Alice'),('b','ALICE');")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let pool = connect(&database).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(
+            sqlx::query("INSERT INTO users(id,username) VALUES('c','aLiCe')")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        sqlx::query("INSERT INTO users(id,username) VALUES('c','charlie')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query("UPDATE users SET username='alice' WHERE id='c'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE users SET username=username WHERE id='a'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn connect_creates_rev_index_group_bans_multi_sharer_pk_and_private_permissions() {
+        let fixture = Fixture::new();
+        let database = fixture.0.join("users.db");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(&database, b"").unwrap();
+            fs::set_permissions(&database, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let pool = connect(&database).await.unwrap();
+
+        let rev_idx: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_messages_rev'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rev_idx.as_deref(), Some("idx_messages_rev"));
+
+        sqlx::query("INSERT INTO group_bans(chat_id,user_id,banned_at) VALUES('g1','u1','now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Two distinct sharers must be able to store shares for the same (message_id, recipient_id).
+        sqlx::query("INSERT INTO message_key_shares(message_id,recipient_id,sharer_id,sharer_pub_ecdh,iv,k,created_at) VALUES('m1','u1','s1','p1','iv1','k1','now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO message_key_shares(message_id,recipient_id,sharer_id,sharer_pub_ecdh,iv,k,created_at) VALUES('m1','u1','s2','p2','iv2','k2','now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&database).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
         pool.close().await;
     }
 }
