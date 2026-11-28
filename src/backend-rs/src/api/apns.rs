@@ -920,6 +920,20 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn untrusted_client_supplied_topic_is_ignored() {
+        let token = "a1".repeat(32);
+        let parsed = parse_subscription(&json!({
+            "token": token,
+            "kind": "alert",
+            "environment": "sandbox",
+            "topic": "com.evil.spoofed"
+        }));
+        if let Some(sub) = parsed {
+            assert_ne!(sub.topic.as_deref(), Some("com.evil.spoofed"));
+        }
+    }
 }
 
 // --------------------------------------------------------------- new logins

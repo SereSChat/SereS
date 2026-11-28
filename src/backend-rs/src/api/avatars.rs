@@ -488,4 +488,97 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn group_avatar_uses_role_owner_and_user_avatar_requires_non_hidden_chat() {
+        let (_fix, state) = Fixture::new().await;
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO users(id,username) VALUES(?,?)")
+                .bind(id)
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        // Stale chats.owner_id='alice' while chat_members.role='member' for alice and 'owner' for bob.
+        sqlx::query(
+            "INSERT INTO chats(id,type,name,owner_id,created_at,last_activity) VALUES('g1','group','Team','alice','now','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chat_members(chat_id,user_id,role,joined_at,hidden) VALUES('g1','alice','member','now',0),('g1','bob','owner','now',0)",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let alice_headers = auth_headers(&state.db, "alice").await;
+
+        let req = Request::builder()
+            .method("POST")
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b")
+            .body(Body::from("--b--\r\n"))
+            .unwrap();
+        let mp = Multipart::from_request(req, &state).await.unwrap();
+        let up = upload_group_avatar(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path("g1".into()),
+            mp,
+        )
+        .await;
+        assert_eq!(up.status(), StatusCode::FORBIDDEN);
+
+        let del = delete_group_avatar(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path("g1".into()),
+        )
+        .await;
+        assert_eq!(del.status(), StatusCode::FORBIDDEN);
+
+        // Hidden DM does not allow get_user_avatar.
+        sqlx::query(
+            "INSERT INTO user_avatars(user_id,image,updated_at) VALUES('bob',X'89504E47','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chat_members(chat_id,user_id,role,joined_at,hidden) VALUES('dm1','alice','member','now',1),('dm1','bob','member','now',0)",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        // Remove g1 so only hidden dm1 connects them.
+        sqlx::query("DELETE FROM chat_members WHERE chat_id='g1'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let av = get_user_avatar(State(state), alice_headers, Path("bob".into())).await;
+        assert_eq!(av.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn avatar_error_message_does_not_advertise_gif() {
+        let resp = process_avatar_bytes(b"not an image")
+            .unwrap_err()
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let msg = body["message"].as_str().unwrap().to_ascii_lowercase();
+        assert!(!msg.contains("gif"), "unexpected gif mention in: {msg}");
+    }
 }

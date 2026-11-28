@@ -502,6 +502,79 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn subscribe_refreshes_created_at_on_conflict_so_active_device_is_not_pruned() {
+        let dir = std::env::temp_dir().join(format!("seres-push-upsert-{}", uuid::Uuid::new_v4()));
+        let pool = crate::db::connect(&dir.join("users.db")).await.unwrap();
+        sqlx::query("INSERT INTO users(id,username) VALUES('u1','alice')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let token = "tok-u1";
+        let sess_hash = super::super::auth::hash_token(token);
+        sqlx::query(
+            "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES(?,'u1','2999-01-01T00:00:00Z','now',1)",
+        )
+        .bind(&sess_hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let ep0 = "https://fcm.googleapis.com/fcm/send/ep0";
+        sqlx::query(
+            "INSERT INTO push_subscriptions(endpoint,user_id,session_hash,p256dh,auth,created_at) VALUES(?,'u1',?,'k','a','2020-01-01T00:00:00Z')",
+        )
+        .bind(ep0)
+        .bind(&sess_hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for i in 1..=10 {
+            sqlx::query(
+                "INSERT INTO push_subscriptions(endpoint,user_id,session_hash,p256dh,auth,created_at) VALUES(?,'u1',?,'k','a','2025-01-01T00:00:00Z')",
+            )
+            .bind(format!("https://fcm.googleapis.com/fcm/send/ep{i}"))
+            .bind(&sess_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let state = AppState::new(pool.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_str(&format!("sessioncookie={token}")).unwrap(),
+        );
+        let resp = subscribe(
+            State(state),
+            headers,
+            Json(json!({
+                "endpoint": ep0,
+                "keys": {"p256dh": "AAAA", "auth": "BBBB"}
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let created_at: Option<String> =
+            sqlx::query_scalar("SELECT created_at FROM push_subscriptions WHERE endpoint=?")
+                .bind(ep0)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(
+            created_at
+                .as_deref()
+                .is_some_and(|ts| ts > "2025-01-01T00:00:00Z"),
+            "re-subscribed endpoint should refresh created_at and survive pruning, got {:?}",
+            created_at
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 // ------------------------------------------------------------ new logins

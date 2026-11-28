@@ -1003,4 +1003,531 @@ mod tests {
             .unwrap();
         assert!(ended.is_some());
     }
+
+    async fn auth_headers(pool: &SqlitePool, user_id: &str) -> HeaderMap {
+        let token = format!("tok-{user_id}-{}", Uuid::new_v4());
+        let hash = crate::api::auth::hash_token(&token);
+        let stamp = now();
+        sqlx::query(
+            "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved,last_seen) VALUES(?,?,'2999-01-01T00:00:00Z','now',1,?)",
+        )
+        .bind(hash)
+        .bind(user_id)
+        .bind(stamp)
+        .execute(pool)
+        .await
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_str(&format!("sessioncookie={token}")).unwrap(),
+        );
+        headers
+    }
+
+    async fn insert_user(pool: &SqlitePool, id: &str, with_keys: bool) {
+        let stamp = now();
+        let (ecdh, sign) = if with_keys {
+            (Some("pub-ecdh"), Some("pub-sign"))
+        } else {
+            (None, None)
+        };
+        sqlx::query(
+            "INSERT INTO users(id,username,display_name,pub_ecdh,pub_sign,last_seen) VALUES(?,?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .bind(ecdh)
+        .bind(sign)
+        .bind(stamp)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn befriend(pool: &SqlitePool, a: &str, b: &str) {
+        let (x, y) = if a <= b { (a, b) } else { (b, a) };
+        sqlx::query(
+            "INSERT OR IGNORE INTO friendships(user_a,user_b,created_at) VALUES(?,?,'now')",
+        )
+        .bind(x)
+        .bind(y)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_to_call_enforces_group_owner_blocks_keys_and_rate_limit() {
+        let (_fix, pool) = Fixture::new().await;
+        for (id, keys) in [
+            ("alice", true),
+            ("bob", true),
+            ("carol", true),
+            ("dave", false),
+            ("eve", true),
+        ] {
+            insert_user(&pool, id, keys).await;
+        }
+        for friend in ["bob", "carol", "dave", "eve"] {
+            befriend(&pool, "alice", friend).await;
+        }
+        befriend(&pool, "bob", "carol").await;
+        // Bob blocks Eve, even though Alice is friends with Eve.
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('bob','eve','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO chats(id,type,name,owner_id,created_at,last_activity) VALUES('g1','group','Team','alice','now','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chat_members(chat_id,user_id,role,joined_at) VALUES('g1','alice','owner','now'),('g1','bob','member','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        let call_id = start_call(&mut tx, "g1", "alice").await.unwrap();
+        set_state(&mut tx, &call_id, "bob", "joined").await.unwrap();
+        tx.commit().await.unwrap();
+
+        let state = AppState::new(pool.clone());
+        let alice_headers = auth_headers(&pool, "alice").await;
+        let bob_headers = auth_headers(&pool, "bob").await;
+
+        // Non-owner joined member Bob cannot add_to_call to kill the group call.
+        let resp = add_to_call(
+            State(state.clone()),
+            bob_headers,
+            Path(call_id.clone()),
+            Json(json!({"usernames": ["carol"]})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let ended: Option<String> = sqlx::query_scalar("SELECT ended_at FROM calls WHERE id=?")
+            .bind(&call_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(ended.is_none());
+
+        // Pairwise block: Bob blocked Eve -> Alice cannot add Eve.
+        let resp = add_to_call(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(call_id.clone()),
+            Json(json!({"usernames": ["eve"]})),
+        )
+        .await;
+        assert!(!resp.status().is_success());
+
+        // Added user must have E2EE keys (pub_ecdh/pub_sign).
+        let resp = add_to_call(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(call_id.clone()),
+            Json(json!({"usernames": ["dave"]})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Valid owner add succeeds and ends source call.
+        let resp = add_to_call(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(call_id.clone()),
+            Json(json!({"usernames": ["carol"]})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ended: Option<String> = sqlx::query_scalar("SELECT ended_at FROM calls WHERE id=?")
+            .bind(&call_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(ended.is_some());
+
+        // Rate-limited via call:{me.id} (20 per 600s; 1 used above, 19 more -> 21st is 429).
+        for _ in 0..19 {
+            let r = add_to_call(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path(call_id.clone()),
+                Json(json!({"usernames": ["carol"]})),
+            )
+            .await;
+            assert_ne!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        let limited = add_to_call(
+            State(state.clone()),
+            alice_headers,
+            Path(call_id),
+            Json(json!({"usernames": ["carol"]})),
+        )
+        .await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn add_to_call_is_atomic_under_concurrent_requests() {
+        let (_fix, pool) = Fixture::new().await;
+        for id in ["alice", "bob", "carol", "dave"] {
+            insert_user(&pool, id, true).await;
+        }
+        befriend(&pool, "alice", "bob").await;
+        befriend(&pool, "alice", "carol").await;
+        befriend(&pool, "bob", "dave").await;
+        sqlx::query(
+            "INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chat_members(chat_id,user_id,role,joined_at) VALUES('dm1','alice','member','now'),('dm1','bob','member','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let call_id = start_call(&mut tx, "dm1", "alice").await.unwrap();
+        set_state(&mut tx, &call_id, "bob", "joined").await.unwrap();
+        tx.commit().await.unwrap();
+
+        let state = AppState::new(pool.clone());
+        let alice_headers = auth_headers(&pool, "alice").await;
+        let bob_headers = auth_headers(&pool, "bob").await;
+
+        let (r1, r2) = tokio::join!(
+            add_to_call(
+                State(state.clone()),
+                alice_headers,
+                Path(call_id.clone()),
+                Json(json!({"usernames": ["carol"]})),
+            ),
+            add_to_call(
+                State(state.clone()),
+                bob_headers,
+                Path(call_id.clone()),
+                Json(json!({"usernames": ["dave"]})),
+            ),
+        );
+        let ok_count = [r1.status(), r2.status()]
+            .into_iter()
+            .filter(|s| *s == StatusCode::OK)
+            .count();
+        assert_eq!(ok_count, 1);
+        let group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chats WHERE type='group'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(group_count, 1);
+    }
+
+    #[tokio::test]
+    async fn ice_servers_rate_limits_and_tightens_turn_ttl() {
+        let (_fix, pool) = Fixture::new().await;
+        insert_user(&pool, "alice", true).await;
+        let state = AppState::new(pool.clone());
+        let headers = auth_headers(&pool, "alice").await;
+
+        // Set TURN env vars briefly to inspect credential TTL.
+        unsafe {
+            std::env::set_var("TURN_URLS", "turn:turn.example.com:3478");
+            std::env::set_var("TURN_SECRET", "test-turn-secret");
+        }
+        let now_ts = chrono::Utc::now().timestamp();
+        let resp = ice_servers(State(state.clone()), headers.clone()).await;
+        unsafe {
+            std::env::remove_var("TURN_URLS");
+            std::env::remove_var("TURN_SECRET");
+        }
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let turn_user = body["ice_servers"][1]["username"].as_str().unwrap();
+        let expiry: i64 = turn_user.split(':').next().unwrap().parse().unwrap();
+        assert!(
+            expiry <= now_ts + 3605,
+            "TURN TTL should be <= 3600s, got {}",
+            expiry - now_ts
+        );
+
+        for _ in 0..59 {
+            let r = ice_servers(State(state.clone()), headers.clone()).await;
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+        let limited = ice_servers(State(state), headers).await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn answer_call_prevents_answered_at_spoofing_and_expires_stale_calls() {
+        let (_fix, pool) = Fixture::new().await;
+        for id in ["alice", "bob"] {
+            insert_user(&pool, id, true).await;
+        }
+        sqlx::query(
+            "INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chat_members(chat_id,user_id,role,joined_at) VALUES('dm1','alice','member','now'),('dm1','bob','member','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = AppState::new(pool.clone());
+        let alice_headers = auth_headers(&pool, "alice").await;
+        let bob_headers = auth_headers(&pool, "bob").await;
+
+        let mut tx = pool.begin().await.unwrap();
+        let call_id = start_call(&mut tx, "dm1", "alice").await.unwrap();
+        tx.commit().await.unwrap();
+
+        // Caller Alice cannot spoof answered_at via answer_call or call_chat while Bob is still ringing.
+        let r = answer_call(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path(call_id.clone()),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let answered: Option<String> =
+            sqlx::query_scalar("SELECT answered_at FROM calls WHERE id=?")
+                .bind(&call_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(answered.is_none(), "caller answer_call spoofed answered_at");
+
+        let r = call_chat(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path("dm1".into()),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let answered: Option<String> =
+            sqlx::query_scalar("SELECT answered_at FROM calls WHERE id=?")
+                .bind(&call_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(answered.is_none(), "caller call_chat spoofed answered_at");
+
+        // Bob answering transitions ringing -> joined and sets answered_at.
+        let r = answer_call(
+            State(state.clone()),
+            bob_headers.clone(),
+            Path(call_id.clone()),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let answered: Option<String> =
+            sqlx::query_scalar("SELECT answered_at FROM calls WHERE id=?")
+                .bind(&call_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(answered.is_some());
+
+        // Stale ringing call (> RING_SECONDS) must expire inside answer_call's transaction.
+        sqlx::query("UPDATE calls SET ended_at=? WHERE id=?")
+            .bind(now())
+            .bind(&call_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let stale_call = start_call(&mut tx, "dm1", "alice").await.unwrap();
+        tx.commit().await.unwrap();
+        sqlx::query("UPDATE call_participants SET updated_at=? WHERE call_id=? AND user_id='bob'")
+            .bind(ago(RING_SECONDS + 10))
+            .bind(&stale_call)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let r = answer_call(State(state), bob_headers, Path(stale_call)).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn my_calls_avoids_write_tx_when_idle_caps_signals_and_cleans_zombie_calls() {
+        let dir = std::env::temp_dir().join(format!("seres-calls-rw-{}", Uuid::new_v4()));
+        let db_path = dir.join("users.db");
+        let pool = crate::db::connect(&db_path).await.unwrap();
+        insert_user(&pool, "alice", true).await;
+        insert_user(&pool, "bob", true).await;
+        let alice_headers = auth_headers(&pool, "alice").await;
+
+        // Open a short-timeout pool so any write attempt during an external write lock fails fast.
+        let short_opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&db_path)
+            .busy_timeout(std::time::Duration::from_millis(80));
+        let short_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(short_opts)
+            .await
+            .unwrap();
+        let lock_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite:{}", db_path.display()))
+            .await
+            .unwrap();
+
+        let mut lock_conn = lock_pool.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *lock_conn)
+            .await
+            .unwrap();
+        let idle_resp = my_calls(
+            State(AppState::new(short_pool.clone())),
+            alice_headers.clone(),
+            Query(HashMap::new()),
+        )
+        .await;
+        sqlx::query("ROLLBACK")
+            .execute(&mut *lock_conn)
+            .await
+            .unwrap();
+        drop(lock_conn);
+        lock_pool.close().await;
+        short_pool.close().await;
+        assert_eq!(idle_resp.status(), StatusCode::OK);
+
+        // 1-member zombie call (joined=1, ringing=0, fresh seen_at) is finished on my_calls.
+        sqlx::query(
+            "INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chat_members(chat_id,user_id,role,joined_at) VALUES('dm1','alice','member','now'),('dm1','bob','member','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO calls(id,chat_id,started_by,started_at) VALUES('zombie-call','dm1','alice',?)")
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO call_participants(call_id,user_id,state,updated_at,seen_at) VALUES('zombie-call','alice','joined',?,?)",
+        )
+        .bind(now())
+        .bind(now())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = AppState::new(pool.clone());
+        let resp = my_calls(
+            State(state.clone()),
+            alice_headers.clone(),
+            Query(HashMap::new()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ended: Option<String> =
+            sqlx::query_scalar("SELECT ended_at FROM calls WHERE id='zombie-call'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(ended.is_some(), "1-member zombie call should be ended");
+
+        // Signal query is capped with LIMIT.
+        for i in 0..250 {
+            sqlx::query(
+                "INSERT INTO call_signals(call_id,from_id,to_id,kind,data,created_at) VALUES('c1','bob','alice','offer',?,?)",
+            )
+            .bind(format!("{{\"i\":{i}}}"))
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let resp = my_calls(State(state), alice_headers, Query(HashMap::new())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let sig_len = body["signals"].as_array().unwrap().len();
+        assert!(sig_len <= 200, "signals should be capped, got {sig_len}");
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn call_signal_forbids_self_target_and_finish_call_skips_missing_chat_message() {
+        let (_fix, pool) = Fixture::new().await;
+        for id in ["alice", "bob"] {
+            insert_user(&pool, id, true).await;
+        }
+        sqlx::query(
+            "INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chat_members(chat_id,user_id,role,joined_at) VALUES('dm1','alice','member','now'),('dm1','bob','member','now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let call_id = start_call(&mut tx, "dm1", "alice").await.unwrap();
+        tx.commit().await.unwrap();
+
+        let state = AppState::new(pool.clone());
+        let alice_headers = auth_headers(&pool, "alice").await;
+        let resp = call_signal(
+            State(state),
+            alice_headers,
+            Path(call_id),
+            Json(json!({"to": "alice", "kind": "offer", "data": {"sdp": "v=0", "sig": "AAAA"}})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // finish_call with a deleted chat must end the call without inserting a system message.
+        sqlx::query("INSERT INTO calls(id,chat_id,started_by,started_at) VALUES('orphan-call','missing-chat','alice',?)")
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        finish_call(&mut tx, "orphan-call").await.unwrap();
+        tx.commit().await.unwrap();
+        let msg_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id='missing-chat'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(msg_count, 0);
+    }
 }

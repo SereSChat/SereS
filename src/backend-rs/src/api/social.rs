@@ -768,4 +768,234 @@ mod tests {
         let limited = user_profile(State(state.clone()), alice_headers, Path("bob".into())).await;
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
     }
+
+    #[tokio::test]
+    async fn request_friend_rate_limits_before_lookup_and_hides_blocked_vs_missing() {
+        let (_fix, state) = Fixture::new().await;
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO users(id,username) VALUES(?,?)")
+                .bind(id)
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('bob','alice','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let alice_headers = auth_headers(&state.db, "alice").await;
+
+        let blocked_resp = request_friend(
+            State(state.clone()),
+            alice_headers.clone(),
+            Json(json!({"username": "bob"})),
+        )
+        .await;
+        let blocked_status = blocked_resp.status();
+        let blocked_body: Value = serde_json::from_slice(
+            &to_bytes(blocked_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        let missing_resp = request_friend(
+            State(state.clone()),
+            alice_headers.clone(),
+            Json(json!({"username": "no_such_user_123"})),
+        )
+        .await;
+        let missing_status = missing_resp.status();
+        let missing_body: Value = serde_json::from_slice(
+            &to_bytes(missing_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(blocked_status, StatusCode::BAD_REQUEST);
+        assert_eq!(missing_status, blocked_status);
+        assert_eq!(missing_body["message"], blocked_body["message"]);
+
+        // Remaining 28 calls with nonexistent username succeed in counting toward 30/600s limit,
+        // and the 31st is rate limited before target_user lookup.
+        for _ in 0..28 {
+            let r = request_friend(
+                State(state.clone()),
+                alice_headers.clone(),
+                Json(json!({"username": "no_such_user_123"})),
+            )
+            .await;
+            assert_ne!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        let limited = request_friend(
+            State(state),
+            alice_headers,
+            Json(json!({"username": "no_such_user_123"})),
+        )
+        .await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn invite_endpoints_are_rate_limited() {
+        let (_fix, state) = Fixture::new().await;
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO users(id,username) VALUES(?,?)")
+                .bind(id)
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO friend_invites(token,user_id,created_at) VALUES('tok-bob','bob','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let alice_headers = auth_headers(&state.db, "alice").await;
+
+        for _ in 0..30 {
+            let r = show_invite(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("tok-bob".into()),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+        let limited_show = show_invite(
+            State(state.clone()),
+            alice_headers.clone(),
+            Path("tok-bob".into()),
+        )
+        .await;
+        assert_eq!(limited_show.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        for _ in 0..30 {
+            let r = accept_invite(
+                State(state.clone()),
+                alice_headers.clone(),
+                Path("invalid-tok".into()),
+            )
+            .await;
+            assert_ne!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        let limited_accept =
+            accept_invite(State(state), alice_headers, Path("invalid-tok".into())).await;
+        assert_eq!(limited_accept.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn accept_friend_rejects_blocked_and_unblock_does_not_refriend() {
+        let (_fix, state) = Fixture::new().await;
+        for id in ["alice", "bob"] {
+            sqlx::query("INSERT INTO users(id,username) VALUES(?,?)")
+                .bind(id)
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let bob_headers = auth_headers(&state.db, "bob").await;
+
+        // Pending friend request + block -> accept_friend must reject and not insert friendship.
+        sqlx::query(
+            "INSERT INTO friend_requests(from_id,to_id,created_at) VALUES('alice','bob','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO blocks(blocker_id,blocked_id,created_at) VALUES('alice','bob','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let resp = accept_friend(
+            State(state.clone()),
+            bob_headers.clone(),
+            Json(json!({"username": "alice"})),
+        )
+        .await;
+        assert!(!resp.status().is_success());
+        assert!(!are_friends(&state.db, "alice", "bob").await.unwrap());
+
+        // Clear block/requests, make them friends, block, then unblock -> must NOT re-friend.
+        sqlx::query("DELETE FROM blocks")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM friend_requests")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO friendships(user_a,user_b,created_at) VALUES('alice','bob','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let blk = block_user(
+            State(state.clone()),
+            alice_headers.clone(),
+            Json(json!({"username": "bob"})),
+        )
+        .await;
+        assert_eq!(blk.status(), StatusCode::OK);
+        let unblk = unblock_user(
+            State(state.clone()),
+            alice_headers,
+            Json(json!({"username": "bob"})),
+        )
+        .await;
+        assert_eq!(unblk.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(unblk.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["friends"], false);
+        assert!(!are_friends(&state.db, "alice", "bob").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn user_profile_requires_non_hidden_chat_for_can_see() {
+        let (_fix, state) = Fixture::new().await;
+        let seen = now();
+        for id in ["alice", "bob"] {
+            sqlx::query(
+                "INSERT INTO users(id,username,status_text,last_seen,show_last_seen) VALUES(?,?,'secret-status',?,1)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(&seen)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO chats(id,type,dm_key,created_at,last_activity) VALUES('dm1','dm','alice:bob','now','now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chat_members(chat_id,user_id,role,joined_at,hidden) VALUES('dm1','alice','member','now',1),('dm1','bob','member','now',0)",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let alice_headers = auth_headers(&state.db, "alice").await;
+        let resp = user_profile(State(state), alice_headers, Path("bob".into())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert!(body["user"]["status"].is_null());
+        assert!(body["presence"].is_null());
+    }
 }
