@@ -23,39 +23,84 @@ async fn user_keys(
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> axum::response::Response {
-    if let Err(e) = require_user(&state, &headers).await {
-        return axum::response::IntoResponse::into_response(e);
+    let me = match require_user(&state, &headers).await {
+        Ok(v) => v,
+        Err(e) => return axum::response::IntoResponse::into_response(e),
+    };
+    let me_id: String = me.try_get("id").unwrap_or_default();
+    if state.rate_limited(format!("user-keys:{me_id}"), 60, 60) {
+        return error(
+            "Too many requests, please wait",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
     }
-    let ids = query
-        .get("ids")
-        .map(|s| {
-            s.split(',')
-                .filter(|id| !id.is_empty())
-                .take(100)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut ids = Vec::new();
+    if let Some(raw) = query.get("ids") {
+        for id in raw.split(',').filter(|id| !id.is_empty()) {
+            if !ids.contains(&id) {
+                ids.push(id);
+                if ids.len() >= 100 {
+                    break;
+                }
+            }
+        }
+    }
     if ids.is_empty() {
         return json_ok(json!({"users":[]})).into_response();
     }
     let marks = vec!["?"; ids.len()].join(",");
     let sql = format!(
-        "SELECT id,username,display_name,pub_ecdh,pub_sign FROM users WHERE id IN ({marks})"
+        "SELECT u.id,u.username,u.display_name,u.pub_ecdh,u.pub_sign FROM users u
+         WHERE u.id IN ({marks}) AND (
+             u.id = ?
+             OR EXISTS (
+                 SELECT 1 FROM friendships f
+                 WHERE (f.user_a = ? AND f.user_b = u.id) OR (f.user_b = ? AND f.user_a = u.id)
+             )
+             OR EXISTS (
+                 SELECT 1 FROM chat_members a
+                 JOIN chat_members b ON a.chat_id = b.chat_id
+                 WHERE a.user_id = ? AND b.user_id = u.id AND a.hidden = 0
+             )
+             OR EXISTS (
+                 SELECT 1 FROM call_participants pa
+                 JOIN call_participants pb ON pa.call_id = pb.call_id
+                 JOIN calls c ON c.id = pa.call_id
+                 WHERE c.ended_at IS NULL
+                   AND pa.user_id = ? AND pb.user_id = u.id
+                   AND pa.state IN ('ringing', 'joined')
+                   AND pb.state IN ('ringing', 'joined')
+             )
+         )"
     );
     let mut users_query = sqlx::query(&sql);
     for id in &ids {
-        users_query = users_query.bind(id)
+        users_query = users_query.bind(id);
     }
+    users_query = users_query
+        .bind(&me_id)
+        .bind(&me_id)
+        .bind(&me_id)
+        .bind(&me_id)
+        .bind(&me_id);
     let rows = match users_query.fetch_all(&state.db).await {
         Ok(v) => v,
         Err(_) => return db_error(),
     };
+    if rows.is_empty() {
+        return json_ok(json!({"users":[]})).into_response();
+    }
+    let allowed_ids: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.try_get::<String, _>("id").ok())
+        .collect();
+    let history_marks = vec!["?"; allowed_ids.len()].join(",");
     let history_sql = format!(
-        "SELECT user_id,pub_ecdh,pub_sign,replaced_at FROM user_key_history WHERE user_id IN ({marks}) ORDER BY replaced_at"
+        "SELECT user_id,pub_ecdh,pub_sign,replaced_at FROM user_key_history WHERE user_id IN ({history_marks}) ORDER BY replaced_at"
     );
     let mut history_query = sqlx::query(&history_sql);
-    for id in &ids {
-        history_query = history_query.bind(id)
+    for id in &allowed_ids {
+        history_query = history_query.bind(id);
     }
     let history_rows = match history_query.fetch_all(&state.db).await {
         Ok(v) => v,

@@ -18,6 +18,14 @@ use uuid::Uuid;
 const RING_SECONDS: i64 = 45;
 const GONE_SECONDS: i64 = 20;
 const MAX_GROUP_MEMBERS: usize = 50;
+const MAX_SIGNALS_PER_POLL: i64 = 100;
+const TURN_TTL_SECONDS: i64 = 3600;
+
+async fn begin_immediate(
+    pool: &SqlitePool,
+) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>, sqlx::Error> {
+    pool.begin_with("BEGIN IMMEDIATE").await
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -97,7 +105,7 @@ async fn call_chat(
             StatusCode::TOO_MANY_REQUESTS,
         );
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_immediate(&state.db).await {
         Ok(v) => v,
         Err(_) => return err_db(),
     };
@@ -109,9 +117,32 @@ async fn call_chat(
     let call_id = match active {
         Ok(Some(row)) => {
             let id: String = row.try_get("id").unwrap_or_default();
+            let prev_state = sqlx::query_scalar::<_, String>(
+                "SELECT state FROM call_participants WHERE call_id=? AND user_id=?",
+            )
+            .bind(&id)
+            .bind(&me.id)
+            .fetch_optional(&mut *tx)
+            .await;
+            let Ok(prev_state) = prev_state else {
+                return err_db();
+            };
             if leave_other_calls(&mut tx, &me.id, Some(&id)).await.is_err()
                 || set_state(&mut tx, &id, &me.id, "joined").await.is_err()
-                || sqlx::query("UPDATE calls SET answered_at=COALESCE(answered_at,?) WHERE id=?")
+            {
+                return err_db();
+            }
+            let joined_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM call_participants WHERE call_id=? AND state='joined'",
+            )
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await;
+            let Ok(joined_count) = joined_count else {
+                return err_db();
+            };
+            if (prev_state.as_deref() == Some("ringing") || joined_count >= 2)
+                && sqlx::query("UPDATE calls SET answered_at=COALESCE(answered_at,?) WHERE id=?")
                     .bind(now())
                     .bind(&id)
                     .execute(&mut *tx)
@@ -153,15 +184,16 @@ async fn answer_call(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    if require_call(&state.db, &call_id, &me.id, &["ringing", "joined"])
-        .await
-        .is_err()
-    {
-        return error("This call has ended", StatusCode::NOT_FOUND);
-    }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_immediate(&state.db).await {
         Ok(v) => v,
         Err(_) => return err_db(),
+    };
+    if expire_calls(&mut tx).await.is_err() {
+        return err_db();
+    }
+    let Ok(prev_state) = require_call_tx(&mut tx, &call_id, &me.id, &["ringing", "joined"]).await
+    else {
+        return error("This call has ended", StatusCode::NOT_FOUND);
     };
     if leave_other_calls(&mut tx, &me.id, Some(&call_id))
         .await
@@ -169,14 +201,29 @@ async fn answer_call(
         || set_state(&mut tx, &call_id, &me.id, "joined")
             .await
             .is_err()
-        || sqlx::query("UPDATE calls SET answered_at=COALESCE(answered_at,?) WHERE id=?")
+    {
+        return err_db();
+    }
+    let joined_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM call_participants WHERE call_id=? AND state='joined'",
+    )
+    .bind(&call_id)
+    .fetch_one(&mut *tx)
+    .await;
+    let Ok(joined_count) = joined_count else {
+        return err_db();
+    };
+    if (prev_state == "ringing" || joined_count >= 2)
+        && sqlx::query("UPDATE calls SET answered_at=COALESCE(answered_at,?) WHERE id=?")
             .bind(now())
             .bind(&call_id)
             .execute(&mut *tx)
             .await
             .is_err()
-        || tx.commit().await.is_err()
     {
+        return err_db();
+    }
+    if tx.commit().await.is_err() {
         return err_db();
     }
     stopped_ringing(&state, &headers, &me);
@@ -194,16 +241,16 @@ async fn decline_call(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    if require_call(&state.db, &call_id, &me.id, &["ringing"])
+    let mut tx = match begin_immediate(&state.db).await {
+        Ok(v) => v,
+        Err(_) => return err_db(),
+    };
+    if require_call_tx(&mut tx, &call_id, &me.id, &["ringing"])
         .await
         .is_err()
     {
         return error("This call has ended", StatusCode::NOT_FOUND);
     }
-    let mut tx = match state.db.begin().await {
-        Ok(v) => v,
-        Err(_) => return err_db(),
-    };
     if set_state(&mut tx, &call_id, &me.id, "declined")
         .await
         .is_err()
@@ -224,16 +271,16 @@ async fn leave_call(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
-    if require_call(&state.db, &call_id, &me.id, &["ringing", "joined"])
+    let mut tx = match begin_immediate(&state.db).await {
+        Ok(v) => v,
+        Err(_) => return err_db(),
+    };
+    if require_call_tx(&mut tx, &call_id, &me.id, &["ringing", "joined"])
         .await
         .is_err()
     {
         return error("This call has ended", StatusCode::NOT_FOUND);
     }
-    let mut tx = match state.db.begin().await {
-        Ok(v) => v,
-        Err(_) => return err_db(),
-    };
     if set_state(&mut tx, &call_id, &me.id, "left").await.is_err()
         || finish_if_over(&mut tx, &call_id).await.is_err()
         || tx.commit().await.is_err()
@@ -257,11 +304,61 @@ async fn my_calls(
         .get("after")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
-    let mut tx = match state.db.begin().await {
-        Ok(v) => v,
-        Err(_) => return err_db(),
+    let needs_expire = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 WHERE
+           EXISTS (
+               SELECT 1 FROM call_participants p
+               JOIN calls c ON c.id=p.call_id
+               WHERE c.ended_at IS NULL
+                 AND ((p.state='ringing' AND p.updated_at<?) OR (p.state='joined' AND p.seen_at<?))
+           )
+           OR EXISTS (
+               SELECT 1 FROM calls c
+               WHERE c.ended_at IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM call_participants p WHERE p.call_id=c.id AND p.state='ringing')
+                 AND (SELECT COUNT(*) FROM call_participants p WHERE p.call_id=c.id AND p.state='joined') <= 1
+           )
+           OR EXISTS (SELECT 1 FROM call_signals WHERE created_at<?)",
+    )
+    .bind(ago(RING_SECONDS))
+    .bind(ago(GONE_SECONDS))
+    .bind(ago(120))
+    .fetch_optional(&state.db)
+    .await;
+    let Ok(needs_expire) = needs_expire else {
+        return err_db();
     };
-    if expire_calls(&mut tx).await.is_err()||sqlx::query("UPDATE call_participants SET seen_at=? WHERE user_id=? AND state='joined' AND call_id IN (SELECT id FROM calls WHERE ended_at IS NULL)").bind(now()).bind(&me.id).execute(&mut *tx).await.is_err()||tx.commit().await.is_err(){return err_db()};
+    let is_joined = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM call_participants p JOIN calls c ON c.id=p.call_id WHERE p.user_id=? AND p.state='joined' AND c.ended_at IS NULL LIMIT 1",
+    )
+    .bind(&me.id)
+    .fetch_optional(&state.db)
+    .await;
+    let Ok(is_joined) = is_joined else {
+        return err_db();
+    };
+    if needs_expire.is_some() || is_joined.is_some() {
+        let mut tx = match begin_immediate(&state.db).await {
+            Ok(v) => v,
+            Err(_) => return err_db(),
+        };
+        if needs_expire.is_some() && expire_calls(&mut tx).await.is_err() {
+            return err_db();
+        }
+        if is_joined.is_some()
+            && sqlx::query("UPDATE call_participants SET seen_at=? WHERE user_id=? AND state='joined' AND call_id IN (SELECT id FROM calls WHERE ended_at IS NULL)")
+                .bind(now())
+                .bind(&me.id)
+                .execute(&mut *tx)
+                .await
+                .is_err()
+        {
+            return err_db();
+        }
+        if tx.commit().await.is_err() {
+            return err_db();
+        }
+    }
     stopped_ringing(&state, &headers, &me);
     let rows=sqlx::query("SELECT c.id FROM calls c JOIN call_participants p ON p.call_id=c.id JOIN chat_members m ON m.chat_id=c.chat_id AND m.user_id=p.user_id WHERE p.user_id=? AND p.state IN ('ringing','joined') AND c.ended_at IS NULL ORDER BY c.started_at").bind(&me.id).fetch_all(&state.db).await;
     let rows = match rows {
@@ -277,10 +374,11 @@ async fn my_calls(
         }
     }
     let signals = sqlx::query(
-        "SELECT id,call_id,from_id,kind,data FROM call_signals WHERE to_id=? AND id>? ORDER BY id",
+        "SELECT id,call_id,from_id,kind,data FROM call_signals WHERE to_id=? AND id>? ORDER BY id LIMIT ?",
     )
     .bind(&me.id)
     .bind(after)
+    .bind(MAX_SIGNALS_PER_POLL)
     .fetch_all(&state.db)
     .await;
     let signals = match signals {
@@ -310,7 +408,7 @@ async fn call_signal(
     let Some(to) = body
         .get("to")
         .and_then(Value::as_str)
-        .filter(|v| !v.is_empty() && v.len() <= 64)
+        .filter(|v| !v.is_empty() && v.len() <= 64 && *v != me.id)
     else {
         return error("Invalid signal", StatusCode::BAD_REQUEST);
     };
@@ -368,10 +466,30 @@ async fn add_to_call(
         Ok(v) => v,
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
+    if state.rate_limited(format!("call:{}", me.id), 20, 600) {
+        return error(
+            "Too many calls, please wait a moment",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
     let call = match require_call(&state.db, &call_id, &me.id, &["joined"]).await {
         Ok(v) => v,
         Err(_) => return error("This call has ended", StatusCode::NOT_FOUND),
     };
+    let source_chat_id: String = call.try_get("chat_id").unwrap_or_default();
+    let source_chat = match membership(&state.db, &source_chat_id, &me.id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return error("This call has ended", StatusCode::NOT_FOUND),
+        Err(_) => return err_db(),
+    };
+    if source_chat.try_get::<String, _>("type").ok().as_deref() == Some("group")
+        && source_chat.try_get::<String, _>("role").ok().as_deref() != Some("owner")
+    {
+        return error(
+            "Only the group owner can add people to a group call",
+            StatusCode::FORBIDDEN,
+        );
+    }
     let Some(usernames) = body
         .get("usernames")
         .and_then(Value::as_array)
@@ -396,12 +514,27 @@ async fn add_to_call(
     let mut added = Vec::new();
     for name in usernames {
         let text = name.as_str().unwrap_or("");
-        let row=sqlx::query("SELECT id,COALESCE(NULLIF(display_name,''),username) AS name FROM users WHERE username=? COLLATE NOCASE").bind(text.trim()).fetch_optional(&state.db).await;
-        let (id, _) = match row {
-            Ok(Some(r)) => (
-                r.try_get::<String, _>("id").unwrap_or_default(),
-                r.try_get::<String, _>("name").unwrap_or_default(),
-            ),
+        let row = sqlx::query(
+            "SELECT id,COALESCE(NULLIF(display_name,''),username) AS name,pub_ecdh,pub_sign FROM users WHERE username=? COLLATE NOCASE",
+        )
+        .bind(text.trim())
+        .fetch_optional(&state.db)
+        .await;
+        let (id, has_keys) = match row {
+            Ok(Some(r)) => {
+                let id = r.try_get::<String, _>("id").unwrap_or_default();
+                let pub_ecdh = r
+                    .try_get::<Option<String>, _>("pub_ecdh")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|v| !v.is_empty());
+                let pub_sign = r
+                    .try_get::<Option<String>, _>("pub_sign")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|v| !v.is_empty());
+                (id, pub_ecdh && pub_sign)
+            }
             _ => {
                 return error(
                     format!("{text} is not your friend"),
@@ -416,6 +549,12 @@ async fn add_to_call(
             );
         }
         if id != me.id && !joined.contains(&id) && !added.iter().any(|v| v == &id) {
+            if !has_keys {
+                return error(
+                    format!("{text} has not set up encryption keys yet"),
+                    StatusCode::BAD_REQUEST,
+                );
+            }
             added.push(id)
         }
     }
@@ -424,6 +563,23 @@ async fn add_to_call(
             "These people are already in the call",
             StatusCode::BAD_REQUEST,
         );
+    }
+    for (idx, id) in added.iter().enumerate() {
+        for existing in std::iter::once(&me.id)
+            .chain(joined.iter())
+            .chain(added[..idx].iter())
+        {
+            match blocked(&state.db, id, existing).await {
+                Ok(false) => {}
+                Ok(true) => {
+                    return error(
+                        "You can't add a blocked person to this call",
+                        StatusCode::FORBIDDEN,
+                    );
+                }
+                Err(_) => return err_db(),
+            }
+        }
     }
     let mut member_ids = joined.clone();
     member_ids.extend(added);
@@ -456,12 +612,20 @@ async fn add_to_call(
             .to_string()
             + "…"
     }
-    let mut tx = match state.db.begin().await {
+    let mut tx = match begin_immediate(&state.db).await {
         Ok(v) => v,
         Err(_) => return err_db(),
     };
-    if end_call(&mut tx, &call).await.is_err() {
-        return err_db();
+    if require_call_tx(&mut tx, &call_id, &me.id, &["joined"])
+        .await
+        .is_err()
+    {
+        return error("This call has ended", StatusCode::NOT_FOUND);
+    }
+    match end_call(&mut tx, &call).await {
+        Ok(true) => {}
+        Ok(false) => return error("This call has ended", StatusCode::NOT_FOUND),
+        Err(_) => return err_db(),
     }
     let chat_id = Uuid::new_v4().to_string();
     let stamp = now();
@@ -503,11 +667,19 @@ async fn add_to_call(
 }
 
 async fn ice_servers(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    if let Err(e) = require_user(&_state, &headers).await {
-        return axum::response::IntoResponse::into_response(e);
+    let me = match require_user(&state, &headers).await {
+        Ok(v) => v,
+        Err(e) => return axum::response::IntoResponse::into_response(e),
+    };
+    let me_id: String = me.try_get("id").unwrap_or_default();
+    if state.rate_limited(format!("ice:{me_id}"), 60, 600) {
+        return error(
+            "Too many requests, please wait",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
     }
     let urls = std::env::var("TURN_URLS")
         .unwrap_or_default()
@@ -521,12 +693,8 @@ async fn ice_servers(
     if !urls.is_empty() && !secret.is_empty() {
         let username = format!(
             "{}:{}",
-            chrono::Utc::now().timestamp() + 12 * 3600,
-            require_user(&_state, &headers)
-                .await
-                .ok()
-                .and_then(|r| r.try_get::<String, _>("id").ok())
-                .unwrap_or_default()
+            chrono::Utc::now().timestamp() + TURN_TTL_SECONDS,
+            me_id
         );
         let mut mac = match Hmac::<Sha1>::new_from_slice(secret.as_bytes()) {
             Ok(v) => v,
@@ -592,6 +760,40 @@ async fn are_friends(pool: &SqlitePool, a: &str, b: &str) -> Result<bool, sqlx::
             .await?
             .is_some(),
     )
+}
+async fn require_call_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+    user: &str,
+    states: &[&str],
+) -> Result<String, ()> {
+    let call = sqlx::query("SELECT chat_id FROM calls WHERE id=? AND ended_at IS NULL")
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| ())?;
+    let Some(call) = call else { return Err(()) };
+    let chat_id: String = call.try_get("chat_id").map_err(|_| ())?;
+    let is_member = sqlx::query("SELECT 1 FROM chat_members WHERE chat_id=? AND user_id=?")
+        .bind(&chat_id)
+        .bind(user)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| ())?
+        .is_some();
+    if !is_member {
+        return Err(());
+    }
+    let mine = sqlx::query("SELECT state FROM call_participants WHERE call_id=? AND user_id=?")
+        .bind(id)
+        .bind(user)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| ())?;
+    match mine.and_then(|v| v.try_get::<String, _>("state").ok()) {
+        Some(state) if states.contains(&state.as_str()) => Ok(state),
+        _ => Err(()),
+    }
 }
 async fn require_call(
     pool: &SqlitePool,
@@ -722,49 +924,59 @@ async fn finish_if_over(
         .filter(|v| v.try_get::<String, _>("state").ok().as_deref() == Some("ringing"))
         .count();
     if joined == 0 || (joined == 1 && ringing == 0) {
-        finish_call(tx, call).await?
+        let _ = finish_call(tx, call).await?;
     }
     Ok(())
 }
 async fn finish_call(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     call: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let row = sqlx::query("SELECT * FROM calls WHERE id=? AND ended_at IS NULL")
         .bind(call)
         .fetch_optional(&mut **tx)
         .await?;
-    let Some(row) = row else { return Ok(()) };
-    let chat: String = row.try_get("chat_id")?;
-    let started: Option<String> = row.try_get("answered_at")?;
+    let Some(row) = row else { return Ok(false) };
     let ended = now();
-    let seconds = started
-        .and_then(|v| {
-            chrono::DateTime::parse_from_str(
-                &format!("{}+00:00", v.trim_end_matches('Z')),
-                "%Y-%m-%dT%H:%M:%S%:z",
-            )
-            .ok()
-        })
-        .map(|v| {
-            (chrono::Utc::now() - v.with_timezone(&chrono::Utc))
-                .num_seconds()
-                .max(0)
-        });
-    let caller: String = row.try_get("started_by")?;
-    let name = sqlx::query_scalar::<_, String>(
-        "SELECT COALESCE(NULLIF(display_name,''),username) FROM users WHERE id=?",
-    )
-    .bind(caller)
-    .fetch_optional(&mut **tx)
-    .await?
-    .unwrap_or_default();
-    add_system(tx, &chat, "call", json!({"actor":name,"seconds":seconds})).await?;
-    sqlx::query("UPDATE calls SET ended_at=? WHERE id=?")
-        .bind(ended.clone())
+    let updated = sqlx::query("UPDATE calls SET ended_at=? WHERE id=? AND ended_at IS NULL")
+        .bind(&ended)
         .bind(call)
         .execute(&mut **tx)
         .await?;
+    if updated.rows_affected() != 1 {
+        return Ok(false);
+    }
+    let chat: String = row.try_get("chat_id")?;
+    let chat_exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM chats WHERE id=?")
+        .bind(&chat)
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_some();
+    if chat_exists {
+        let started: Option<String> = row.try_get("answered_at")?;
+        let seconds = started
+            .and_then(|v| {
+                chrono::DateTime::parse_from_str(
+                    &format!("{}+00:00", v.trim_end_matches('Z')),
+                    "%Y-%m-%dT%H:%M:%S%:z",
+                )
+                .ok()
+            })
+            .map(|v| {
+                (chrono::Utc::now() - v.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0)
+            });
+        let caller: String = row.try_get("started_by")?;
+        let name = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(NULLIF(display_name,''),username) FROM users WHERE id=?",
+        )
+        .bind(caller)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or_default();
+        add_system(tx, &chat, "call", json!({"actor":name,"seconds":seconds})).await?;
+    }
     sqlx::query("UPDATE call_participants SET state='missed',updated_at=? WHERE call_id=? AND state='ringing'").bind(&ended).bind(call).execute(&mut **tx).await?;
     sqlx::query(
         "UPDATE call_participants SET state='left',updated_at=? WHERE call_id=? AND state='joined'",
@@ -777,12 +989,12 @@ async fn finish_call(
         .bind(call)
         .execute(&mut **tx)
         .await?;
-    Ok(())
+    Ok(true)
 }
 async fn end_call(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     call: &SqliteRow,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let id: String = call.try_get("id")?;
     finish_call(tx, &id).await
 }
@@ -835,6 +1047,17 @@ async fn expire_calls(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<()
     }
     for call in affected {
         finish_if_over(tx, &call).await?
+    }
+    let zombies: Vec<String> = sqlx::query_scalar(
+        "SELECT c.id FROM calls c
+         WHERE c.ended_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM call_participants p WHERE p.call_id=c.id AND p.state='ringing')
+           AND (SELECT COUNT(*) FROM call_participants p WHERE p.call_id=c.id AND p.state='joined') <= 1",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    for call in zombies {
+        let _ = finish_call(tx, &call).await?;
     }
     sqlx::query("DELETE FROM call_signals WHERE created_at<?")
         .bind(ago(120))
@@ -1156,8 +1379,8 @@ mod tests {
             .unwrap();
         assert!(ended.is_some());
 
-        // Rate-limited via call:{me.id} (20 per 600s; 1 used above, 19 more -> 21st is 429).
-        for _ in 0..19 {
+        // Rate-limited via call:{me.id} (20 per 600s; 3 used above, 17 more -> 21st is 429).
+        for _ in 0..17 {
             let r = add_to_call(
                 State(state.clone()),
                 alice_headers.clone(),
@@ -1177,7 +1400,7 @@ mod tests {
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn add_to_call_is_atomic_under_concurrent_requests() {
         let (_fix, pool) = Fixture::new().await;
         for id in ["alice", "bob", "carol", "dave"] {
@@ -1207,20 +1430,35 @@ mod tests {
         let alice_headers = auth_headers(&pool, "alice").await;
         let bob_headers = auth_headers(&pool, "bob").await;
 
-        let (r1, r2) = tokio::join!(
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let b1 = barrier.clone();
+        let s1 = state.clone();
+        let c1 = call_id.clone();
+        let h1 = tokio::spawn(async move {
+            b1.wait().await;
             add_to_call(
-                State(state.clone()),
+                State(s1),
                 alice_headers,
-                Path(call_id.clone()),
+                Path(c1),
                 Json(json!({"usernames": ["carol"]})),
-            ),
+            )
+            .await
+        });
+        let b2 = barrier;
+        let s2 = state;
+        let c2 = call_id;
+        let h2 = tokio::spawn(async move {
+            b2.wait().await;
             add_to_call(
-                State(state.clone()),
+                State(s2),
                 bob_headers,
-                Path(call_id.clone()),
+                Path(c2),
                 Json(json!({"usernames": ["dave"]})),
-            ),
-        );
+            )
+            .await
+        });
+        let r1 = h1.await.unwrap();
+        let r2 = h2.await.unwrap();
         let ok_count = [r1.status(), r2.status()]
             .into_iter()
             .filter(|s| *s == StatusCode::OK)

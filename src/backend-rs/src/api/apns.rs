@@ -43,6 +43,7 @@ const MAX_TOKENS_PER_USER: i64 = 20;
 /// Apple accepts a provider token for an hour and refuses new ones more
 /// often than every 20 minutes.
 const PROVIDER_TOKEN_SECONDS: i64 = 50 * 60;
+const PROVIDER_REFRESH_COOLDOWN_SECONDS: i64 = 20 * 60;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -134,6 +135,44 @@ fn bundle_id(value: &str) -> Option<String> {
     .then(|| value.to_owned())
 }
 
+fn allowed_topics(default_topic: &str, allowed_env: Option<&str>) -> Vec<String> {
+    let mut topics = Vec::new();
+    if let Some(topic) = bundle_id(default_topic) {
+        topics.push(topic);
+    }
+    if let Some(raw) = allowed_env {
+        for item in raw.split(',') {
+            if let Some(topic) = bundle_id(item.trim())
+                && !topics.contains(&topic)
+            {
+                topics.push(topic);
+            }
+        }
+    }
+    topics
+}
+
+fn default_topic_setting() -> String {
+    config()
+        .map(|c| c.topic.clone())
+        .or_else(|| {
+            std::env::var("APNS_TOPIC")
+                .ok()
+                .and_then(|v| bundle_id(v.trim()))
+        })
+        .unwrap_or_else(|| DEFAULT_TOPIC.into())
+}
+
+fn resolve_topic(
+    requested: Option<&str>,
+    default_topic: &str,
+    allowed_env: Option<&str>,
+) -> Option<String> {
+    let requested = requested.and_then(bundle_id)?;
+    let allowed = allowed_topics(default_topic, allowed_env);
+    allowed.into_iter().find(|item| item == &requested)
+}
+
 fn parse_subscription(body: &Value) -> Option<Subscription> {
     let token = device_token(body.get("token")?.as_str()?)?;
     let kind = match body.get("kind")?.as_str()? {
@@ -146,10 +185,16 @@ fn parse_subscription(body: &Value) -> Option<Subscription> {
         "production" => "production",
         _ => return None,
     };
-    let topic = match body.get("topic") {
+    let requested_topic = match body.get("topic") {
         None | Some(Value::Null) => None,
         Some(value) => Some(bundle_id(value.as_str()?)?),
     };
+    let allowed_env = std::env::var("APNS_ALLOWED_TOPICS").ok();
+    let topic = resolve_topic(
+        requested_topic.as_deref(),
+        &default_topic_setting(),
+        allowed_env.as_deref(),
+    );
     Some(Subscription {
         token,
         kind,
@@ -167,14 +212,20 @@ async fn subscribe(
     let user_id: String = me.try_get("id").unwrap_or_default();
     let session = session_hash(&headers)
         .ok_or_else(|| ApiError::new("Not logged in", StatusCode::UNAUTHORIZED))?;
-    if config().is_none() {
+    let Some(cfg) = config() else {
         return Err(ApiError::new(
             "APNs is not configured on this server",
             StatusCode::SERVICE_UNAVAILABLE,
         ));
-    }
-    let subscription = parse_subscription(&body)
+    };
+    let mut subscription = parse_subscription(&body)
         .ok_or_else(|| ApiError::new("Invalid APNs token", StatusCode::BAD_REQUEST))?;
+    let allowed_env = std::env::var("APNS_ALLOWED_TOPICS").ok();
+    subscription.topic = resolve_topic(
+        subscription.topic.as_deref(),
+        &cfg.topic,
+        allowed_env.as_deref(),
+    );
     if state.rate_limited(format!("apns-subscribe:{user_id}"), 60, 3600) {
         return Err(ApiError::new(
             "Too many attempts, please try again later",
@@ -260,28 +311,68 @@ fn provider_token(config: &Config, issued_at: i64) -> String {
     format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
 }
 
-static PROVIDER_TOKEN: Mutex<Option<(String, i64)>> = Mutex::new(None);
+#[derive(Default)]
+struct ProviderTokenState {
+    cached: Option<(String, i64)>,
+    last_refresh_at: Option<i64>,
+}
+
+static PROVIDER_TOKEN: Mutex<ProviderTokenState> = Mutex::new(ProviderTokenState {
+    cached: None,
+    last_refresh_at: None,
+});
 
 /// The cached provider token, renewed after 50 minutes.
-fn current_provider_token(config: &Config) -> String {
-    let now = chrono::Utc::now().timestamp();
-    let mut cached = PROVIDER_TOKEN
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match cached.as_ref() {
+fn current_provider_token_at(state: &mut ProviderTokenState, config: &Config, now: i64) -> String {
+    match state.cached.as_ref() {
         Some((token, issued_at)) if now - issued_at < PROVIDER_TOKEN_SECONDS => token.clone(),
         _ => {
             let token = provider_token(config, now);
-            *cached = Some((token.clone(), now));
+            state.cached = Some((token.clone(), now));
             token
         }
     }
 }
 
-fn forget_provider_token() {
-    *PROVIDER_TOKEN
+fn current_provider_token(config: &Config) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let mut state = PROVIDER_TOKEN
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    current_provider_token_at(&mut state, config, now)
+}
+
+/// Refreshes the provider token after an APNs 403 rejection, respecting a
+/// cooldown so bursts of rejections never trigger repeated JWT generation.
+fn refresh_provider_token_with_cooldown(
+    state: &mut ProviderTokenState,
+    config: &Config,
+    failed_token: &str,
+    now: i64,
+) -> Option<String> {
+    if let Some((current, _)) = state.cached.as_ref()
+        && current != failed_token
+    {
+        return Some(current.clone());
+    }
+    if state
+        .last_refresh_at
+        .is_some_and(|last| now - last < PROVIDER_REFRESH_COOLDOWN_SECONDS)
+    {
+        return None;
+    }
+    let token = provider_token(config, now);
+    state.cached = Some((token.clone(), now));
+    state.last_refresh_at = Some(now);
+    Some(token)
+}
+
+fn try_refresh_provider_token(config: &Config, failed_token: &str) -> Option<String> {
+    let now = chrono::Utc::now().timestamp();
+    let mut state = PROVIDER_TOKEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    refresh_provider_token_with_cooldown(&mut state, config, failed_token, now)
 }
 
 fn client() -> &'static reqwest::Client {
@@ -349,19 +440,19 @@ async fn targets(
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    let default_topic = config()
-        .map(|config| config.topic.as_str())
-        .unwrap_or(DEFAULT_TOPIC);
+    let default_topic = default_topic_setting();
+    let allowed_env = std::env::var("APNS_ALLOWED_TOPICS").ok();
     rows.iter()
-        .map(|row| Target {
-            token: row.try_get("token").unwrap_or_default(),
-            session: row.try_get("session_hash").unwrap_or_default(),
-            environment: row.try_get("environment").unwrap_or_default(),
-            topic: row
-                .try_get::<Option<String>, _>("topic")
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| default_topic.to_owned()),
+        .map(|row| {
+            let stored = row.try_get::<Option<String>, _>("topic").ok().flatten();
+            let topic = resolve_topic(stored.as_deref(), &default_topic, allowed_env.as_deref())
+                .unwrap_or_else(|| default_topic.clone());
+            Target {
+                token: row.try_get("token").unwrap_or_default(),
+                session: row.try_get("session_hash").unwrap_or_default(),
+                environment: row.try_get("environment").unwrap_or_default(),
+                topic,
+            }
         })
         .collect()
 }
@@ -371,6 +462,25 @@ async fn deliver(pool: &SqlitePool, targets: &[Target], push: &Push) {
     let Some(config) = config() else {
         return;
     };
+    deliver_with(pool, config, targets, push, |target| {
+        format!(
+            "https://{}/3/device/{}",
+            host(&target.environment),
+            target.token
+        )
+    })
+    .await;
+}
+
+async fn deliver_with<F>(
+    pool: &SqlitePool,
+    config: &Config,
+    targets: &[Target],
+    push: &Push,
+    url_for: F,
+) where
+    F: Fn(&Target) -> String,
+{
     let body = push.payload.to_string();
     for target in targets {
         // VoIP pushes go to the app's VoIP topic.
@@ -379,61 +489,70 @@ async fn deliver(pool: &SqlitePool, targets: &[Target], push: &Push) {
         } else {
             target.topic.clone()
         };
-        let mut request = client()
-            .post(format!(
-                "https://{}/3/device/{}",
-                host(&target.environment),
-                target.token
-            ))
-            .header(
-                "authorization",
-                format!("bearer {}", current_provider_token(config)),
-            )
-            .header("apns-topic", topic)
-            .header("apns-push-type", push.push_type)
-            .header("apns-priority", push.priority.to_string())
-            .header("apns-expiration", push.expiration.to_string())
-            .header("content-type", "application/json")
-            .body(body.clone());
-        if let Some(collapse_id) = &push.collapse_id {
-            request = request.header("apns-collapse-id", collapse_id);
-        }
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(error = %error.without_url(), "sending APNs push failed");
-                continue;
+        let url = url_for(target);
+        let mut retried_auth = false;
+        loop {
+            let provider_jwt = current_provider_token(config);
+            let mut request = client()
+                .post(&url)
+                .header("authorization", format!("bearer {provider_jwt}"))
+                .header("apns-topic", &topic)
+                .header("apns-push-type", push.push_type)
+                .header("apns-priority", push.priority.to_string())
+                .header("apns-expiration", push.expiration.to_string())
+                .header("content-type", "application/json")
+                .body(body.clone());
+            if let Some(collapse_id) = &push.collapse_id {
+                request = request.header("apns-collapse-id", collapse_id);
             }
-        };
-        let status = response.status();
-        if status.is_success() {
-            let _ = sqlx::query("UPDATE apns_tokens SET last_used_at=? WHERE token=?")
-                .bind(super::auth::now_iso())
-                .bind(&target.token)
-                .execute(pool)
-                .await;
-            continue;
-        }
-        let reason = response
-            .bytes()
-            .await
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .and_then(|reply| reply.get("reason")?.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        match (status.as_u16(), reason.as_str()) {
-            // Gone: the app was removed or the token replaced.
-            (410, _) | (_, "BadDeviceToken" | "Unregistered") => {
-                let _ = sqlx::query("DELETE FROM apns_tokens WHERE token=?")
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(error = %error.without_url(), "sending APNs push failed");
+                    break;
+                }
+            };
+            let status = response.status();
+            if status.is_success() {
+                let _ = sqlx::query("UPDATE apns_tokens SET last_used_at=? WHERE token=?")
+                    .bind(super::auth::now_iso())
                     .bind(&target.token)
                     .execute(pool)
                     .await;
+                break;
             }
-            (403, "ExpiredProviderToken" | "InvalidProviderToken") => {
-                forget_provider_token();
-                tracing::warn!(%reason, "APNs refused the provider token");
+            let reason = response
+                .bytes()
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|reply| reply.get("reason")?.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            match (status.as_u16(), reason.as_str()) {
+                // Gone or permanently invalid for this topic: remove the token.
+                (410, _)
+                | (_, "BadDeviceToken" | "Unregistered")
+                | (400, "DeviceTokenNotForTopic" | "TopicDisallowed") => {
+                    let _ = sqlx::query("DELETE FROM apns_tokens WHERE token=?")
+                        .bind(&target.token)
+                        .execute(pool)
+                        .await;
+                    break;
+                }
+                (403, "ExpiredProviderToken" | "InvalidProviderToken") => {
+                    if !retried_auth && try_refresh_provider_token(config, &provider_jwt).is_some()
+                    {
+                        retried_auth = true;
+                        continue;
+                    }
+                    tracing::warn!(%reason, "APNs refused the provider token");
+                    break;
+                }
+                _ => {
+                    tracing::warn!(%status, %reason, "APNs refused a notification");
+                    break;
+                }
             }
-            _ => tracing::warn!(%status, %reason, "APNs refused a notification"),
         }
     }
 }
@@ -933,6 +1052,181 @@ mod tests {
         if let Some(sub) = parsed {
             assert_ne!(sub.topic.as_deref(), Some("com.evil.spoofed"));
         }
+        assert_eq!(
+            resolve_topic(
+                Some("com.allowed.app"),
+                DEFAULT_TOPIC,
+                Some("com.allowed.app")
+            ),
+            Some("com.allowed.app".into())
+        );
+        assert_eq!(
+            resolve_topic(
+                Some("com.evil.spoofed"),
+                DEFAULT_TOPIC,
+                Some("com.allowed.app")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_token_refresh_respects_cooldown() {
+        let cfg = test_config();
+        let mut state = ProviderTokenState::default();
+        let t0 = current_provider_token_at(&mut state, &cfg, 1_700_000_000);
+        // First 403 triggers a single refresh and records cooldown start.
+        let t1 = refresh_provider_token_with_cooldown(&mut state, &cfg, &t0, 1_700_000_010)
+            .expect("first refresh should succeed");
+        assert_ne!(t1, t0);
+        // Second 403 within 20 minutes must be suppressed by cooldown.
+        assert!(
+            refresh_provider_token_with_cooldown(&mut state, &cfg, &t1, 1_700_000_020).is_none()
+        );
+        // Stale caller holding t0 gets the already-refreshed t1 without minting a new token.
+        assert_eq!(
+            refresh_provider_token_with_cooldown(&mut state, &cfg, &t0, 1_700_000_020).as_deref(),
+            Some(t1.as_str())
+        );
+        // After cooldown elapses (>= 20m), refresh is allowed again.
+        let t2 = refresh_provider_token_with_cooldown(
+            &mut state,
+            &cfg,
+            &t1,
+            1_700_000_010 + PROVIDER_REFRESH_COOLDOWN_SECONDS,
+        )
+        .expect("refresh after cooldown should succeed");
+        assert_ne!(t2, t1);
+    }
+
+    #[tokio::test]
+    async fn deliver_deletes_invalid_topic_tokens_and_guards_403_retries() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let (pool, dir) = database().await;
+        sqlx::query("INSERT INTO users(id,username) VALUES('alice','alice')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at,approved) VALUES('s1','alice','2999-01-01T00:00:00Z','now',1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let tok_not_topic = "aa".repeat(32);
+        let tok_disallowed = "bb".repeat(32);
+        let tok_403 = "cc".repeat(32);
+        for tok in [&tok_not_topic, &tok_disallowed, &tok_403] {
+            store(&pool, "alice", "s1", &subscription(tok, "alert"))
+                .await
+                .unwrap();
+        }
+
+        let hits_403 = Arc::new(AtomicUsize::new(0));
+        let hits_403_srv = hits_403.clone();
+        let t_not = tok_not_topic.clone();
+        let t_dis = tok_disallowed.clone();
+
+        let app = axum::Router::new().route(
+            "/3/device/{tok}",
+            axum::routing::post(
+                move |axum::extract::Path(tok): axum::extract::Path<String>| {
+                    let hits = hits_403_srv.clone();
+                    let t_not = t_not.clone();
+                    let t_dis = t_dis.clone();
+                    async move {
+                        if tok == t_not {
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({"reason": "DeviceTokenNotForTopic"})),
+                            )
+                        } else if tok == t_dis {
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({"reason": "TopicDisallowed"})),
+                            )
+                        } else {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            (
+                                StatusCode::FORBIDDEN,
+                                Json(json!({"reason": "ExpiredProviderToken"})),
+                            )
+                        }
+                    }
+                },
+            ),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let cfg = test_config();
+        let push = Push {
+            push_type: "alert",
+            priority: 10,
+            expiration: 0,
+            collapse_id: None,
+            payload: json!({"aps": {"alert": "hi"}}),
+        };
+        let targets_list = vec![
+            Target {
+                token: tok_not_topic.clone(),
+                session: "s1".into(),
+                environment: "sandbox".into(),
+                topic: DEFAULT_TOPIC.into(),
+            },
+            Target {
+                token: tok_disallowed.clone(),
+                session: "s1".into(),
+                environment: "sandbox".into(),
+                topic: DEFAULT_TOPIC.into(),
+            },
+            Target {
+                token: tok_403.clone(),
+                session: "s1".into(),
+                environment: "sandbox".into(),
+                topic: DEFAULT_TOPIC.into(),
+            },
+        ];
+
+        deliver_with(&pool, &cfg, &targets_list, &push, |t| {
+            format!("http://{addr}/3/device/{}", t.token)
+        })
+        .await;
+
+        server.abort();
+
+        for removed in [&tok_not_topic, &tok_disallowed] {
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM apns_tokens WHERE token=?")
+                .bind(removed)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "token {removed} should be deleted");
+        }
+        // 403 target should still exist and be retried at most once (<= 2 total requests).
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM apns_tokens WHERE token=?")
+            .bind(&tok_403)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, 1);
+        let attempts = hits_403.load(Ordering::SeqCst);
+        assert!(
+            attempts <= 2,
+            "expected <= 2 attempts on 403, got {attempts}"
+        );
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

@@ -16,6 +16,7 @@ const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 const MAX_AVATAR_PIXELS: u64 = 40_000_000;
 const MAX_AVATAR_DIMENSION: u32 = 16_384;
 const MAX_AVATAR_DECODE_ALLOC: u64 = 200 * 1024 * 1024;
+static AVATAR_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -66,8 +67,29 @@ async fn get_user_avatar(
             Err(_) => return db_error(),
         }
     }
-    let allowed = viewer_id == other_id || sqlx::query("SELECT 1 FROM friendships WHERE user_a=MIN(?,?) AND user_b=MAX(?,?) UNION SELECT 1 FROM chat_members a JOIN chat_members b ON a.chat_id=b.chat_id WHERE a.user_id=? AND b.user_id=? LIMIT 1")
-        .bind(&viewer_id).bind(&other_id).bind(&viewer_id).bind(&other_id).bind(&viewer_id).bind(&other_id).fetch_optional(&state.db).await.ok().flatten().is_some();
+    let allowed = if viewer_id == other_id {
+        true
+    } else {
+        match sqlx::query(
+            "SELECT 1 FROM friendships WHERE user_a=MIN(?,?) AND user_b=MAX(?,?)
+             UNION
+             SELECT 1 FROM chat_members a JOIN chat_members b ON a.chat_id=b.chat_id
+             WHERE a.user_id=? AND b.user_id=? AND a.hidden=0
+             LIMIT 1",
+        )
+        .bind(&viewer_id)
+        .bind(&other_id)
+        .bind(&viewer_id)
+        .bind(&other_id)
+        .bind(&viewer_id)
+        .bind(&other_id)
+        .fetch_optional(&state.db)
+        .await
+        {
+            Ok(row) => row.is_some(),
+            Err(_) => return db_error(),
+        }
+    };
     if !allowed {
         return error("No avatar uploaded", StatusCode::NOT_FOUND);
     }
@@ -131,13 +153,11 @@ async fn upload_group_avatar(
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
     let user_id: String = user.try_get("id").unwrap_or_default();
-    let chat=sqlx::query("SELECT c.type,c.owner_id,m.role FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE c.id=? AND m.user_id=?").bind(&chat_id).bind(&user_id).fetch_optional(&state.db).await;
+    let chat=sqlx::query("SELECT c.type,m.role FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE c.id=? AND m.user_id=?").bind(&chat_id).bind(&user_id).fetch_optional(&state.db).await;
     match chat {
         Ok(Some(row))
             if row.try_get::<String, _>("type").ok().as_deref() == Some("group")
-                && (row.try_get::<String, _>("role").ok().as_deref() == Some("owner")
-                    || row.try_get::<String, _>("owner_id").ok().as_deref()
-                        == Some(user_id.as_str())) => {}
+                && row.try_get::<String, _>("role").ok().as_deref() == Some("owner") => {}
         Ok(Some(_)) => return error("Only the group owner can do this", StatusCode::FORBIDDEN),
         Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
         Err(_) => return db_error(),
@@ -171,13 +191,11 @@ async fn delete_group_avatar(
         Err(e) => return axum::response::IntoResponse::into_response(e),
     };
     let user_id: String = user.try_get("id").unwrap_or_default();
-    let chat=sqlx::query("SELECT c.type,c.owner_id,m.role FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE c.id=? AND m.user_id=?").bind(&chat_id).bind(&user_id).fetch_optional(&state.db).await;
+    let chat=sqlx::query("SELECT c.type,m.role FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE c.id=? AND m.user_id=?").bind(&chat_id).bind(&user_id).fetch_optional(&state.db).await;
     match chat {
         Ok(Some(row))
             if row.try_get::<String, _>("type").ok().as_deref() == Some("group")
-                && (row.try_get::<String, _>("role").ok().as_deref() == Some("owner")
-                    || row.try_get::<String, _>("owner_id").ok().as_deref()
-                        == Some(user_id.as_str())) => {}
+                && row.try_get::<String, _>("role").ok().as_deref() == Some("owner") => {}
         Ok(Some(_)) => return error("Only the group owner can do this", StatusCode::FORBIDDEN),
         Ok(None) => return error("Chat not found", StatusCode::NOT_FOUND),
         Err(_) => return db_error(),
@@ -205,12 +223,11 @@ async fn delete_group_avatar(
 
 async fn parse_upload(mut multipart: Multipart) -> ApiResult<Vec<u8>> {
     let mut raw = None;
-    while let Some(field) = multipart.next_field().await.map_err(|_| {
-        ApiError::new(
-            "Wrong filetype (png, jpg, gif or webp)",
-            StatusCode::BAD_REQUEST,
-        )
-    })? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| ApiError::new("Wrong filetype (png, jpg or webp)", StatusCode::BAD_REQUEST))?
+    {
         if field.name() == Some("avatar_img") {
             if field.file_name().is_none_or(str::is_empty) {
                 return Err(ApiError::new("No selected file", StatusCode::BAD_REQUEST));
@@ -229,18 +246,17 @@ async fn parse_upload(mut multipart: Multipart) -> ApiResult<Vec<u8>> {
         }
     }
     let raw = raw.ok_or_else(|| ApiError::new("No selected file", StatusCode::BAD_REQUEST))?;
+    let _permit = AVATAR_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|_| ApiError::new("Image processing failed", StatusCode::INTERNAL_SERVER_ERROR))?;
     tokio::task::spawn_blocking(move || process_avatar_bytes(&raw))
         .await
         .map_err(|_| ApiError::new("Image processing failed", StatusCode::INTERNAL_SERVER_ERROR))?
 }
 
 fn process_avatar_bytes(raw: &[u8]) -> ApiResult<Vec<u8>> {
-    let bad_type = || {
-        ApiError::new(
-            "Wrong filetype (png, jpg, gif or webp)",
-            StatusCode::BAD_REQUEST,
-        )
-    };
+    let bad_type = || ApiError::new("Wrong filetype (png, jpg or webp)", StatusCode::BAD_REQUEST);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_AVATAR_DIMENSION);
     limits.max_image_height = Some(MAX_AVATAR_DIMENSION);
